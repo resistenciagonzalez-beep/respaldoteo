@@ -688,25 +688,24 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       });
     }
 
-    if (finalDebe === 0) {
-      setSheet((prev) => {
-        const updatedPlayers = prev.players.map((p) =>
-          p.id === editingPlayerBalance.id || p.name.toLowerCase().trim() === pNameKey
-            ? { ...p, paid: true }
-            : p
-        );
-        const updatedColumns = prev.columns.map((col) => ({
-          ...col,
-          cells: col.cells.map((cell) =>
-            cell.playerId === editingPlayerBalance.id ||
-            (cell.playerName && cell.playerName.toLowerCase().trim() === pNameKey)
-              ? { ...cell, isPaid: true }
-              : cell
-          ),
-        }));
-        return { ...prev, players: updatedPlayers, columns: updatedColumns };
-      });
-    }
+    // Consolidate current cells so partial or full payments don't double count board cells
+    setSheet((prev) => {
+      const updatedPlayers = prev.players.map((p) =>
+        p.id === editingPlayerBalance.id || p.name.toLowerCase().trim() === pNameKey
+          ? { ...p, paid: finalDebe === 0 }
+          : p
+      );
+      const updatedColumns = prev.columns.map((col) => ({
+        ...col,
+        cells: col.cells.map((cell) =>
+          cell.playerId === editingPlayerBalance.id ||
+          (cell.playerName && cell.playerName.toLowerCase().trim() === pNameKey)
+            ? { ...cell, isPaid: true }
+            : cell
+        ),
+      }));
+      return { ...prev, players: updatedPlayers, columns: updatedColumns };
+    });
 
     setPlayerCumulativeWinnings((prev) => {
       const next = {
@@ -739,6 +738,27 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       }
       return next;
     });
+
+    // Record transaction history
+    try {
+      const historyRaw = localStorage.getItem('bingo_player_balance_history') || '[]';
+      const historyArr = JSON.parse(historyRaw);
+      historyArr.unshift({
+        id: `tx_${Date.now()}`,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        date: new Date().toISOString().split('T')[0],
+        playerId: editingPlayerBalance.id,
+        playerName: editingPlayerBalance.name,
+        gano: finalGano,
+        debe: finalDebe,
+        saldo: finalGano - finalDebe,
+        operator: currentUser?.name || 'Operador',
+      });
+      // Keep last 100 transactions
+      localStorage.setItem('bingo_player_balance_history', JSON.stringify(historyArr.slice(0, 100)));
+    } catch (e) {
+      console.warn('Balance history save warning:', e);
+    }
 
     notify(`Saldo de "${editingPlayerBalance.name}" actualizado: Ganó $${finalGano.toFixed(2)}, Debe $${finalDebe.toFixed(2)}, Total: $${(finalGano - finalDebe).toFixed(2)}`);
     setEditingPlayerBalance(null);
@@ -3088,15 +3108,33 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                     placeholder="0.00"
                     className="w-full px-2.5 py-1.5 rounded-lg bg-white border border-amber-300 font-black text-center text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
                   />
-                  <div className="flex gap-1 pt-1">
+                  <div className="flex flex-wrap gap-1 pt-1">
                     <button
                       type="button"
                       onClick={() => setManualDebeStr('0')}
-                      className="flex-1 py-0.5 text-[9px] font-bold bg-white text-amber-800 rounded border border-amber-200 hover:bg-amber-100 cursor-pointer"
-                      title="Marca como liquidada la deuda"
+                      className="px-2 py-0.5 text-[9.5px] font-black bg-emerald-100 text-emerald-900 rounded border border-emerald-300 hover:bg-emerald-200 cursor-pointer"
+                      title="Marca la deuda completa como pagada ($0.00)"
                     >
-                      Abonar ($0)
+                      Pagar Todo ($0)
                     </button>
+                    {[1, 2, 5, 10].map((amt) => {
+                      const curVal = parseFloat(manualDebeStr.replace(',', '.')) || 0;
+                      if (curVal <= 0) return null;
+                      return (
+                        <button
+                          key={amt}
+                          type="button"
+                          onClick={() => {
+                            const remaining = Math.max(0, curVal - amt);
+                            setManualDebeStr(remaining.toFixed(2));
+                          }}
+                          className="px-1.5 py-0.5 text-[9px] font-bold bg-white text-amber-900 rounded border border-amber-200 hover:bg-amber-100 cursor-pointer"
+                          title={`Abonar $${amt} a la deuda`}
+                        >
+                          - ${amt}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               </div>
