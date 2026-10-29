@@ -3,34 +3,18 @@ import { Ball, BingoMode, GameSettings, SpeedPreset, AppUser, GameSequenceItem, 
 import { MiniBallsTumbler } from './MiniBallsTumbler';
 import { PlatformColorBar } from './PlatformColorBar';
 import {
-  ArrowLeft,
   Volume2,
   VolumeX,
   Megaphone,
   MicOff,
   Maximize2,
   Minimize2,
-  SlidersHorizontal,
-  Dices,
-  RotateCcw,
   RefreshCw,
-  Play,
-  Pause,
   PauseCircle,
-  ChevronRight,
-  Trophy,
-  Crown,
-  PartyPopper,
   Zap,
-  Flame,
-  Sparkles,
-  Smartphone,
   SmartphoneCharging,
-  Monitor,
   Tv2,
-  FileSpreadsheet,
   Table2,
-  Gamepad2,
   CircleDot,
   Grid3X3,
   Settings2,
@@ -97,7 +81,6 @@ export const BingoEsFormat: React.FC<BingoEsFormatProps> = ({
   isFinished,
   settings,
   isFullscreen,
-  drawOrder,
   completedRowLeaders = [],
   ternaRowLeader = null,
   ternaBallNumber = null,
@@ -106,15 +89,10 @@ export const BingoEsFormat: React.FC<BingoEsFormatProps> = ({
   gameObjectives = { bingo: true, terna: false, ambo: false },
   onToggleObjective,
   currentUser,
-  gameSequence = [],
-  onAddSequenceItem,
-  onClearSequence,
-  onToggleDrawOrder,
   onDrawNext,
   onTogglePlay,
   onReset,
   onOpenModeSelect,
-  onBingo,
   onToggleVoice,
   onToggleSfx,
   onToggleFullscreen,
@@ -125,19 +103,15 @@ export const BingoEsFormat: React.FC<BingoEsFormatProps> = ({
   onOpenAdmin,
   onOpenLogin,
   onChangeSpeed,
-  onOpenGameSnapshot,
-  onStartNewGame,
   onOpenSavedGamesGallery,
   savedGamesCount,
   platformColor,
   onSelectPlatformColor,
 }) => {
-  const [bingoPoints] = useState<number>(100.0);
   // Default to Vertical orientation for phone recording as requested
   const [orientation, setOrientation] = useState<'vertical' | 'horizontal'>('vertical');
 
   const isAdmin = currentUser?.role === 'admin';
-  const isOperator = currentUser?.role === 'operator';
   const assignedMode = currentUser?.assignedMode || (isAdmin ? 'all' : (mode || '75'));
 
   const isPastelOrange = settings.theme === 'pastel-orange';

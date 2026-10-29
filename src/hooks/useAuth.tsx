@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, createContext, useContext } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo, createContext, useContext } from 'react';
 import {
   User as FirebaseUser,
   signInWithEmailAndPassword,
@@ -25,6 +25,13 @@ import { AppUser, ActivityLogItem, BingoMode } from '../types';
 import { safeSetItem, cleanupLocalStorageForQuota } from '../utils/safeStorage';
 import { getStoredUsers, saveStoredUsers } from '../utils/userStorage';
 import { hashPassword, verifyPassword, sanitizeInput, stripSensitiveUserData } from '../utils/security';
+import { getCurrentLocalDateKey } from '../utils/savedGamesStorage';
+
+interface AuthErrorLike {
+  code?: string | number;
+  name?: string;
+  message?: string;
+}
 
 interface AuthContextType {
   currentUser: AppUser | null;
@@ -58,12 +65,19 @@ export function useAuthProvider(): AuthContextType {
           return stripSensitiveUserData(parsed) as AppUser;
         }
       }
-    } catch {}
+    } catch (err) {
+      console.warn('Error reading stored user session:', err);
+    }
     return null;
   });
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+
+  const currentUserRef = useRef<AppUser | null>(currentUser);
+  currentUserRef.current = currentUser;
+
+  const currentUserId = currentUser?.id;
 
   // Real-time Firestore sync with the current user's document
   useEffect(() => {
@@ -72,26 +86,27 @@ export function useAuthProvider(): AuthContextType {
       setLoading(false);
     }, 1200);
 
-    if (!currentUser?.id) {
+    if (!currentUserId) {
       setLoading(false);
       clearTimeout(safetyTimer);
       return;
     }
 
-    const userDocRef = doc(db, 'users', currentUser.id);
+    const userDocRef = doc(db, 'users', currentUserId);
     const unsubscribeDoc = onSnapshot(
       userDocRef,
       (snap) => {
         if (snap.exists()) {
           const data = snap.data();
+          const fallbackUser = currentUserRef.current;
           const updatedUser: AppUser = {
             id: snap.id,
             uid: snap.id,
-            name: data.name || currentUser.name || 'Operador',
-            email: data.email || currentUser.email || '',
+            name: data.name || fallbackUser?.name || 'Operador',
+            email: data.email || fallbackUser?.email || '',
             role: data.role === 'admin' ? 'admin' : 'operator',
             status: data.status === 'suspended' ? 'suspended' : 'active',
-            joinedDate: data.joinedDate || currentUser.joinedDate || new Date().toISOString().split('T')[0],
+            joinedDate: data.joinedDate || fallbackUser?.joinedDate || getCurrentLocalDateKey(),
             createdAt: data.createdAt,
             lastActive: data.lastActive || 'En línea',
             gamesPlayed: data.gamesPlayed || 0,
@@ -104,7 +119,9 @@ export function useAuthProvider(): AuthContextType {
             setCurrentUser(null);
             try {
               localStorage.removeItem('bingo_current_user_session');
-            } catch {}
+            } catch (rmErr) {
+              console.warn('Error removing suspended session:', rmErr);
+            }
             setError('Esta cuenta ha sido suspendida por un administrador.');
           } else {
             const cleanUser = stripSensitiveUserData(updatedUser) as AppUser;
@@ -124,13 +141,13 @@ export function useAuthProvider(): AuthContextType {
       clearTimeout(safetyTimer);
       unsubscribeDoc();
     };
-  }, [currentUser?.id]);
+  }, [currentUserId]);
 
-  // Firebase Auth state listener (if enabled in project)
+  // Firebase Auth state listener (registered once on mount)
   useEffect(() => {
     const unsubscribeAuth = onAuthStateChanged(auth, async (fbUser) => {
       setFirebaseUser(fbUser);
-      if (fbUser && !currentUser) {
+      if (fbUser && !currentUserRef.current) {
         try {
           const userRef = doc(db, 'users', fbUser.uid);
           const snap = await getDoc(userRef);
@@ -143,7 +160,7 @@ export function useAuthProvider(): AuthContextType {
               email: data.email || fbUser.email || '',
               role: data.role === 'admin' ? 'admin' : 'operator',
               status: data.status === 'suspended' ? 'suspended' : 'active',
-              joinedDate: data.joinedDate || new Date().toISOString().split('T')[0],
+              joinedDate: data.joinedDate || getCurrentLocalDateKey(),
               createdAt: data.createdAt,
               lastActive: 'En línea',
               gamesPlayed: data.gamesPlayed || 0,
@@ -261,77 +278,132 @@ export function useAuthProvider(): AuthContextType {
           const userCredential = await signInWithEmailAndPassword(auth, cleanInput, pass);
           const uid = userCredential.user.uid;
           const userDocRef = doc(db, 'users', uid);
-          const userDoc = await getDoc(userDocRef);
+          let userDoc = await getDoc(userDocRef);
+          let data: Record<string, any> | null | undefined = userDoc.exists() ? userDoc.data() : null;
 
-          if (userDoc.exists()) {
-            const data = userDoc.data();
-            if (data.status === 'suspended') {
-              await signOut(auth);
-              const msg = 'Esta cuenta ha sido suspendida. Contacte a un administrador.';
-              setError(msg);
-              return { success: false, error: msg };
-            }
-
-            const isEmailAdmin = ADMIN_EMAILS.includes(cleanInput.toLowerCase());
-            const assignedRole = (isEmailAdmin || data.role === 'admin') ? 'admin' : 'operator';
-
-            const profile: AppUser = {
-              id: uid,
-              uid,
-              name: data.name || userCredential.user.displayName || 'Operador',
-              email: cleanInput,
-              role: assignedRole,
-              status: 'active',
-              joinedDate: data.joinedDate || new Date().toISOString().split('T')[0],
-              createdAt: data.createdAt,
-              lastActive: 'Hoy, hace un momento',
-              gamesPlayed: data.gamesPlayed || 0,
-              notes: data.notes || '',
-              avatarColor: data.avatarColor || (assignedRole === 'admin' ? '#f59e0b' : '#10b981'),
-              assignedMode: data.assignedMode || (assignedRole === 'admin' ? 'all' : '75'),
-            };
-
+          // If document doesn't exist by uid, check if it was stored by email or custom ID
+          if (!data) {
             try {
-              await updateDoc(userDocRef, {
+              const emailSnap = await getDocs(query(collection(db, 'users'), where('email', '==', cleanInput)));
+              if (!emailSnap.empty) {
+                userDoc = emailSnap.docs[0];
+                data = userDoc.data();
+              }
+            } catch (e) {
+              console.warn('Could not query user by email:', e);
+            }
+          }
+
+          const isEmailAdmin = ADMIN_EMAILS.includes(cleanInput.toLowerCase());
+          const assignedRole = (isEmailAdmin || (data && data.role === 'admin')) ? 'admin' : 'operator';
+
+          if (data && data.status === 'suspended') {
+            await signOut(auth);
+            const msg = 'Esta cuenta ha sido suspendida. Contacte a un administrador.';
+            setError(msg);
+            return { success: false, error: msg };
+          }
+
+          const profile: AppUser = {
+            id: userDoc.exists() ? userDoc.id : uid,
+            uid,
+            name: data?.name || userCredential.user.displayName || (isEmailAdmin ? 'Administrador' : 'Operador'),
+            email: cleanInput,
+            role: assignedRole,
+            status: 'active',
+            joinedDate: data?.joinedDate || getCurrentLocalDateKey(),
+            createdAt: data?.createdAt || new Date().toISOString(),
+            lastActive: 'Hoy, hace un momento',
+            gamesPlayed: data?.gamesPlayed || 0,
+            notes: data?.notes || (isEmailAdmin ? 'Administrador del sistema' : ''),
+            avatarColor: data?.avatarColor || (assignedRole === 'admin' ? '#f59e0b' : '#10b981'),
+            assignedMode: data?.assignedMode || (assignedRole === 'admin' ? 'all' : '75'),
+          };
+
+          try {
+            if (userDoc.exists()) {
+              await updateDoc(doc(db, 'users', userDoc.id), {
                 lastActive: 'Hoy, hace un momento',
                 lastActiveTimestamp: serverTimestamp(),
               });
-            } catch {}
-
-            const cleanProfile = stripSensitiveUserData(profile) as AppUser;
-            setCurrentUser(cleanProfile);
-            safeSetItem('bingo_current_user_session', JSON.stringify(cleanProfile));
-            saveStoredUsers([...localUsers.filter((u) => u.id !== profile.id), cleanProfile]);
-            return { success: true };
+            } else {
+              await setDoc(userDocRef, {
+                ...profile,
+                createdAtTimestamp: serverTimestamp(),
+              });
+            }
+          } catch (updErr) {
+            console.warn('Could not update lastActive timestamp:', updErr);
           }
-        } catch (authErr: any) {
-          console.log('Firebase Auth attempt:', authErr.code || authErr.message);
+
+          const cleanProfile = stripSensitiveUserData(profile) as AppUser;
+          setCurrentUser(cleanProfile);
+          safeSetItem('bingo_current_user_session', JSON.stringify(cleanProfile));
+          saveStoredUsers([...localUsers.filter((u) => u.id !== profile.id), cleanProfile]);
+          return { success: true };
+        } catch (authErr) {
+          // If admin email, try creating account in Firebase Auth if it doesn't exist yet
+          const authErrCode = (authErr as AuthErrorLike)?.code;
+          if (
+            ADMIN_EMAILS.includes(cleanInput) &&
+            (authErrCode === 'auth/user-not-found' || authErrCode === 'auth/invalid-credential')
+          ) {
+            try {
+              const newCred = await createUserWithEmailAndPassword(auth, cleanInput, pass);
+              const newUid = newCred.user.uid;
+              const adminProfile: AppUser = {
+                id: newUid,
+                uid: newUid,
+                name: cleanInput.includes('genesis') ? 'Génesis Vargas' : 'Administrador',
+                email: cleanInput,
+                role: 'admin',
+                status: 'active',
+                joinedDate: getCurrentLocalDateKey(),
+                createdAt: new Date().toISOString(),
+                lastActive: 'En línea',
+                gamesPlayed: 0,
+                notes: 'Administrador del sistema',
+                avatarColor: '#f59e0b',
+                assignedMode: 'all',
+              };
+              await setDoc(doc(db, 'users', newUid), {
+                ...adminProfile,
+                createdAtTimestamp: serverTimestamp(),
+              });
+              const cleanProfile = stripSensitiveUserData(adminProfile) as AppUser;
+              setCurrentUser(cleanProfile);
+              safeSetItem('bingo_current_user_session', JSON.stringify(cleanProfile));
+              saveStoredUsers([...localUsers.filter((u) => u.email !== cleanInput), adminProfile]);
+              return { success: true };
+            } catch {
+              // Proceed to Firestore validation fallback
+            }
+          }
         }
       }
 
       // Fallback: Validate credentials against Cloud Firestore `users` collection
       try {
         const usersRef = collection(db, 'users');
-        let querySnapshot = cleanInput.includes('@')
+        const initialSnapshot = cleanInput.includes('@')
           ? await getDocs(query(usersRef, where('email', '==', cleanInput)))
           : await getDocs(query(usersRef, where('name', '==', rawInput)));
 
-        if (querySnapshot.empty && !cleanInput.includes('@')) {
+        let matchedUserDoc = initialSnapshot.empty ? undefined : initialSnapshot.docs[0];
+
+        if (!matchedUserDoc && !cleanInput.includes('@')) {
           const allDocs = await getDocs(usersRef);
-          const matchingDoc = allDocs.docs.find((d) => {
+          matchedUserDoc = allDocs.docs.find((d) => {
             const dat = d.data();
             return (
               dat.name?.trim().toLowerCase() === cleanInput ||
               dat.email?.toLowerCase() === cleanInput
             );
           });
-          if (matchingDoc) {
-            querySnapshot = { empty: false, docs: [matchingDoc] } as any;
-          }
         }
 
-        if (!querySnapshot.empty) {
-          const userDoc = querySnapshot.docs[0];
+        if (matchedUserDoc) {
+          const userDoc = matchedUserDoc;
           const data = userDoc.data();
 
           if (data.status === 'suspended') {
@@ -373,7 +445,7 @@ export function useAuthProvider(): AuthContextType {
             email: resolvedEmail,
             role: assignedRole,
             status: 'active',
-            joinedDate: data.joinedDate || new Date().toISOString().split('T')[0],
+            joinedDate: data.joinedDate || getCurrentLocalDateKey(),
             createdAt: data.createdAt,
             lastActive: 'Hoy, hace un momento',
             gamesPlayed: data.gamesPlayed || 0,
@@ -388,7 +460,9 @@ export function useAuthProvider(): AuthContextType {
               lastActive: 'Hoy, hace un momento',
               lastActiveTimestamp: serverTimestamp(),
             });
-          } catch {}
+          } catch (updErr) {
+            console.warn('Could not update user lastActive in Firestore:', updErr);
+          }
 
           const cleanProfile = stripSensitiveUserData(profile) as AppUser;
           setCurrentUser(cleanProfile);
@@ -411,7 +485,7 @@ export function useAuthProvider(): AuthContextType {
               passwordHash: hashedPassword,
               role: 'admin',
               status: 'active',
-              joinedDate: new Date().toISOString().split('T')[0],
+              joinedDate: getCurrentLocalDateKey(),
               createdAt: new Date().toISOString(),
               lastActive: 'En línea',
               gamesPlayed: 0,
@@ -424,7 +498,9 @@ export function useAuthProvider(): AuthContextType {
                 ...adminProfile,
                 createdAtTimestamp: serverTimestamp(),
               });
-            } catch {}
+            } catch (setAdminErr) {
+              console.warn('Could not persist initial admin doc to Firestore:', setAdminErr);
+            }
             const cleanProfile = stripSensitiveUserData(adminProfile) as AppUser;
             setCurrentUser(cleanProfile);
             safeSetItem('bingo_current_user_session', JSON.stringify(cleanProfile));
@@ -436,7 +512,8 @@ export function useAuthProvider(): AuthContextType {
         const msg = 'Usuario o contraseña incorrectos.';
         setError(msg);
         return { success: false, error: msg };
-      } catch (err: any) {
+      } catch (err: unknown) {
+        const errObj = err as AuthErrorLike | null;
         console.error('Login error:', err);
         cleanupLocalStorageForQuota();
 
@@ -456,19 +533,19 @@ export function useAuthProvider(): AuthContextType {
           }
         }
 
-        let msg = err?.message || 'Error al conectar con el servidor.';
+        let msg = errObj?.message || 'Error al conectar con el servidor.';
         if (
-          err?.name === 'QuotaExceededError' ||
-          err?.code === 22 ||
-          err?.code === 1014 ||
-          String(err?.message || '').toLowerCase().includes('quota')
+          errObj?.name === 'QuotaExceededError' ||
+          errObj?.code === 22 ||
+          errObj?.code === 1014 ||
+          String(errObj?.message || '').toLowerCase().includes('quota')
         ) {
           msg = 'El almacenamiento del navegador estaba saturado. Se ha liberado espacio automáticamente; por favor intenta presionar Iniciar Sesión de nuevo.';
-        } else if (err?.code === 'auth/too-many-requests') {
+        } else if (errObj?.code === 'auth/too-many-requests') {
           msg = 'Demasiados intentos fallidos seguidos. Por seguridad, la cuenta está en espera temporal. Intenta de nuevo en unos momentos.';
-        } else if (err?.code === 'resource-exhausted' || String(err?.message || '').includes('RESOURCE_EXHAUSTED')) {
+        } else if (errObj?.code === 'resource-exhausted' || String(errObj?.message || '').includes('RESOURCE_EXHAUSTED')) {
           msg = 'Límite temporal de consultas del servidor alcanzado. Espera unos instantes e inténtalo nuevamente.';
-        } else if (String(err?.message || '').includes('billing') || String(err?.message || '').includes('closed') || String(err?.message || '').includes('PERMISSION_DENIED')) {
+        } else if (String(errObj?.message || '').includes('billing') || String(errObj?.message || '').includes('closed') || String(errObj?.message || '').includes('PERMISSION_DENIED')) {
           msg = 'Comprueba tu conexión a la red o credenciales de acceso.';
         }
         setError(msg);
@@ -510,10 +587,10 @@ export function useAuthProvider(): AuthContextType {
         const user = userCredential.user;
         await updateProfile(user, { displayName: cleanName });
         userUid = user.uid;
-      } catch (authErr: any) {
-        console.log('Firebase Auth register attempt:', authErr.code || authErr.message);
+      } catch (authErr: unknown) {
+        const errObj = authErr as AuthErrorLike | null;
 
-        if (authErr.code === 'auth/email-already-in-use') {
+        if (errObj?.code === 'auth/email-already-in-use') {
           const msg = 'Ya existe una cuenta registrada con este correo electrónico.';
           setError(msg);
           return { success: false, error: msg };
@@ -547,7 +624,7 @@ export function useAuthProvider(): AuthContextType {
           role: isInitialAdmin ? 'admin' : 'operator',
           assignedMode: chosenMode,
           status: 'active',
-          joinedDate: new Date().toISOString().split('T')[0],
+          joinedDate: getCurrentLocalDateKey(),
           createdAt: new Date().toISOString(),
           lastActive: 'Recién registrado',
           gamesPlayed: 0,
@@ -579,18 +656,19 @@ export function useAuthProvider(): AuthContextType {
         );
 
         return { success: true };
-      } catch (err: any) {
+      } catch (err: unknown) {
+        const errObj = err as AuthErrorLike | null;
         console.error('User register error:', err);
         cleanupLocalStorageForQuota();
-        let msg = err?.message || 'Error al completar el registro.';
+        let msg = errObj?.message || 'Error al completar el registro.';
         if (
-          err?.name === 'QuotaExceededError' ||
-          err?.code === 22 ||
-          err?.code === 1014 ||
-          String(err?.message || '').toLowerCase().includes('quota')
+          errObj?.name === 'QuotaExceededError' ||
+          errObj?.code === 22 ||
+          errObj?.code === 1014 ||
+          String(errObj?.message || '').toLowerCase().includes('quota')
         ) {
           msg = 'El almacenamiento del navegador estaba lleno. Se ha liberado espacio automáticamente; por favor intenta de nuevo.';
-        } else if (err?.code === 'auth/email-already-in-use') {
+        } else if (errObj?.code === 'auth/email-already-in-use') {
           msg = 'Este correo electrónico ya está registrado. Por favor selecciona Iniciar Sesión.';
         }
         setError(msg);
@@ -607,7 +685,9 @@ export function useAuthProvider(): AuthContextType {
       }
       try {
         await signOut(auth);
-      } catch {}
+      } catch (signOutErr) {
+        console.warn('Firebase signOut notice:', signOutErr);
+      }
       setCurrentUser(null);
       localStorage.removeItem('bingo_current_user_session');
     } catch (e) {
@@ -618,19 +698,34 @@ export function useAuthProvider(): AuthContextType {
   const isAdmin = currentUser?.role === 'admin';
   const isOperator = currentUser?.role === 'operator';
 
-  return {
-    currentUser,
-    firebaseUser,
-    loading,
-    error,
-    isAdmin,
-    isOperator,
-    login,
-    register,
-    logout,
-    logActivity,
-    clearError,
-  };
+  return useMemo(
+    () => ({
+      currentUser,
+      firebaseUser,
+      loading,
+      error,
+      isAdmin,
+      isOperator,
+      login,
+      register,
+      logout,
+      logActivity,
+      clearError,
+    }),
+    [
+      currentUser,
+      firebaseUser,
+      loading,
+      error,
+      isAdmin,
+      isOperator,
+      login,
+      register,
+      logout,
+      logActivity,
+      clearError,
+    ]
+  );
 }
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {

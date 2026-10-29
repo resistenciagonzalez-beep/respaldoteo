@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import {
   BingoSheetData,
   BingoSheetPlayer,
@@ -17,7 +17,6 @@ import { PlatformColorBar } from './PlatformColorBar';
 import {
   Printer,
   Trash2,
-  Camera,
   Check,
   Users,
   Grid,
@@ -28,21 +27,15 @@ import {
   Calculator,
   Edit3,
   Sparkles,
-  Smartphone,
   Maximize2,
   Minimize2,
   Palette,
   Layers,
   ShieldCheck,
   UserPlus,
-  Lock,
-  LogIn,
-  Plus,
-  Minus,
   X,
   Coins,
   Trophy,
-  Award,
   Table2,
   RotateCcw,
   ChevronUp,
@@ -53,6 +46,7 @@ import {
   DollarSign,
   Type,
   EyeOff,
+  BookmarkCheck,
 } from 'lucide-react';
 import { SheetBackgroundSettings } from './SheetBackgroundSettings';
 import { SHEET_BACKGROUND_PRESETS } from '../utils/sheetBackgroundPresets';
@@ -60,18 +54,18 @@ import { GameSequenceBar } from './GameSequenceBar';
 import { BingoWinningRowBanner } from './BingoWinningRowBanner';
 import { BingoTraditional90Sheet } from './BingoTraditional90Sheet';
 import { GameSheetSnapshotModal } from './GameSheetSnapshotModal';
-import { VIBRANT_PLAYER_COLORS, FLUORESCENT_TEXT_COLORS, getContrastTextColor } from '../utils/playerColors';
+import { VIBRANT_PLAYER_COLORS, FLUORESCENT_TEXT_COLORS } from '../utils/playerColors';
 import {
-  getPreviousPlayerCells75,
-  getPreviousPlayerRowValues75,
   savePreviousGameSheet75,
   getPreviousGameResultItem,
+  hasAssignedCells75,
 } from '../utils/gameSnapshotStorage';
+import { executeMismosReconstruction, getImmediatelyPrecedingSheet75 } from '../utils/mismosEngine';
 import {
   getOperatorActiveLines,
 } from '../utils/shiftsStorage';
 import { safeSetItem } from '../utils/safeStorage';
-import { getOperatorStorageKey } from '../utils/savedGamesStorage';
+import { getOperatorStorageKey, getCurrentLocalDateKey, getGameNormalizedDateKey } from '../utils/savedGamesStorage';
 import { sanitizePlayerName } from '../utils/security';
 
 interface BingoSheetBuilderProps {
@@ -82,6 +76,7 @@ interface BingoSheetBuilderProps {
   completedRowLeaders?: number[];
   winningBall?: number | null;
   gameSequence?: GameSequenceItem[];
+  todaySavedGames?: GameSequenceItem[];
   onAddSequenceItem?: (ballNumber: number, rowLeader?: number, ternaBall?: number) => void;
   onClearSequence?: () => void;
   mode?: BingoMode;
@@ -99,7 +94,9 @@ interface BingoSheetBuilderProps {
   onToggleAutoHighlightDrawn?: (val: boolean) => void;
   onOpenGameSnapshot?: (item: GameSequenceItem) => void;
   onStartNewGame?: () => void;
-  onSaveCurrentGame?: () => void;
+  onSaveCurrentGame?: (
+    sheet75Override?: BingoSheetData
+  ) => Promise<{ success: boolean; verified: boolean; game: GameSequenceItem }> | void;
   currentBall?: Ball | null;
   onDrawBall?: () => void;
   isPlaying?: boolean;
@@ -246,15 +243,6 @@ const getAdaptiveCellNameStyle = (
   };
 };
 
-const getCellNameStyle = (
-  name?: string,
-  colCount: number = 6,
-  isExpanded: boolean = false,
-  customTextColor?: string
-): string => {
-  return getAdaptiveCellNameStyle(name, colCount, isExpanded, 100, customTextColor).className;
-};
-
 /**
  * Generates a vibrant, high-intensity neon version of the player's/cell's assigned color.
  * Preserves the exact hue/family of the cell but ensures 100% saturation and optimal neon luminescence.
@@ -296,12 +284,9 @@ const getVibrantNeonColor = (colorStr?: string): string => {
   const max = Math.max(r, g, b);
   const min = Math.min(r, g, b);
   let h = 0;
-  let s = 0;
-  const l = (max + min) / 2;
 
   if (max !== min) {
     const d = max - min;
-    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
     switch (max) {
       case r:
         h = (g - b) / d + (g < b ? 6 : 0);
@@ -334,11 +319,11 @@ const STORAGE_KEY = 'bingo_custom_sheet_data_v5';
 export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
   onBackToGame,
   currentUser,
-  onOpenLogin,
   onOpenAdmin,
   completedRowLeaders = [],
   winningBall = null,
   gameSequence = [],
+  todaySavedGames = [],
   onAddSequenceItem,
   onClearSequence,
   mode = '75',
@@ -368,16 +353,10 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
   platformColor,
   onSelectPlatformColor,
   currentMatchRound = 1,
-  currentMatchAmboBall = null,
   currentMatchAmboRow = null,
-  currentMatchTernaBall = null,
-  currentMatchBingoBall = null,
   currentMatchTernaRow = null,
-  currentMatchBingoRow = null,
   gameObjectives,
   onToggleObjective,
-  isFullscreen = false,
-  onToggleFullscreen,
 }) => {
   // Sheet type selector: 15-row Multipliers OR Traditional 90 Triples (from photo)
   const isAdmin = currentUser?.role === 'admin';
@@ -402,7 +381,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     try {
       const saved = localStorage.getItem('bingo_top_adjust_bar_visible');
       return saved !== null ? JSON.parse(saved) : true;
-    } catch {
+    } catch (err) {
+      console.warn('Error reading bingo_top_adjust_bar_visible:', err);
       return true;
     }
   });
@@ -411,8 +391,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     setIsTopAdjustmentBarVisible(visible);
     try {
       localStorage.setItem('bingo_top_adjust_bar_visible', JSON.stringify(visible));
-    } catch {
-      // Ignore localStorage errors
+    } catch (err) {
+      console.warn('Error saving bingo_top_adjust_bar_visible:', err);
     }
   };
 
@@ -428,7 +408,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       try {
         const saved = localStorage.getItem('bingo_sheet_cell_font_scale');
         return saved ? Number(saved) : 100;
-      } catch {
+      } catch (err) {
+        console.warn('Error reading bingo_sheet_cell_font_scale:', err);
         return 100;
       }
     }
@@ -441,8 +422,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     if (typeof window !== 'undefined') {
       try {
         localStorage.setItem('bingo_sheet_cell_font_scale', String(clamped));
-      } catch {
-        // ignore
+      } catch (err) {
+        console.warn('Error saving bingo_sheet_cell_font_scale:', err);
       }
     }
   };
@@ -454,7 +435,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
         const key = getOperatorStorageKey('bingo_sheet_custom_sequence', currentUser);
         const saved = localStorage.getItem(key) || localStorage.getItem('bingo_sheet_custom_sequence');
         return saved ? JSON.parse(saved) : {};
-      } catch {
+      } catch (err) {
+        console.warn('Error reading bingo_sheet_custom_sequence:', err);
         return {};
       }
     }
@@ -478,9 +460,19 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
           return;
         }
       }
-    } catch {}
+    } catch (err) {
+      console.warn('Error loading custom sequence entries:', err);
+    }
     setCustomSeqEntries({});
   }, [currentUser]);
+
+  // Sequence filtered strictly to current day games (sin partidas de días anteriores)
+  const todayKey = getCurrentLocalDateKey();
+  const todayGameSequence = useMemo(() => {
+    return (gameSequence || []).filter(
+      (item) => item && typeof item.ballNumber === 'number' && item.ballNumber > 0 && getGameNormalizedDateKey(item) === todayKey
+    );
+  }, [gameSequence, todayKey]);
 
   // Find the first empty row in the sequence table (1..15)
   // "la secuencia debe anotarse desde la primera fila vacia, no la segunda"
@@ -597,7 +589,9 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       };
       try {
         localStorage.setItem('bingo_player_cumulative_winnings_v2', JSON.stringify(updated));
-      } catch {}
+      } catch (err) {
+        console.warn('Error saving reset winnings:', err);
+      }
       return updated;
     });
 
@@ -612,7 +606,9 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       };
       try {
         localStorage.setItem('bingo_player_cumulative_debt_v2', JSON.stringify(updated));
-      } catch {}
+      } catch (err) {
+        console.warn('Error saving reset debt:', err);
+      }
       return updated;
     });
 
@@ -627,7 +623,9 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       };
       try {
         localStorage.setItem('bingo_player_payout_offsets_v1', JSON.stringify(updated));
-      } catch {}
+      } catch (err) {
+        console.warn('Error saving payout offsets:', err);
+      }
       return updated;
     });
 
@@ -746,7 +744,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       historyArr.unshift({
         id: `tx_${Date.now()}`,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        date: new Date().toISOString().split('T')[0],
+        date: getCurrentLocalDateKey(),
         playerId: editingPlayerBalance.id,
         playerName: editingPlayerBalance.name,
         gano: finalGano,
@@ -857,7 +855,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
           const baseAmboPrize = parsed.baseAmboPrize ?? 0.25;
           const bingoEnabled = parsed.bingoEnabled !== false;
 
-          const migratedColumns = (parsed.columns || columns).map((c: any, idx: number) => {
+          const migratedColumns = (parsed.columns || columns).map((c: Partial<BingoSheetColumn>, idx: number) => {
             const mult =
               typeof c.multiplier === 'number'
                 ? c.multiplier
@@ -951,7 +949,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       try {
         const saved = localStorage.getItem('bingo_player_cumulative_winnings_v2');
         return saved ? JSON.parse(saved) : {};
-      } catch {
+      } catch (err) {
+        console.warn('Error reading bingo_player_cumulative_winnings_v2:', err);
         return {};
       }
     }
@@ -964,7 +963,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       try {
         const saved = localStorage.getItem('bingo_player_cumulative_debt_v2');
         return saved ? JSON.parse(saved) : {};
-      } catch {
+      } catch (err) {
+        console.warn('Error reading bingo_player_cumulative_debt_v2:', err);
         return {};
       }
     }
@@ -977,7 +977,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       try {
         const saved = localStorage.getItem('bingo_player_payout_offsets_v1');
         return saved ? JSON.parse(saved) : {};
-      } catch {
+      } catch (err) {
+        console.warn('Error reading bingo_player_payout_offsets_v1:', err);
         return {};
       }
     }
@@ -1006,46 +1007,42 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
   // Manual free-text inputs for Base Rates (allows unrestricted typing: decimals, commas, clearing)
   const [manualCostStr, setManualCostStr] = useState<string>(() => (sheet.baseCost ?? 0.10).toString());
   const [manualPrizeStr, setManualPrizeStr] = useState<string>(() => (sheet.basePrize ?? 1.35).toString());
-  const [ternaEnabled, setTernaEnabled] = useState<boolean>(() => Boolean(sheet.ternaEnabled));
+  const ternaEnabled = Boolean(sheet.ternaEnabled);
   const [manualTernaStr, setManualTernaStr] = useState<string>(() => (sheet.baseTernaPrize ?? 0.50).toString());
-  const [amboEnabled, setAmboEnabled] = useState<boolean>(() => Boolean(sheet.amboEnabled));
+  const amboEnabled = Boolean(sheet.amboEnabled);
   const [manualAmboStr, setManualAmboStr] = useState<string>(() => (sheet.baseAmboPrize ?? 0.25).toString());
 
   // Synchronize input strings if base rates are updated externally (e.g. preset or load)
   useEffect(() => {
-    const parsed = parseFloat(manualCostStr.replace(',', '.'));
-    if (isNaN(parsed) || Math.abs(parsed - (sheet.baseCost ?? 0.10)) > 0.0001) {
-      setManualCostStr((sheet.baseCost ?? 0.10).toString());
-    }
+    const target = sheet.baseCost ?? 0.10;
+    setManualCostStr((prev) => {
+      const parsed = parseFloat(prev.replace(',', '.'));
+      return isNaN(parsed) || Math.abs(parsed - target) > 0.0001 ? target.toString() : prev;
+    });
   }, [sheet.baseCost]);
 
   useEffect(() => {
-    const parsed = parseFloat(manualPrizeStr.replace(',', '.'));
-    if (isNaN(parsed) || Math.abs(parsed - (sheet.basePrize ?? 1.35)) > 0.0001) {
-      setManualPrizeStr((sheet.basePrize ?? 1.35).toString());
-    }
+    const target = sheet.basePrize ?? 1.35;
+    setManualPrizeStr((prev) => {
+      const parsed = parseFloat(prev.replace(',', '.'));
+      return isNaN(parsed) || Math.abs(parsed - target) > 0.0001 ? target.toString() : prev;
+    });
   }, [sheet.basePrize]);
 
   useEffect(() => {
-    setTernaEnabled(Boolean(sheet.ternaEnabled));
-  }, [sheet.ternaEnabled]);
-
-  useEffect(() => {
-    const parsed = parseFloat(manualTernaStr.replace(',', '.'));
-    if (isNaN(parsed) || Math.abs(parsed - (sheet.baseTernaPrize ?? 0.50)) > 0.0001) {
-      setManualTernaStr((sheet.baseTernaPrize ?? 0.50).toString());
-    }
+    const target = sheet.baseTernaPrize ?? 0.50;
+    setManualTernaStr((prev) => {
+      const parsed = parseFloat(prev.replace(',', '.'));
+      return isNaN(parsed) || Math.abs(parsed - target) > 0.0001 ? target.toString() : prev;
+    });
   }, [sheet.baseTernaPrize]);
 
   useEffect(() => {
-    setAmboEnabled(Boolean(sheet.amboEnabled));
-  }, [sheet.amboEnabled]);
-
-  useEffect(() => {
-    const parsed = parseFloat(manualAmboStr.replace(',', '.'));
-    if (isNaN(parsed) || Math.abs(parsed - (sheet.baseAmboPrize ?? 0.25)) > 0.0001) {
-      setManualAmboStr((sheet.baseAmboPrize ?? 0.25).toString());
-    }
+    const target = sheet.baseAmboPrize ?? 0.25;
+    setManualAmboStr((prev) => {
+      const parsed = parseFloat(prev.replace(',', '.'));
+      return isNaN(parsed) || Math.abs(parsed - target) > 0.0001 ? target.toString() : prev;
+    });
   }, [sheet.baseAmboPrize]);
 
   // Column being individually edited in modal
@@ -1075,14 +1072,29 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
   }, [currentUser?.id, currentUser?.name]);
 
   // Auto-save to localStorage is handled below with playerSummaryList and customSeqEntries
+  const notifyTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  const notify = (msg: string) => {
+  useEffect(() => {
+    return () => {
+      if (notifyTimeoutRef.current) {
+        clearTimeout(notifyTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const notify = useCallback((msg: string) => {
     setShowNotification(msg);
-    setTimeout(() => setShowNotification(null), 3000);
-  };
+    if (notifyTimeoutRef.current) {
+      clearTimeout(notifyTimeoutRef.current);
+    }
+    notifyTimeoutRef.current = setTimeout(() => {
+      setShowNotification(null);
+      notifyTimeoutRef.current = null;
+    }, 3000);
+  }, []);
 
   // Push snapshot of current columns into undo history (capped at 4 moves)
-  const pushUndoSnapshot = (currentCols?: BingoSheetColumn[]) => {
+  const pushUndoSnapshot = useCallback((currentCols?: BingoSheetColumn[]) => {
     setSheet((currentSheet) => {
       const source = currentCols || currentSheet.columns;
       if (!source) return currentSheet;
@@ -1093,10 +1105,10 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       setSheetUndoStack((prev) => [snapshot, ...prev].slice(0, 4));
       return currentSheet;
     });
-  };
+  }, []);
 
   // Undo up to 4 actions
-  const handleUndo = () => {
+  const handleUndo = useCallback(() => {
     if (sheetUndoStack.length === 0) {
       notify('No hay movimientos en el historial para deshacer (máximo 4)');
       return;
@@ -1108,7 +1120,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       columns: previousCols,
     }));
     notify(`Acción deshecha. Movimientos restantes: ${remainingStack.length}/4`);
-  };
+  }, [sheetUndoStack, notify]);
 
   // Keyboard shortcut listener for Ctrl+Z / Cmd+Z to undo
   useEffect(() => {
@@ -1122,7 +1134,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [sheetUndoStack]);
+  }, [handleUndo]);
 
   // Show previous game direct results
   const handleShowPreviousGameResults = () => {
@@ -1141,7 +1153,6 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
   // Objectives active state
   const isAmboActive = Boolean(gameObjectives ? gameObjectives.ambo : sheet.amboEnabled);
   const isTernaActive = Boolean(gameObjectives ? gameObjectives.terna : sheet.ternaEnabled);
-  const isBingoActive = gameObjectives ? gameObjectives.bingo : (sheet.bingoEnabled !== false);
   const seqColWidth = isAmboActive ? 80 : 62;
 
   // Find currently active player for brush painting
@@ -1169,7 +1180,17 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
 
   // Clean slate listener when starting a new game: save snapshot for "Mismos" feature before wiping
   useEffect(() => {
-    const handleResetEvent = (e: any) => {
+    interface ResetSheetEventDetail {
+      keepPlayers?: boolean;
+      keepSequence?: boolean;
+      keepBalances?: boolean;
+      winningRow?: number;
+      ternaRow?: number;
+      amboRow?: number;
+    }
+
+    const handleResetEvent = (evt: Event) => {
+      const e = evt as CustomEvent<ResetSheetEventDetail>;
       // Save snapshot of current sheet into previous game storage before wiping
       if (sheetRef.current) {
         savePreviousGameSheet75(sheetRef.current, currentUser);
@@ -1187,7 +1208,9 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
         setCustomSeqEntries({});
         try {
           localStorage.removeItem('bingo_sheet_custom_sequence');
-        } catch {}
+        } catch (err) {
+          console.warn('Error clearing custom sequence on reset:', err);
+        }
       }
 
       // Handle player balances: if keepBalances is false, reset all to 0
@@ -1199,7 +1222,9 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
           localStorage.removeItem('bingo_player_cumulative_winnings_v2');
           localStorage.removeItem('bingo_player_cumulative_debt_v2');
           localStorage.removeItem('bingo_player_payout_offsets_v1');
-        } catch {}
+        } catch (err) {
+          console.warn('Error clearing balances on reset:', err);
+        }
       } else {
         // 1. Consolidate current match winnings (Bingo, Terna, Ambo) into cumulative winnings
         const isBingoActive = gameObjectives ? gameObjectives.bingo : (sheetRef.current?.bingoEnabled !== false);
@@ -1240,7 +1265,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
           setPlayerCumulativeWinnings((prev) => {
             const updated = { ...prev };
 
-            const creditPrize = (cell: any, prizeAmount: number) => {
+            const creditPrize = (cell: BingoSheetCell | undefined, prizeAmount: number) => {
               if (!cell || (!cell.playerId && !cell.playerName) || prizeAmount <= 0) return;
               if (cell.playerId) {
                 updated[cell.playerId] = (updated[cell.playerId] || 0) + prizeAmount;
@@ -1278,7 +1303,9 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
             });
             try {
               localStorage.setItem('bingo_player_cumulative_winnings_v2', JSON.stringify(updated));
-            } catch {}
+            } catch (err) {
+              console.warn('Error saving consolidated winnings:', err);
+            }
             return updated;
           });
         }
@@ -1315,7 +1342,9 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
             });
             try {
               localStorage.setItem('bingo_player_cumulative_debt_v2', JSON.stringify(updated));
-            } catch {}
+            } catch (err) {
+              console.warn('Error saving consolidated debt:', err);
+            }
             return updated;
           });
         }
@@ -1324,7 +1353,9 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       setPlayerPayoutOffsets({});
       try {
         localStorage.removeItem('bingo_player_payout_offsets_v1');
-      } catch {}
+      } catch (err) {
+        console.warn('Error removing payout offsets:', err);
+      }
 
       setActiveWinningRow(null);
       setActiveTernaRow(null);
@@ -1368,29 +1399,38 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     return () => {
       window.removeEventListener('bingo_reset_sheet_for_new_game', handleResetEvent);
     };
-  }, [activeWinningRow, activeTernaRow, activeAmboRow, completedRowLeaders, paidPlayerIds, paidPlayerNames]);
+  }, [
+    activeWinningRow,
+    activeTernaRow,
+    activeAmboRow,
+    completedRowLeaders,
+    paidPlayerIds,
+    paidPlayerNames,
+    currentUser,
+    gameObjectives,
+    currentMatchTernaRow,
+    currentMatchAmboRow,
+  ]);
 
   // Helper to calculate cell cost based on column multiplier
-  const getCellCost = (col: BingoSheetColumn): number => {
-    if (col.columnPrice !== undefined) return col.columnPrice;
-    const mult = col.multiplier || 1;
-    return mult * (sheet.baseCost ?? 0.10);
-  };
+  const getCellCost = useCallback(
+    (col: BingoSheetColumn): number => {
+      if (col.columnPrice !== undefined) return col.columnPrice;
+      const mult = col.multiplier || 1;
+      return mult * (sheet.baseCost ?? 0.10);
+    },
+    [sheet.baseCost]
+  );
 
   // Helper to calculate cell potential prize based on column multiplier
-  const getCellPrize = (col: BingoSheetColumn): number => {
-    if (col.columnPrize !== undefined) return col.columnPrize;
-    const mult = col.multiplier || 1;
-    return mult * (sheet.basePrize ?? 1.35);
-  };
-
-  // Helper to calculate cell potential terna prize based on column multiplier
-  const getCellTernaPrize = (col: BingoSheetColumn): number => {
-    if (col.columnTernaPrize !== undefined) return col.columnTernaPrize;
-    const mult = col.multiplier || 1;
-    return mult * (sheet.baseTernaPrize ?? 0.50);
-  };
-
+  const getCellPrize = useCallback(
+    (col: BingoSheetColumn): number => {
+      if (col.columnPrize !== undefined) return col.columnPrize;
+      const mult = col.multiplier || 1;
+      return mult * (sheet.basePrize ?? 1.35);
+    },
+    [sheet.basePrize]
+  );
 
   // Statistics calculation based on column multipliers
   const stats = useMemo(() => {
@@ -1446,7 +1486,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       playerCosts,
       playerMultipliers,
     };
-  }, [sheet]);
+  }, [sheet, getCellCost, getCellPrize]);
 
   // Conteo exacto de Líneas de la planilla: suma del valor (multiplicador) de cada columna abierta
   // Por ejemplo: 4 columnas que valen X2 todas = 8 líneas
@@ -1534,7 +1574,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     const ternaWinnerKeys = new Set<string>();
     const amboWinnerKeys = new Set<string>();
 
-    const recordPrize = (cell: any, prizeAmount: number, type: 'bingo' | 'terna' | 'ambo') => {
+    const recordPrize = (cell: BingoSheetCell | undefined, prizeAmount: number, type: 'bingo' | 'terna' | 'ambo') => {
       if (!cell || (!cell.playerId && !cell.playerName) || prizeAmount <= 0) return;
       const cKey = getCanonicalKey(cell.playerId, cell.playerName);
       currentRoundWinnings[cKey] = (currentRoundWinnings[cKey] || 0) + prizeAmount;
@@ -1687,9 +1727,6 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     playerCumulativeDebt,
     playerPayoutOffsets,
   ]);
-
-  // Backward compatibility alias for any existing reference
-  const bottomPlayersSummary = playerSummaryList;
 
   // Persist full sheet snapshot including player summaries and custom sequence
   useEffect(() => {
@@ -2029,7 +2066,6 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
   };
 
   const handleToggleTernaEnabled = (enabled: boolean) => {
-    setTernaEnabled(enabled);
     if (onToggleObjective && gameObjectives && gameObjectives.terna !== enabled) {
       onToggleObjective('terna');
     }
@@ -2039,7 +2075,6 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
   };
 
   const handleToggleAmboEnabled = (enabled: boolean) => {
-    setAmboEnabled(enabled);
     if (onToggleObjective && gameObjectives && gameObjectives.ambo !== enabled) {
       onToggleObjective('ambo');
     }
@@ -2287,329 +2322,92 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     notify('Casillas pendientes marcadas como pagadas');
   };
 
-  /**
-   * Finds the optimal combination of column indices for a given row to match the exact target multiplier,
-   * prioritizing previous columns if they still match, and automatically adapting when lines are added or removed.
-   * Strict Rule: NEVER touch or return cells belonging to other players.
-   */
-  const findBestColumnsForTargetMultiplier = (
-    columns: BingoSheetColumn[],
-    rowNumber: number,
-    targetMultiplier: number,
-    previousColIndexes: number[] = [],
-    playerId: string,
-    playerName: string
-  ): number[] => {
-    const pNameLower = playerName.toLowerCase().trim();
-    const available: { colIndex: number; multiplier: number; wasPrevious: boolean }[] = [];
-
-    columns.forEach((col, cIdx) => {
-      const cell = col.cells[rowNumber - 1];
-      const isFree = !cell || (!cell.playerId && !cell.playerName);
-      const isMine =
-        cell &&
-        (cell.playerId === playerId ||
-          (cell.playerName && cell.playerName.toLowerCase().trim() === pNameLower));
-
-      if (isFree || isMine) {
-        available.push({
-          colIndex: cIdx,
-          multiplier: col.multiplier || 1,
-          wasPrevious: previousColIndexes.includes(cIdx),
-        });
-      }
-    });
-
-    if (available.length === 0 || targetMultiplier <= 0) return [];
-
-    // Step 0: If the EXACT previous columns are all available and sum to targetMultiplier, use them!
-    if (previousColIndexes.length > 0) {
-      const allPrevAvailable = previousColIndexes.every((pIdx) =>
-        available.some((a) => a.colIndex === pIdx)
-      );
-      if (allPrevAvailable) {
-        const prevSum = previousColIndexes.reduce((acc, pIdx) => {
-          const found = available.find((a) => a.colIndex === pIdx);
-          return acc + (found?.multiplier || 0);
-        }, 0);
-        if (prevSum === targetMultiplier) {
-          return [...previousColIndexes];
-        }
-      }
-    }
-
-    // Step 1: Look for an available single column that matches targetMultiplier
-    const singleMatches = available.filter((a) => a.multiplier === targetMultiplier);
-    if (singleMatches.length > 0) {
-      const prevMatch = singleMatches.find((a) => a.wasPrevious);
-      return [(prevMatch || singleMatches[0]).colIndex];
-    }
-
-    // Step 2: Search for an exact combination of available columns that sums to targetMultiplier
-    // Sort available prioritizing: wasPrevious first, then largest multiplier
-    const sortedAvailable = [...available].sort((a, b) => {
-      if (a.wasPrevious !== b.wasPrevious) return a.wasPrevious ? -1 : 1;
-      return b.multiplier - a.multiplier;
-    });
-
-    let bestSubset: number[] = [];
-    let bestDiff = Infinity;
-    let bestPrevMatchCount = -1;
-    let bestCount = Infinity;
-
-    const search = (
-      idx: number,
-      currentSum: number,
-      currentCols: number[],
-      prevMatchCount: number
-    ) => {
-      const diff = Math.abs(currentSum - targetMultiplier);
-
-      const isBetter =
-        diff < bestDiff ||
-        (diff === bestDiff && prevMatchCount > bestPrevMatchCount) ||
-        (diff === bestDiff && prevMatchCount === bestPrevMatchCount && currentCols.length < bestCount);
-
-      if (isBetter) {
-        bestDiff = diff;
-        bestSubset = [...currentCols];
-        bestPrevMatchCount = prevMatchCount;
-        bestCount = currentCols.length;
-      }
-
-      if (diff === 0 && prevMatchCount === previousColIndexes.length) return; // Optimal match found
-      if (idx >= sortedAvailable.length) return;
-
-      for (let i = idx; i < sortedAvailable.length; i++) {
-        const item = sortedAvailable[i];
-        if (currentSum + item.multiplier > targetMultiplier + bestDiff && bestDiff === 0) continue;
-        currentCols.push(item.colIndex);
-        search(
-          i + 1,
-          currentSum + item.multiplier,
-          currentCols,
-          prevMatchCount + (item.wasPrevious ? 1 : 0)
-        );
-        currentCols.pop();
-      }
-    };
-
-    search(0, 0, [], 0);
-
-    return bestSubset;
-  };
-
-  /**
-   * Helper that assigns "Mismos" for a single player inside updatedColumns:
-   * Finds the previous row values (e.g. 2 X3, 4 X1) and equals them by searching
-   * in the current sheet without taking numbers from any other players.
-   */
-  const assignMismosForPlayer = (
-    updatedColumns: BingoSheetColumn[],
-    player: BingoSheetPlayer
-  ): {
-    assignedCount: number;
-    assignedSummary: string[];
-    skippedSummary: string[];
-  } => {
-    const pNameLower = player.name.toLowerCase().trim();
-    let rowValues = getPreviousPlayerRowValues75(player.id, player.name, undefined, currentUser);
-
-    // Fallback: Check getPreviousPlayerCells75 if rowValues is empty
-    if (!rowValues || Object.keys(rowValues).length === 0) {
-      const prevCells = getPreviousPlayerCells75(player.id, player.name, currentUser);
-      if (prevCells && prevCells.length > 0) {
-        rowValues = {};
-        prevCells.forEach((c) => {
-          const rNum = c.rowNumber || c.rowIndex + 1;
-          if (!rowValues[rNum]) {
-            rowValues[rNum] = {
-              rowNumber: rNum,
-              totalMultiplier: 0,
-              columnIndexes: [],
-              columnMultipliers: [],
-            };
-          }
-          const mult = c.multiplier || 1;
-          rowValues[rNum].totalMultiplier += mult;
-          rowValues[rNum].columnIndexes.push(c.columnIndex);
-          rowValues[rNum].columnMultipliers.push(mult);
-        });
-      }
-    }
-
-    if (!rowValues || Object.keys(rowValues).length === 0) {
-      return { assignedCount: 0, assignedSummary: [], skippedSummary: [] };
-    }
-
-    let assignedCount = 0;
-    const assignedSummary: string[] = [];
-    const skippedSummary: string[] = [];
-
-    // Sort rows by rowNumber (1 to 15)
-    const sortedRowEntries = Object.entries(rowValues).sort(
-      ([a], [b]) => Number(a) - Number(b)
-    );
-
-    sortedRowEntries.forEach(([rowStr, rowInfo]) => {
-      const rowNum = Number(rowStr);
-      const targetMult = rowInfo.totalMultiplier;
-      const prevCols = rowInfo.columnIndexes || [];
-
-      if (rowNum < 1 || rowNum > 15 || targetMult <= 0) return;
-
-      const chosenCols = findBestColumnsForTargetMultiplier(
-        updatedColumns,
-        rowNum,
-        targetMult,
-        prevCols,
-        player.id,
-        player.name
-      );
-
-      if (chosenCols.length > 0) {
-        let achievedMult = 0;
-        chosenCols.forEach((cIdx) => {
-          const col = updatedColumns[cIdx];
-          if (!col || !col.cells) return;
-          const targetCell = col.cells[rowNum - 1];
-          if (!targetCell) return;
-
-          // Double security check: NEVER steal or overwrite another player's cell!
-          const isOther =
-            targetCell.playerId &&
-            targetCell.playerId !== player.id &&
-            targetCell.playerName &&
-            targetCell.playerName.toLowerCase().trim() !== pNameLower;
-          if (isOther) return;
-
-          targetCell.playerId = player.id;
-          targetCell.playerName = player.name;
-          targetCell.color = player.color;
-          targetCell.textColor = player.textColor || '#000000';
-          targetCell.isPaid = false;
-          assignedCount++;
-          achievedMult += col.multiplier || 1;
-        });
-
-        // Clear any old cell on THIS row that belonged to this player but wasn't in chosenCols
-        updatedColumns.forEach((col, cIdx) => {
-          if (!chosenCols.includes(cIdx)) {
-            const cell = col.cells[rowNum - 1];
-            if (
-              cell &&
-              (cell.playerId === player.id ||
-                (cell.playerName && cell.playerName.toLowerCase().trim() === pNameLower))
-            ) {
-              cell.playerId = undefined;
-              cell.playerName = undefined;
-              cell.color = undefined;
-              cell.isPaid = false;
-            }
-          }
-        });
-
-        assignedSummary.push(`${rowNum} (X${achievedMult})`);
-      } else {
-        skippedSummary.push(`Fila ${rowNum} (X${targetMult})`);
-      }
-    });
-
-    return { assignedCount, assignedSummary, skippedSummary };
-  };
-
   // Re-assign automatically all cells/numbers this player had in the previous game ("Mismos")
   // Strict Rule: DO NOT remove or steal cells already assigned to other players; ONLY assign available cells!
   const handleAssignSameCellsFromPreviousGame = (player: BingoSheetPlayer) => {
-    pushUndoSnapshot();
-
-    let result = {
-      assignedCount: 0,
-      assignedSummary: [] as string[],
-      skippedSummary: [] as string[],
-    };
-
-    setSheet((prev) => {
-      const updatedColumns = prev.columns.map((col) => ({
-        ...col,
-        cells: col.cells.map((cell) => ({ ...cell })),
-      }));
-
-      result = assignMismosForPlayer(updatedColumns, player);
-
-      return {
-        ...prev,
-        columns: updatedColumns,
-      };
-    });
-
-    if (result.assignedCount === 0 && result.skippedSummary.length === 0) {
-      notify(`No se encontraron casillas previas para "${player.name}" en la partida anterior.`);
-    } else if (result.skippedSummary.length > 0 && result.assignedSummary.length > 0) {
-      notify(
-        `¡Mismos anotados para ${player.name}! Se anotó: ${result.assignedSummary.join(', ')}. ${result.skippedSummary.join(', ')} ya estaba ocupada por otros jugadores.`
-      );
-    } else if (result.assignedSummary.length > 0) {
-      notify(
-        `¡Mismos anotados para ${player.name}! Se igualó la partida pasada: ${result.assignedSummary.join(', ')}.`
-      );
-    } else {
-      notify(
-        `No se pudieron anotar los mismos para ${player.name}: ${result.skippedSummary.join(', ')} ya están ocupados por otros jugadores.`
-      );
-    }
-  };
-
-  // Re-assign same cells from previous game for ALL current players
-  // Strict Rule: DO NOT remove or steal cells already assigned to other players; ONLY assign available cells!
-  const handleAssignSameCellsForAllPlayers = () => {
-    if (sheet.players.length === 0) {
-      notify('No hay jugadores registrados.');
+    const previousSheet = getImmediatelyPrecedingSheet75(
+      currentUser,
+      undefined,
+      player.name || player.id,
+      currentMatchRound
+    );
+    if (!previousSheet) {
+      notify('No se encontró la partida anterior para replicar los mismos números.');
       return;
     }
 
     pushUndoSnapshot();
 
-    let totalAssigned = 0;
-    let playersProcessed = 0;
-    const skippedDetails: string[] = [];
-
-    setSheet((prev) => {
-      const updatedColumns = prev.columns.map((col) => ({
-        ...col,
-        cells: col.cells.map((cell) => ({ ...cell })),
-      }));
-
-      prev.players.forEach((player) => {
-        const res = assignMismosForPlayer(updatedColumns, player);
-        if (res.assignedCount > 0) {
-          totalAssigned += res.assignedCount;
-          playersProcessed++;
-        }
-        if (res.skippedSummary.length > 0) {
-          skippedDetails.push(`${player.name}: ${res.skippedSummary.join(', ')}`);
-        }
-      });
-
-      return {
-        ...prev,
-        columns: updatedColumns,
-      };
+    const result = executeMismosReconstruction({
+      currentSheet: sheet,
+      previousSheet,
+      targetPlayerIdOrName: player.name || player.id,
+      baseCost: sheet.baseCost,
+      basePrize: sheet.basePrize,
     });
 
-    if (totalAssigned > 0) {
-      if (skippedDetails.length > 0) {
-        notify(
-          `¡Mismos restaurados para ${playersProcessed} jugadores! (${totalAssigned} casillas anotadas sin tocar números de otros).`
-        );
-      } else {
-        notify(
-          `¡Mismos restaurados para todos los jugadores! Se anotaron ${totalAssigned} casillas con sus multiplicadores exactos.`
-        );
+    if (result.success && result.totalAssigned > 0) {
+      const nextSheet: BingoSheetData = {
+        ...sheet,
+        columns: result.updatedColumns,
+        players: result.updatedPlayers,
+        customSeqEntries,
+      };
+      setSheet(nextSheet);
+      safeSetItem(STORAGE_KEY, JSON.stringify(nextSheet));
+
+      if (onSaveCurrentGame) {
+        Promise.resolve(onSaveCurrentGame(nextSheet)).catch((err) => {
+          console.warn('Auto-save after Mismos failed:', err);
+        });
       }
-    } else {
-      notify('No se encontraron casillas previas para anotar o todas las casillas ya estaban ocupadas.');
     }
+
+    notify(result.message);
+  };
+
+  // Re-assign same cells from previous game for ALL players ("Mismos a Todos")
+  // Strict Rule: DO NOT remove or steal cells already assigned to other players; ONLY assign available cells!
+  const handleAssignSameCellsForAllPlayers = () => {
+    const previousSheet = getImmediatelyPrecedingSheet75(
+      currentUser,
+      undefined,
+      undefined,
+      currentMatchRound
+    );
+    if (!previousSheet) {
+      notify('No se encontró la partida anterior para replicar los mismos números.');
+      return;
+    }
+
+    pushUndoSnapshot();
+
+    const result = executeMismosReconstruction({
+      currentSheet: sheet,
+      previousSheet,
+      targetPlayerIdOrName: undefined, // All players from previous game
+      baseCost: sheet.baseCost,
+      basePrize: sheet.basePrize,
+    });
+
+    if (result.success && (result.totalAssigned > 0 || result.newPlayersAdded > 0)) {
+      const nextSheet: BingoSheetData = {
+        ...sheet,
+        columns: result.updatedColumns,
+        players: result.updatedPlayers,
+        customSeqEntries,
+      };
+      setSheet(nextSheet);
+      safeSetItem(STORAGE_KEY, JSON.stringify(nextSheet));
+
+      if (onSaveCurrentGame) {
+        Promise.resolve(onSaveCurrentGame(nextSheet)).catch((err) => {
+          console.warn('Auto-save after Mismos a Todos failed:', err);
+        });
+      }
+    }
+
+    notify(result.message);
   };
 
   // Delete player
@@ -2630,31 +2428,6 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     if (selectedPlayerId === playerId) {
       setSelectedPlayerId(sheet.players.find((p) => p.id !== playerId)?.id || '');
     }
-  };
-
-  // Change total rows (e.g. 10, 12, 15, 18, 20)
-  const handleChangeTotalRows = (newRowsCount: number) => {
-    const clamped = Math.max(5, Math.min(30, newRowsCount));
-    setSheet((prev) => {
-      const updatedColumns = prev.columns.map((col) => {
-        const newCells: BingoSheetCell[] = [];
-        for (let r = 1; r <= clamped; r++) {
-          const existing = col.cells.find((c) => c.rowNumber === r);
-          if (existing) {
-            newCells.push(existing);
-          } else {
-            newCells.push({ rowNumber: r });
-          }
-        }
-        return { ...col, cells: newCells };
-      });
-      return {
-        ...prev,
-        totalRows: clamped,
-        columns: updatedColumns,
-      };
-    });
-    notify(`Hoja ajustada a ${clamped} casillas por columna`);
   };
 
   // Add column
@@ -2700,6 +2473,10 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
 
   // Reset / Clear all cells (executed reliably without blocking confirm dialogs)
   const executeClearAllCells = () => {
+    // Archive current sheet for "Mismos" before clearing if it has assigned cells
+    if (sheetRef.current && hasAssignedCells75(sheetRef.current)) {
+      savePreviousGameSheet75(sheetRef.current, currentUser);
+    }
     pushUndoSnapshot();
     setSheet((prev) => ({
       ...prev,
@@ -2734,18 +2511,40 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     notify('Todos los números y jugadores fueron desmarcados como pagados');
   };
 
-
-  // Reset to photo demo with 0.10x1.35 rate
-  const handleResetToPhotoDemo = () => {
-    localStorage.removeItem(STORAGE_KEY);
-    localStorage.removeItem('bingo_custom_sheet_data_v2');
-    window.location.reload();
-  };
-
   // Print sheet
   const handlePrint = () => {
     window.print();
   };
+
+  // Directly save the active sheet and match to Firestore & Gallery with verified confirmation
+  const handleSaveCurrentSheetGame = useCallback(async () => {
+    if (onSaveCurrentGame) {
+      try {
+        const fullSnapshot: BingoSheetData = {
+          ...sheet,
+          playerSummaryList: playerSummaryList.map((p) => ({
+            id: p.id,
+            name: p.name,
+            totalGano: p.totalGano,
+            debe: p.debe,
+            total: p.total,
+            color: p.color,
+            paid: p.paid,
+          })),
+          customSeqEntries,
+        };
+        const res = await onSaveCurrentGame(fullSnapshot);
+        if (res && res.verified) {
+          notify(`¡Partida #${res.game.round} guardada con éxito a las ${res.game.timestamp} en subcarpeta ${res.game.dailyDate}!`);
+        } else {
+          notify('Partida guardada exitosamente');
+        }
+      } catch (err: any) {
+        console.error('Error guardando partida:', err);
+        notify(err?.message || 'Error al guardar la partida');
+      }
+    }
+  }, [onSaveCurrentGame, sheet, playerSummaryList, customSeqEntries, notify]);
 
   return (
     <div
@@ -3374,6 +3173,20 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                   </>
                 )}
               </button>
+
+              {/* Botón Guardar Partida */}
+              {onSaveCurrentGame && (
+                <button
+                  type="button"
+                  onClick={handleSaveCurrentSheetGame}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-orange-600 hover:bg-orange-500 text-white text-xs font-black transition-all active:scale-95 shadow-xs cursor-pointer border border-orange-700"
+                  title="Guardar y archivar la partida actual con su fecha, hora exacta, líneas y saldos en Firestore"
+                >
+                  <BookmarkCheck className="w-3.5 h-3.5 text-yellow-200" />
+                  <span className="hidden sm:inline">Guardar Partida</span>
+                  <span className="sm:hidden">Guardar</span>
+                </button>
+              )}
 
               {/* Partidas Guardadas Button */}
               {onOpenSavedGamesGallery && (
@@ -4373,7 +4186,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                         {newPlayerColor === c.hex && (
                           <span
                             className="w-1.5 h-1.5 rounded-full"
-                            style={{ backgroundColor: getContrastTextColor(c.hex) }}
+                            style={{ backgroundColor: c.text || '#ffffff' }}
                           />
                         )}
                       </button>
@@ -5526,7 +5339,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       {!is15SheetExpanded && (
         <div className="no-print w-full lg:w-44 xl:w-48 flex-shrink-0 lg:sticky lg:top-16">
           <GameSequenceBar
-            sequence={gameSequence}
+            sequence={todayGameSequence}
+            todaySavedGames={todaySavedGames}
             activeRowLeader={activeWinningRow}
             onSelectRowLeader={(row) => {
               setActiveWinningRow(row);
@@ -5536,7 +5350,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
             onAddSequenceItem={onAddSequenceItem}
             onClearSequence={onClearSequence}
             onStartNewGame={onStartNewGame}
-            onSaveCurrentGame={onSaveCurrentGame}
+            onSaveCurrentGame={handleSaveCurrentSheetGame}
             onOpenSavedGamesGallery={onOpenSavedGamesGallery}
             savedGamesCount={savedGamesCount}
             mode={mode}
@@ -5560,7 +5374,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       {is15SheetExpanded && (
         <div className="no-print w-full pt-1.5 flex-shrink-0 z-30">
           <GameSequenceBar
-            sequence={gameSequence}
+            sequence={todayGameSequence}
+            todaySavedGames={todaySavedGames}
             activeRowLeader={activeWinningRow}
             onSelectRowLeader={(row) => {
               setActiveWinningRow(row);
@@ -5570,7 +5385,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
             onAddSequenceItem={onAddSequenceItem}
             onClearSequence={onClearSequence}
             onStartNewGame={onStartNewGame}
-            onSaveCurrentGame={onSaveCurrentGame}
+            onSaveCurrentGame={handleSaveCurrentSheetGame}
             onOpenSavedGamesGallery={onOpenSavedGamesGallery}
             savedGamesCount={savedGamesCount}
             mode={mode}

@@ -1,6 +1,5 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, memo } from 'react';
 import { Ball, BingoMode, ThemeName } from '../types';
-import { getBallSpec, getBingo75Letter } from '../utils/ballColors';
 import { Search, CheckCircle2, Award } from 'lucide-react';
 
 interface MasterBoardProps {
@@ -16,12 +15,10 @@ interface MasterBoardProps {
   ternaBallNumber?: number | null;
 }
 
-export const MasterBoard: React.FC<MasterBoardProps> = ({
+export const MasterBoard: React.FC<MasterBoardProps> = memo(({
   mode,
-  totalBalls,
   drawnBalls,
   currentBall,
-  theme,
   completedRowLeaders = [],
   ternaRowLeader = null,
   ternaBallNumber = null,
@@ -265,4 +262,4 @@ export const MasterBoard: React.FC<MasterBoardProps> = ({
       )}
     </div>
   );
-};
+});

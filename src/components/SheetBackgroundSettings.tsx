@@ -298,18 +298,18 @@ export const SheetBackgroundSettings: React.FC<SheetBackgroundSettingsProps> = (
             Modo de Repetición / Ajuste:
           </span>
           <div className="grid grid-cols-3 gap-1.5">
-            {[
-              { id: 'tile', label: 'Mosaico', icon: Grid },
-              { id: 'cover', label: 'Cubrir', icon: Layers },
-              { id: 'contain', label: 'Centrado', icon: ImageIcon },
-            ].map((mode) => {
+            {([
+              { id: 'tile' as const, label: 'Mosaico', icon: Grid },
+              { id: 'cover' as const, label: 'Cubrir', icon: Layers },
+              { id: 'contain' as const, label: 'Centrado', icon: ImageIcon },
+            ]).map((mode) => {
               const Icon = mode.icon;
               const isActive = (currentBg.fit || 'tile') === mode.id;
               return (
                 <button
                   key={mode.id}
                   type="button"
-                  onClick={() => handleFitChange(mode.id as any)}
+                  onClick={() => handleFitChange(mode.id)}
                   className={`py-1.5 px-2 rounded-xl flex items-center justify-center gap-1 text-[11px] font-bold border transition-all ${
                     isActive
                       ? 'bg-purple-600 text-white border-purple-500 font-black shadow-xs'

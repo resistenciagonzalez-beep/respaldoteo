@@ -172,6 +172,33 @@ export interface OperatorShift {
 export type UserRole = 'admin' | 'operator' | 'moderator' | 'player';
 export type UserStatus = 'active' | 'suspended' | 'pending';
 
+export type FirestoreTimestampLike =
+  | { toDate?: () => Date; seconds?: number; nanoseconds?: number }
+  | string
+  | number
+  | Date
+  | null;
+
+export type CustomSequenceEntry = {
+  ambo?: number | string;
+  terna?: number | string;
+  bingo?: number | string;
+};
+
+export type CustomSequenceMap = Record<number, CustomSequenceEntry>;
+
+export interface GameSequenceSnapshot {
+  customSeqEntries?: CustomSequenceMap;
+  gameSequence?: GameSequenceItem[];
+  amboRow?: number;
+  ternaRow?: number;
+  bingoRow?: number;
+  amboBall?: number;
+  ternaBall?: number;
+  bingoBall?: number;
+  [rowNumber: number]: CustomSequenceEntry | undefined;
+}
+
 export interface AppUser {
   id: string; // Document ID / Firebase UID
   uid?: string;
@@ -183,7 +210,7 @@ export interface AppUser {
   assignedMode?: '75' | '90' | 'all'; // Operadoras: '75' o '90' exclusivo. Administradoras: 'all'
   status: 'active' | 'suspended';
   joinedDate?: string;
-  createdAt?: any;
+  createdAt?: FirestoreTimestampLike;
   lastActive?: string;
   gamesPlayed?: number;
   notes?: string;
@@ -199,7 +226,7 @@ export interface ActivityLogItem {
   actionType: 'login' | 'register' | 'draw_ball' | 'new_game' | 'save_game' | 'sheet_update' | 'reset_game' | 'role_change' | 'status_change';
   details?: string;
   timestamp: string;
-  createdAt?: any;
+  createdAt?: FirestoreTimestampLike;
   mode?: BingoMode;
 }
 
@@ -245,16 +272,8 @@ export interface GameSequenceItem {
   shiftStartTime?: string;
   shiftEndTime?: string;
   playerSummarySnapshot?: PlayerSummarySnapshotItem[];
-  sequenceSnapshot?: {
-    customSeqEntries?: Record<number, { ambo?: number; terna?: number; bingo?: number }>;
-    amboRow?: number;
-    ternaRow?: number;
-    bingoRow?: number;
-    amboBall?: number;
-    ternaBall?: number;
-    bingoBall?: number;
-  };
-  createdAt?: any;
+  sequenceSnapshot?: GameSequenceSnapshot;
+  createdAt?: FirestoreTimestampLike;
 }
 
 // Traditional 90-Ball Triples Sheet (Tables 1, 2, 3... with 30 rows of triples [r, r+30, r+60])

@@ -343,13 +343,6 @@ export class BingoVoiceAnnouncer {
     return items;
   }
 
-  static getAllVoices(): SpeechSynthesisVoice[] {
-    if (!this.availableVoices.length && this.synth) {
-      this.availableVoices = this.synth.getVoices();
-    }
-    return this.availableVoices;
-  }
-
   // Announces drawn number with cheerful, lively game show caller style
   static announceNumber(params: {
     number: number;
@@ -485,20 +478,6 @@ export class BingoVoiceAnnouncer {
 
       this.synth.speak(utterance);
     }, 60);
-  }
-
-  // Announce Terna achievement
-  static announceTerna(params: {
-    rowLeader: number;
-    drawnBall: number;
-    letter?: string;
-    volume?: number;
-    selectedVoiceName?: string;
-  }) {
-    if (!this.synth) return;
-    const prefix = params.letter ? `${params.letter} ${params.drawnBall}` : `número ${params.drawnBall}`;
-    const textToSpeak = `¡Terna! ¡La fila ${params.rowLeader} completó tres números con la balota ${prefix}!`;
-    this.speakText(textToSpeak, params.volume ?? 0.95, params.selectedVoiceName);
   }
 
   // Test speaking helper

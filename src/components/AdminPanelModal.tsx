@@ -1,68 +1,57 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   Users,
-  Shield,
   ShieldCheck,
   Search,
   X,
   Check,
   Download,
   Activity,
-  Filter,
   BarChart3,
   CircleDot,
   FileJson,
   FileSpreadsheet,
-  AlertTriangle,
   Radio,
   Gamepad2,
   Crown,
   Bell,
-  Clock,
   UserCheck,
   UserX,
   ArrowUpDown,
   Mail,
   RefreshCw,
-  Sliders,
   ShieldAlert,
   Calendar,
   Eye,
   Trophy,
-  Copy,
   Hash,
-  PlayCircle,
-  Sparkles,
   Table2,
   FileDown,
   Printer,
   Trash2,
-  Folder,
-  FolderOpen,
   Edit3,
   Camera,
+  Sparkles,
 } from 'lucide-react';
 import {
   collection,
   onSnapshot,
   doc,
   updateDoc,
-  deleteDoc,
   query,
   orderBy,
   limit,
-  setDoc,
-  serverTimestamp,
 } from 'firebase/firestore';
 import { db } from '../firebase';
-import { AppUser, ActivityLogItem, GameSequenceItem, BingoMode } from '../types';
+import { AppUser, ActivityLogItem, GameSequenceItem, Traditional90Table, Traditional90Row } from '../types';
 import { useAuth } from '../hooks/useAuth';
 import {
   getSavedGamesGallery,
-  removeGameFromGallery,
-  clearAllSavedGamesGallery,
   deleteGamePermanently,
-  saveGameToFirestoreAndGallery,
+  updateGameUnified,
+  subscribeToSavedGamesFirestore,
+  getCurrentLocalDateKey,
+  getGameNormalizedDateKey,
 } from '../utils/savedGamesStorage';
 import { downloadGameDirectJpg, downloadGameDirectPdf } from '../utils/exportGameReport';
 import { GameSheetSnapshotModal } from './GameSheetSnapshotModal';
@@ -83,7 +72,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   const [usersList, setUsersList] = useState<AppUser[]>([]);
   const [activitiesList, setActivitiesList] = useState<ActivityLogItem[]>([]);
   const [savedGamesList, setSavedGamesList] = useState<GameSequenceItem[]>([]);
-  const [isFirestoreConnected, setIsFirestoreConnected] = useState<boolean>(true);
+  const [, setIsFirestoreConnected] = useState<boolean>(true);
 
   // Deletion confirmation modals state
   const [gameToDelete, setGameToDelete] = useState<GameSequenceItem | null>(null);
@@ -97,7 +86,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   const [activityFilterOperator, setActivityFilterOperator] = useState<string>('all');
 
   // Search & Filter for Saved Games
-  const todayStr = new Date().toISOString().split('T')[0];
+  const currentLocalDate = getCurrentLocalDateKey();
   const [gameDateFilter, setGameDateFilter] = useState<string>('all');
   const [customDatePicker, setCustomDatePicker] = useState<string>('');
   const [gameOperatorFilter, setGameOperatorFilter] = useState<string>('all');
@@ -130,13 +119,32 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
   const isFirstLoadRef = useRef(true);
   const [bannerMessage, setBannerMessage] = useState<string | null>(null);
+  const bannerTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const toastTimeoutsRef = useRef<Set<NodeJS.Timeout>>(new Set());
 
-  const showBanner = (msg: string) => {
+  useEffect(() => {
+    const activeToastTimeouts = toastTimeoutsRef.current;
+    return () => {
+      if (bannerTimeoutRef.current) {
+        clearTimeout(bannerTimeoutRef.current);
+      }
+      activeToastTimeouts.forEach((timer) => clearTimeout(timer));
+      activeToastTimeouts.clear();
+    };
+  }, []);
+
+  const showBanner = useCallback((msg: string) => {
     setBannerMessage(msg);
-    setTimeout(() => setBannerMessage(null), 3500);
-  };
+    if (bannerTimeoutRef.current) {
+      clearTimeout(bannerTimeoutRef.current);
+    }
+    bannerTimeoutRef.current = setTimeout(() => {
+      setBannerMessage(null);
+      bannerTimeoutRef.current = null;
+    }, 3500);
+  }, []);
 
-  const addToast = (title: string, desc: string, type: string = 'info') => {
+  const addToast = useCallback((title: string, desc: string, type: string = 'info') => {
     const id = `${Date.now()}-${Math.random()}`;
     const newToast = {
       id,
@@ -147,10 +155,12 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     };
     setToasts((prev) => [newToast, ...prev.slice(0, 4)]);
 
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
+      toastTimeoutsRef.current.delete(timer);
     }, 4500);
-  };
+    toastTimeoutsRef.current.add(timer);
+  }, []);
 
   // 1. Real-time listener for Firestore `users` collection
   useEffect(() => {
@@ -240,79 +250,26 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     );
 
     return () => unsubscribeActivity();
-  }, [isOpen]);
+  }, [isOpen, addToast]);
 
-  // 3. Real-time listener for Firestore `saved_games` collection (Partidas Guardadas)
+  // 3. Real-time listener for Firestore `saved_games` collection via centralized service
   useEffect(() => {
     if (!isOpen) return;
 
-    const gamesRef = collection(db, 'saved_games');
-    const unsubscribeGames = onSnapshot(
-      gamesRef,
-      (snapshot) => {
-        setIsFirestoreConnected(true);
-        const map = new Map<string, GameSequenceItem>();
-
-        // Populate with current local fallback first, excluding explicitly deleted IDs
-        const currentLocal = getSavedGamesGallery();
-        currentLocal.forEach((g) => {
-          if (g && g.id && !deletedGameIdsRef.current.has(g.id)) {
-            map.set(g.id, g);
-          }
-        });
-
-        // Overlay with Firestore saved_games records
-        snapshot.forEach((docSnap) => {
-          if (deletedGameIdsRef.current.has(docSnap.id)) return;
-          const data = docSnap.data();
-          const gameItem: GameSequenceItem = {
-            id: docSnap.id,
-            round: data.round || 1,
-            ballNumber: data.ballNumber || 0,
-            letter: data.letter,
-            mode: data.mode || '75',
-            timestamp: data.timestamp || '',
-            dateFormatted: data.dateFormatted || '',
-            dailyDate: data.dailyDate || (data.savedAtISO ? data.savedAtISO.split('T')[0] : todayStr),
-            operatorUid: data.operatorUid || '',
-            operatorName: data.operatorName || 'Operadora',
-            operatorEmail: data.operatorEmail || '',
-            durationSeconds: data.durationSeconds || 0,
-            durationFormatted: data.durationFormatted || '0s',
-            totalCollected: data.totalCollected || 0,
-            totalPrizesPaid: data.totalPrizesPaid || 0,
-            netProfit: data.netProfit || 0,
-            currency: data.currency || '$',
-            drawnBallsPlayed: Array.isArray(data.drawnBallsPlayed) ? data.drawnBallsPlayed : [],
-            totalBallsDrawnCount: data.totalBallsDrawnCount || (Array.isArray(data.drawnBallsPlayed) ? data.drawnBallsPlayed.length : 0),
-            rowLeader: data.rowLeader,
-            winningPlayerName: data.winningPlayerName,
-            tableNumber: data.tableNumber,
-            sheetType: data.sheetType || 'multipliers-15',
-            sheet75Snapshot: data.sheet75Snapshot,
-            sheet90Snapshot: data.sheet90Snapshot,
-            totalLinesPlayed: data.totalLinesPlayed !== undefined ? data.totalLinesPlayed : (data.sheetType === 'traditional-90' ? 30 : 68),
-            cageSnapshotImage: data.cageSnapshotImage || undefined,
-          };
-          map.set(docSnap.id, gameItem);
-        });
-
-        const list = Array.from(map.values());
-        // Sort descending by round / id
-        list.sort((a, b) => (b.round || 0) - (a.round || 0));
-        setSavedGamesList(list);
-      },
-      (err) => {
-        console.warn('Firestore saved_games listener error, using local:', err);
-        const currentLocal = getSavedGamesGallery().filter(
-          (g) => g && g.id && !deletedGameIdsRef.current.has(g.id)
-        );
-        setSavedGamesList(currentLocal);
-      }
+    const currentLocal = getSavedGamesGallery().filter(
+      (g) => g && g.id && !deletedGameIdsRef.current.has(g.id)
     );
+    setSavedGamesList(currentLocal);
+
+    const unsubscribeGames = subscribeToSavedGamesFirestore((games) => {
+      setIsFirestoreConnected(true);
+      const filtered = games.filter((g) => g && g.id && !deletedGameIdsRef.current.has(g.id));
+      filtered.sort((a, b) => (b.round || 0) - (a.round || 0));
+      setSavedGamesList(filtered);
+    });
 
     return () => unsubscribeGames();
-  }, [isOpen, todayStr]);
+  }, [isOpen]);
 
   // Role toggle handler
   const handleToggleRole = async (user: AppUser) => {
@@ -328,9 +285,9 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
       );
 
       showBanner(`Rol de ${user.name} actualizado a ${newRole.toUpperCase()}.`);
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error(e);
-      showBanner(`Error al actualizar rol: ${e.message}`);
+      showBanner(`Error al actualizar rol: ${e instanceof Error ? e.message : 'Error'}`);
     }
   };
 
@@ -348,9 +305,9 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
       );
 
       showBanner(`Estado de ${user.name} cambiado a ${newStatus.toUpperCase()}.`);
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error(e);
-      showBanner(`Error al actualizar estado: ${e.message}`);
+      showBanner(`Error al actualizar estado: ${e instanceof Error ? e.message : 'Error'}`);
     }
   };
 
@@ -368,9 +325,9 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
       );
 
       showBanner(`Modalidad de ${user.name} cambiada a Bingo ${newMode} Bolas.`);
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error(e);
-      showBanner(`Error al actualizar modalidad: ${e.message}`);
+      showBanner(`Error al actualizar modalidad: ${e instanceof Error ? e.message : 'Error'}`);
     }
   };
 
@@ -379,11 +336,12 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   // -------------------------------------------------------------
   const filteredSavedGames = useMemo(() => {
     return savedGamesList.filter((game) => {
+      const gameDate = getGameNormalizedDateKey(game);
       // 1. Date Filter
       if (gameDateFilter === 'today') {
-        if (game.dailyDate && game.dailyDate !== todayStr) return false;
+        if (gameDate !== currentLocalDate) return false;
       } else if (gameDateFilter === 'custom' && customDatePicker) {
-        if (game.dailyDate !== customDatePicker) return false;
+        if (gameDate !== customDatePicker) return false;
       }
 
       // 2. Operator Filter
@@ -412,7 +370,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
       return true;
     });
-  }, [savedGamesList, gameDateFilter, customDatePicker, gameOperatorFilter, gameModeFilter, gameSearchTerm, todayStr]);
+  }, [savedGamesList, gameDateFilter, customDatePicker, gameOperatorFilter, gameModeFilter, gameSearchTerm, currentLocalDate]);
 
   // List of distinct operators who have saved games
   const savedGamesOperators = useMemo(() => {
@@ -425,21 +383,12 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     return Array.from(map.entries());
   }, [savedGamesList]);
 
-  // List of distinct dates available
-  const savedGamesDates = useMemo(() => {
-    const set = new Set<string>();
-    savedGamesList.forEach((g) => {
-      if (g.dailyDate) set.add(g.dailyDate);
-    });
-    return Array.from(set).sort().reverse();
-  }, [savedGamesList]);
-
   // -------------------------------------------------------------
   // Daily Lines Counter & Stats (EXCLUSIVE FOR ADMIN)
   // -------------------------------------------------------------
   const todayGames = useMemo(() => {
-    return savedGamesList.filter((g) => g.dailyDate === todayStr);
-  }, [savedGamesList, todayStr]);
+    return savedGamesList.filter((g) => getGameNormalizedDateKey(g) === currentLocalDate);
+  }, [savedGamesList, currentLocalDate]);
 
   const todayLinesTotal = useMemo(() => {
     return todayGames.reduce((acc, g) => acc + (g.totalLinesPlayed || 68), 0);
@@ -448,13 +397,13 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   // Selected date games & lines based on active date filter
   const selectedDateGames = useMemo(() => {
     if (gameDateFilter === 'today') {
-      return savedGamesList.filter((g) => g.dailyDate === todayStr);
+      return savedGamesList.filter((g) => getGameNormalizedDateKey(g) === currentLocalDate);
     }
     if (gameDateFilter === 'custom' && customDatePicker) {
-      return savedGamesList.filter((g) => g.dailyDate === customDatePicker);
+      return savedGamesList.filter((g) => getGameNormalizedDateKey(g) === customDatePicker);
     }
     return savedGamesList;
-  }, [savedGamesList, gameDateFilter, customDatePicker, todayStr]);
+  }, [savedGamesList, gameDateFilter, customDatePicker, currentLocalDate]);
 
   const selectedDateLinesTotal = useMemo(() => {
     return selectedDateGames.reduce(
@@ -501,7 +450,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
       }
     >();
     savedGamesList.forEach((g) => {
-      const d = g.dailyDate || (g.dateFormatted ? g.dateFormatted : todayStr);
+      const d = getGameNormalizedDateKey(g);
       if (!map.has(d)) {
         map.set(d, {
           date: d,
@@ -524,7 +473,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
       entry.prizes += (g.totalPrizesPaid || 0);
     });
     return Array.from(map.values()).sort((a, b) => b.date.localeCompare(a.date));
-  }, [savedGamesList, todayStr]);
+  }, [savedGamesList]);
 
   // Request deletion of an individual game (opens in-app confirmation modal)
   const handleDeleteGame = (game: GameSequenceItem) => {
@@ -555,9 +504,9 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
         setSelectedGameForDetail(null);
       }
       showBanner(`Partida #${game.round} eliminada permanentemente.`);
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Error deleting game:', err);
-      showBanner(`Error al eliminar partida: ${err?.message || 'Error'}`);
+      showBanner(`Error al eliminar partida: ${err instanceof Error ? err.message : 'Error'}`);
     }
   };
 
@@ -581,9 +530,9 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
       const idsToDelete = new Set(targetList.map((g) => g.id).filter(Boolean));
       setSavedGamesList((prev) => prev.filter((g) => !idsToDelete.has(g.id)));
       showBanner(`${targetList.length} partidas eliminadas permanentemente.`);
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Error clearing filtered games:', err);
-      showBanner(`Error al eliminar partidas: ${err?.message || 'Error'}`);
+      showBanner(`Error al eliminar partidas: ${err instanceof Error ? err.message : 'Error'}`);
     }
   };
 
@@ -648,9 +597,9 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
         }
 
         if (updatedGame.sheet90Snapshot) {
-          const updateTable = (t: any) => ({
+          const updateTable = (t: Traditional90Table): Traditional90Table => ({
             ...t,
-            rows: (t.rows || []).map((r: any) => ({
+            rows: (t.rows || []).map((r: Traditional90Row) => ({
               ...r,
               playerName: r.playerName && r.playerName.toLowerCase() === oldName ? newName : r.playerName,
             })),
@@ -665,12 +614,12 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
         }
       }
 
-      await saveGameToFirestoreAndGallery(updatedGame);
+      const { game: verifiedGame } = await updateGameUnified(updatedGame);
 
-      // Update state
-      setSavedGamesList((prev) => prev.map((g) => (g.id === updatedGame.id ? updatedGame : g)));
-      if (selectedGameForDetail && selectedGameForDetail.id === updatedGame.id) {
-        setSelectedGameForDetail(updatedGame);
+      // Update state with confirmed Firestore document
+      setSavedGamesList((prev) => prev.map((g) => (g.id === verifiedGame.id ? verifiedGame : g)));
+      if (selectedGameForDetail && selectedGameForDetail.id === verifiedGame.id) {
+        setSelectedGameForDetail(verifiedGame);
       }
 
       await logActivity(
@@ -681,9 +630,9 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
       showBanner(`Partida #${updatedGame.round} modificada y guardada correctamente.`);
       setEditingGame(null);
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Error saving game modifications:', err);
-      showBanner(`Error al guardar cambios: ${err?.message || 'Error'}`);
+      showBanner(`Error al guardar cambios: ${err instanceof Error ? err.message : 'Error'}`);
     } finally {
       setIsSavingEdit(false);
     }
@@ -760,7 +709,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
     const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(exportPayload, null, 2));
     const downloadAnchor = document.createElement('a');
-    const dateLabel = gameDateFilter === 'today' ? `hoy_${todayStr}` : gameDateFilter === 'custom' ? customDatePicker : 'todas';
+    const dateLabel = gameDateFilter === 'today' ? `hoy_${currentLocalDate}` : gameDateFilter === 'custom' ? customDatePicker : 'todas';
     downloadAnchor.setAttribute('href', dataStr);
     downloadAnchor.setAttribute('download', `partidas_completas_con_planillas_bingo_${dateLabel}.json`);
     document.body.appendChild(downloadAnchor);
@@ -825,7 +774,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
     const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(exportPayload, null, 2));
     const downloadAnchor = document.createElement('a');
-    const dateLabel = gameDateFilter === 'today' ? `hoy_${todayStr}` : gameDateFilter === 'custom' ? customDatePicker : 'todas';
+    const dateLabel = gameDateFilter === 'today' ? `hoy_${currentLocalDate}` : gameDateFilter === 'custom' ? customDatePicker : 'todas';
     downloadAnchor.setAttribute('href', dataStr);
     downloadAnchor.setAttribute('download', `copias_planillas_bingo_${dateLabel}.json`);
     document.body.appendChild(downloadAnchor);
@@ -895,7 +844,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     const csvContent =
       'data:text/csv;charset=utf-8,\uFEFF' + [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
     const downloadAnchor = document.createElement('a');
-    const dateLabel = gameDateFilter === 'today' ? `hoy_${todayStr}` : gameDateFilter === 'custom' ? customDatePicker : 'todas';
+    const dateLabel = gameDateFilter === 'today' ? `hoy_${currentLocalDate}` : gameDateFilter === 'custom' ? customDatePicker : 'todas';
     downloadAnchor.setAttribute('href', encodeURI(csvContent));
     downloadAnchor.setAttribute('download', `partidas_diarias_bingo_${dateLabel}.csv`);
     document.body.appendChild(downloadAnchor);
@@ -904,31 +853,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     showBanner(`Archivo CSV con ${filteredSavedGames.length} partidas descargado en tu dispositivo.`);
   };
 
-  // 4. Export single game detail with full sheet copy
-  const handleExportSingleGameJSON = (game: GameSequenceItem) => {
-    const isBingo90 = game.mode === '90' || game.sheetType === 'traditional-90';
-    const fullSheet = isBingo90
-      ? (game.sheet90Snapshot || createDefaultSheet90())
-      : (game.sheet75Snapshot || createDefaultSheet75());
-
-    const completePayload = {
-      ...game,
-      sheetCopy: fullSheet,
-      sheet75Snapshot: game.sheet75Snapshot || (!isBingo90 ? fullSheet : null),
-      sheet90Snapshot: game.sheet90Snapshot || (isBingo90 ? fullSheet : null),
-    };
-
-    const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(completePayload, null, 2));
-    const downloadAnchor = document.createElement('a');
-    downloadAnchor.setAttribute('href', dataStr);
-    downloadAnchor.setAttribute('download', `partida_completa_con_planilla_ronda_${game.round}_${game.mode || '75'}.json`);
-    document.body.appendChild(downloadAnchor);
-    downloadAnchor.click();
-    downloadAnchor.remove();
-    showBanner(`Partida #${game.round} descargada con su copia completa de planilla.`);
-  };
-
-  // 5. Export single game CARD SHEET COPY in JSON
+  // 4. Export single game CARD SHEET COPY in JSON
   const handleExportSinglePlanillaJSON = (game: GameSequenceItem) => {
     const isBingo90 = game.mode === '90' || game.sheetType === 'traditional-90';
     const sheetData = isBingo90
@@ -1010,7 +935,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
         ['Mesa / Planilla', 'Fila', 'Número 1 (1-30)', 'Número 2 (31-60)', 'Número 3 (61-90)', 'Jugador Asignado', 'Estado Pago', 'Precio Fila ($)', 'Premio Estimado ($)', '¿Es Fila Ganadora?'],
       ];
 
-      const rows: any[] = [];
+      const rows: string[][] = [];
       allTables.forEach((table, tIdx) => {
         const tblNum = table.tableNumber || tIdx + 1;
         (table.rows || []).forEach((row) => {
@@ -1060,7 +985,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
         ['Columna', 'Multiplicador', 'Fila (Línea)', 'B (1-15)', 'I (16-30)', 'N (31-45)', 'G (46-60)', 'O (61-75)', 'Jugador Asignado', 'Precio Casilla ($)', 'Premio Casilla ($)', '¿Línea Ganadora?'],
       ];
 
-      const rows: any[] = [];
+      const rows: string[][] = [];
       (sheet.columns || []).forEach((col) => {
         const mult = col.multiplier || 1;
         const colTitle = col.title || `Col ${col.colNumber}`;
@@ -1102,34 +1027,38 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   };
 
   // Filtered users list
-  const filteredUsers = usersList.filter((u) => {
-    const matchSearch =
-      u.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      u.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (u.id && u.id.toLowerCase().includes(searchTerm.toLowerCase()));
+  const filteredUsers = useMemo(() => {
+    return usersList.filter((u) => {
+      const matchSearch =
+        u.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        u.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (u.id && u.id.toLowerCase().includes(searchTerm.toLowerCase()));
 
-    const matchRole = roleFilter === 'all' || u.role === roleFilter;
-    const matchStatus = statusFilter === 'all' || u.status === statusFilter;
+      const matchRole = roleFilter === 'all' || u.role === roleFilter;
+      const matchStatus = statusFilter === 'all' || u.status === statusFilter;
 
-    return matchSearch && matchRole && matchStatus;
-  });
+      return matchSearch && matchRole && matchStatus;
+    });
+  }, [usersList, searchTerm, roleFilter, statusFilter]);
 
   // Filtered activities list
-  const filteredActivities = activitiesList.filter((act) => {
-    if (activityFilterOperator !== 'all' && act.operatorUid !== activityFilterOperator) {
-      return false;
-    }
-    if (searchTerm.trim()) {
-      const term = searchTerm.toLowerCase();
-      return (
-        act.action.toLowerCase().includes(term) ||
-        (act.details && act.details.toLowerCase().includes(term)) ||
-        act.operatorName.toLowerCase().includes(term) ||
-        act.operatorEmail.toLowerCase().includes(term)
-      );
-    }
-    return true;
-  });
+  const filteredActivities = useMemo(() => {
+    return activitiesList.filter((act) => {
+      if (activityFilterOperator !== 'all' && act.operatorUid !== activityFilterOperator) {
+        return false;
+      }
+      if (searchTerm.trim()) {
+        const term = searchTerm.toLowerCase();
+        return (
+          act.action.toLowerCase().includes(term) ||
+          (act.details && act.details.toLowerCase().includes(term)) ||
+          act.operatorName.toLowerCase().includes(term) ||
+          act.operatorEmail.toLowerCase().includes(term)
+        );
+      }
+      return true;
+    });
+  }, [activitiesList, activityFilterOperator, searchTerm]);
 
   if (!isOpen) return null;
 
@@ -1378,7 +1307,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                   {/* Filter by Mode */}
                   <select
                     value={gameModeFilter}
-                    onChange={(e) => setGameModeFilter(e.target.value as any)}
+                    onChange={(e) => setGameModeFilter(e.target.value as 'all' | '75' | '90')}
                     className="py-1.5 px-2.5 rounded-xl border border-orange-200 bg-white text-xs font-bold text-orange-950 focus:outline-none focus:border-orange-500 cursor-pointer shadow-xs"
                   >
                     <option value="all">Todos los Modos</option>
@@ -1434,7 +1363,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                       </span>
                       <span className="text-xs text-purple-200 font-bold">
                         {gameDateFilter === 'today'
-                          ? `Hoy (${todayStr})`
+                          ? `Hoy (${currentLocalDate})`
                           : gameDateFilter === 'custom' && customDatePicker
                           ? `Fecha seleccionada (${customDatePicker})`
                           : `Total filtrado`}
@@ -1482,7 +1411,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                   </span>
                   {gameDateFilter === 'today' && (
                     <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 text-[10px] font-black border border-emerald-300">
-                      Filtrado: Solo Hoy ({todayStr})
+                      Filtrado: Solo Hoy ({currentLocalDate})
                     </span>
                   )}
                   {gameDateFilter === 'custom' && customDatePicker && (
@@ -1846,7 +1775,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
               <div className="flex items-center gap-2">
                 <select
                   value={roleFilter}
-                  onChange={(e) => setRoleFilter(e.target.value as any)}
+                  onChange={(e) => setRoleFilter(e.target.value as 'all' | 'admin' | 'operator')}
                   className="py-1.5 px-2.5 rounded-xl border border-orange-200 bg-white text-xs font-bold text-orange-950 focus:outline-none focus:border-orange-500 cursor-pointer shadow-xs"
                 >
                   <option value="all">Todos los Rangos</option>
@@ -1856,7 +1785,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
                 <select
                   value={statusFilter}
-                  onChange={(e) => setStatusFilter(e.target.value as any)}
+                  onChange={(e) => setStatusFilter(e.target.value as 'all' | 'active' | 'suspended')}
                   className="py-1.5 px-2.5 rounded-xl border border-orange-200 bg-white text-xs font-bold text-orange-950 focus:outline-none focus:border-orange-500 cursor-pointer shadow-xs"
                 >
                   <option value="all">Todos los Estados</option>
@@ -2148,7 +2077,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                     </thead>
                     <tbody className="divide-y divide-purple-50">
                       {dailyLinesSummary.map((item, idx) => {
-                        const isToday = item.date === todayStr;
+                        const isToday = item.date === currentLocalDate;
                         return (
                           <tr
                             key={item.date || idx}

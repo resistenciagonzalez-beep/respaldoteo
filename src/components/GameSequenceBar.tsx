@@ -1,28 +1,29 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { GameSequenceItem, BingoMode } from '../types';
-import { getBingo75Letter } from '../utils/ballColors';
+import { getBingo75Letter, getBallBadgeColor } from '../utils/ballColors';
+import { getCurrentLocalDateKey, getGameNormalizedDateKey } from '../utils/savedGamesStorage';
 import {
   Trophy,
   Plus,
   Trash2,
   Sparkles,
-  ChevronRight,
   X,
   Clock,
   Table2,
   Eye,
-  DollarSign,
   Play,
   Layers,
   RotateCcw,
   Minimize2,
   Maximize2,
   BookmarkCheck,
+  CheckCircle2,
 } from 'lucide-react';
 
 interface GameSequenceBarProps {
   sequence: GameSequenceItem[];
+  todaySavedGames?: GameSequenceItem[];
   activeRowLeader?: number | null;
   onSelectRowLeader?: (rowLeader: number) => void;
   onOpenGameSnapshot?: (item: GameSequenceItem) => void;
@@ -44,6 +45,7 @@ interface GameSequenceBarProps {
 
 export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
   sequence,
+  todaySavedGames = [],
   activeRowLeader,
   onSelectRowLeader,
   onOpenGameSnapshot,
@@ -62,9 +64,45 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
   isExpanded = false,
   onToggleExpand,
 }) => {
-  const validSequence = (sequence || []).filter(
-    (item) => item && typeof item.ballNumber === 'number' && item.ballNumber > 0
-  );
+  // Combine ONLY today's saved games and current sequence so that ONLY games
+  // made/saved on the current day (without games from the previous day) appear in this right sequence bar.
+  const displayedShortcuts = useMemo(() => {
+    const todayKey = getCurrentLocalDateKey();
+    const map = new Map<string | number, GameSequenceItem & { isSavedToday?: boolean }>();
+
+    // 1. Add games saved today as prominent shortcuts (STRICTLY matching todayKey)
+    (todaySavedGames || []).forEach((saved) => {
+      if (!saved) return;
+      if (getGameNormalizedDateKey(saved) !== todayKey) return;
+      const key = saved.round || saved.id;
+      if (key !== undefined) {
+        map.set(key, { ...saved, isSavedToday: true });
+      }
+    });
+
+    // 2. Add sequence entries (STRICTLY matching todayKey, NEVER from previous days)
+    (sequence || []).forEach((item) => {
+      if (!item) return;
+      const hasBall = typeof item.ballNumber === 'number' && item.ballNumber > 0;
+      const hasSheet = Boolean(item.sheet75Snapshot || item.sheet90Snapshot || item.id);
+      if (!hasBall && !hasSheet) return;
+
+      // Filter out any game not matching todayKey (CRITICAL: exclude games from yesterday or previous days!)
+      if (getGameNormalizedDateKey(item) !== todayKey) return;
+
+      const key = item.round || item.id || `seq_${item.ballNumber}`;
+      if (!map.has(key)) {
+        map.set(key, {
+          ...item,
+          isSavedToday: Boolean(item.sheet75Snapshot || item.sheet90Snapshot || item.id),
+        });
+      }
+    });
+
+    const list = Array.from(map.values());
+    list.sort((a, b) => (b.round || 0) - (a.round || 0));
+    return list;
+  }, [todaySavedGames, sequence]);
 
   const [showAddModal, setShowAddModal] = useState<boolean>(false);
   const [inputTernaStr, setInputTernaStr] = useState<string>('');
@@ -100,18 +138,6 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
     if (onOpenGameSnapshot) {
       onOpenGameSnapshot(item);
     }
-  };
-
-  // Helper to get ball colors
-  const getBallBadgeColor = (num: number) => {
-    if (mode === '75') {
-      if (num <= 15) return 'from-blue-600 to-indigo-700 text-white border-blue-400';
-      if (num <= 30) return 'from-rose-500 to-red-600 text-white border-rose-400';
-      if (num <= 45) return 'from-amber-400 to-yellow-500 text-amber-950 border-amber-300';
-      if (num <= 60) return 'from-emerald-500 to-green-600 text-white border-emerald-400';
-      return 'from-purple-600 to-violet-700 text-white border-purple-400';
-    }
-    return 'from-orange-500 to-amber-600 text-white border-orange-400';
   };
 
   // Helper to render modals directly onto document.body via Portal to guarantee they stay in front of everything
@@ -244,14 +270,18 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
               </div>
               <div>
                 <h3 className="text-[11px] font-black text-[#431407] leading-none uppercase tracking-wide">
-                  Secuencia
+                  Secuencia / Hoy
                 </h3>
               </div>
             </div>
 
-            {validSequence.length > 0 && (
-              <span className="px-1.5 py-0.2 rounded-full bg-orange-100 text-orange-950 text-[9.5px] font-black border border-orange-300 shadow-2xs">
-                {validSequence.length} {validSequence.length === 1 ? 'partida' : 'partidas'}
+            {displayedShortcuts.length > 0 && (
+              <span
+                className="px-1.5 py-0.2 rounded-full bg-emerald-100 text-emerald-950 text-[9.5px] font-black border border-emerald-300 shadow-2xs flex items-center gap-0.5"
+                title="Accesos directos a partidas guardadas y jugadas hoy"
+              >
+                <CheckCircle2 className="w-2.5 h-2.5 text-emerald-600" />
+                <span>{displayedShortcuts.length} {displayedShortcuts.length === 1 ? 'partida' : 'partidas'}</span>
               </span>
             )}
           </div>
@@ -261,7 +291,7 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
             {onSaveCurrentGame && (
               <button
                 type="button"
-                onClick={onSaveCurrentGame}
+                onClick={() => onSaveCurrentGame && onSaveCurrentGame()}
                 className="py-1 px-2 rounded-lg bg-orange-600 hover:bg-orange-500 text-white text-[10px] font-black transition-all shadow-xs flex items-center justify-center gap-1 active:scale-95 cursor-pointer border border-orange-700"
                 title="Guardar partida actual con su secuencia, líneas y saldos en la galería"
               >
@@ -313,7 +343,7 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
               </button>
             )}
 
-            {validSequence.length > 0 && onClearSequence && (
+            {displayedShortcuts.length > 0 && onClearSequence && (
               <button
                 type="button"
                 onClick={() => setShowClearModal(true)}
@@ -326,30 +356,32 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
           </div>
         </div>
 
-        {/* Scrollable list of rounds (Slim, elegant cards) */}
+        {/* Scrollable list of rounds (Direct Shortcuts to Saved Games of the Day) */}
         <div className="flex-1 overflow-y-auto space-y-1.5 pr-0.5 max-h-[600px] scrollbar-thin">
-          {validSequence.length === 0 ? (
+          {displayedShortcuts.length === 0 ? (
             <div className="p-3 rounded-xl bg-[#fffaf5] border border-dashed border-orange-200 text-center space-y-1 my-auto">
               <Sparkles className="w-4 h-4 text-orange-400 mx-auto" />
               <p className="text-[11px] font-bold text-orange-950 leading-tight">
-                Sin bingos aún
+                Sin partidas guardadas hoy
               </p>
               <p className="text-[9.5px] text-orange-900/60 leading-tight">
-                Los números ganadores y planillas de cada partida se listarán aquí.
+                Cada vez que guardes una partida durante el día, se creará aquí su acceso directo.
               </p>
             </div>
           ) : (
-            validSequence.map((item, idx) => {
+            displayedShortcuts.map((item, idx) => {
               const letter =
-                item.letter || (mode === '75' ? getBingo75Letter(item.ballNumber) : undefined);
+                item.letter || (mode === '75' && item.ballNumber > 0 ? getBingo75Letter(item.ballNumber) : undefined);
               const row =
                 item.rowLeader ||
-                (mode === '75'
-                  ? ((item.ballNumber - 1) % 15) + 1
-                  : ((item.ballNumber - 1) % 10) + 1);
-              const isSelected = activeRowLeader === row;
-              const badgeGradient = getBallBadgeColor(item.ballNumber);
-              const hasSnapshot = Boolean(item.sheet75Snapshot || item.sheet90Snapshot);
+                (item.ballNumber > 0
+                  ? (mode === '75'
+                      ? ((item.ballNumber - 1) % 15) + 1
+                      : ((item.ballNumber - 1) % 10) + 1)
+                  : undefined);
+              const isSelected = row !== undefined && activeRowLeader === row;
+              const badgeGradient = item.ballNumber > 0 ? getBallBadgeColor(item.ballNumber, mode !== '75') : 'from-amber-600 to-orange-700 text-white border-amber-400';
+              const isSaved = Boolean(item.isSavedToday || item.sheet75Snapshot || item.sheet90Snapshot);
 
               return (
                 <div
@@ -358,16 +390,26 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
                   className={`p-1.5 rounded-xl transition-all border cursor-pointer select-none shadow-2xs relative overflow-hidden group ${
                     isSelected
                       ? 'bg-amber-100/90 border-amber-400 shadow-xs ring-1 ring-amber-400'
+                      : isSaved
+                      ? 'bg-gradient-to-br from-white to-emerald-50/40 border-emerald-200/90 hover:border-emerald-400 hover:shadow-xs'
                       : 'bg-[#fffaf5] border-orange-200/90 hover:bg-orange-50 hover:border-orange-300'
                   }`}
-                  title={`Partida #${item.round}: Clic para ver planilla completa con datos de recaudación y tiempo`}
+                  title={`Partida #${item.round}: Clic para abrir el acceso directo y ver la planilla completa con sus saldos y números`}
                 >
-                  {/* Top line: Round + Time */}
+                  {/* Top line: Round + Status + Time */}
                   <div className="flex items-center justify-between gap-1 mb-1">
-                    <span className="text-[9px] font-black uppercase tracking-wider text-orange-900 flex items-center gap-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-orange-500" />
-                      P#{item.round}
-                    </span>
+                    <div className="flex items-center gap-1">
+                      <span className="text-[9.5px] font-black uppercase tracking-wider text-orange-950 flex items-center gap-1">
+                        <span className={`w-1.5 h-1.5 rounded-full ${isSaved ? 'bg-emerald-500 animate-pulse' : 'bg-orange-500'}`} />
+                        P#{item.round}
+                      </span>
+                      {isSaved && (
+                        <span className="text-[7.5px] px-1 py-0.2 rounded bg-emerald-100 text-emerald-900 border border-emerald-300 font-black uppercase leading-none">
+                          Guardada
+                        </span>
+                      )}
+                    </div>
+
                     {item.timestamp && (
                       <span className="text-[8.5px] text-orange-900/60 font-semibold flex items-center gap-0.5">
                         <Clock className="w-2 h-2 text-orange-400" />
@@ -383,20 +425,40 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
                       <div
                         className={`w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-gradient-to-tr ${badgeGradient} flex flex-col items-center justify-center font-black shadow-xs border flex-shrink-0`}
                       >
-                        {letter && (
-                          <span className="text-[7px] uppercase tracking-wider leading-none opacity-90">
-                            {letter}
-                          </span>
+                        {item.ballNumber > 0 ? (
+                          <>
+                            {letter && (
+                              <span className="text-[7px] uppercase tracking-wider leading-none opacity-90">
+                                {letter}
+                              </span>
+                            )}
+                            <span className="text-xs leading-none">{item.ballNumber}</span>
+                          </>
+                        ) : (
+                          <Table2 className="w-3.5 h-3.5 text-white" />
                         )}
-                        <span className="text-xs leading-none">{item.ballNumber}</span>
                       </div>
 
                       <div className="flex flex-col min-w-0">
-                        <span className="text-[10px] font-black text-orange-950 truncate flex items-center gap-0.5">
-                          Fila #{row}
-                        </span>
-                        <span className="text-[8.5px] text-emerald-700 font-bold flex items-center gap-0.5 group-hover:text-orange-600 transition-colors">
-                          <Eye className="w-2.5 h-2.5" />
+                        {row !== undefined ? (
+                          <span className="text-[10px] font-black text-orange-950 truncate flex items-center gap-0.5">
+                            Fila #{row}
+                          </span>
+                        ) : (
+                          <span className="text-[10px] font-black text-orange-950 truncate">
+                            Planilla #{item.tableNumber || item.round}
+                          </span>
+                        )}
+
+                        {item.winningPlayerName && (
+                          <span className="text-[8.5px] font-bold text-amber-900 truncate flex items-center gap-0.5" title={`Ganador: ${item.winningPlayerName}`}>
+                            <Trophy className="w-2.5 h-2.5 text-amber-600 flex-shrink-0" />
+                            <span className="truncate">{item.winningPlayerName}</span>
+                          </span>
+                        )}
+
+                        <span className="text-[8.5px] text-emerald-700 font-black flex items-center gap-0.5 group-hover:text-emerald-900 transition-colors mt-0.5">
+                          <Eye className="w-2.5 h-2.5 text-emerald-600" />
                           <span>Ver planilla</span>
                         </span>
                       </div>
@@ -405,12 +467,17 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
                     {/* Financial or Balls metric pill */}
                     <div className="flex flex-col items-end flex-shrink-0">
                       {item.totalCollected !== undefined && item.totalCollected > 0 && (
-                        <span className="text-[9px] font-black text-blue-900">
-                          ${item.totalCollected.toFixed(1)}
+                        <span className="text-[9.5px] font-black text-emerald-800 font-mono">
+                          ${Number(item.totalCollected).toFixed(2)}
+                        </span>
+                      )}
+                      {item.totalLinesPlayed !== undefined && (
+                        <span className="text-[8px] text-slate-500 font-bold">
+                          {item.totalLinesPlayed} lín.
                         </span>
                       )}
                       {item.durationFormatted && (
-                        <span className="text-[8px] text-orange-900/60 font-medium">
+                        <span className="text-[7.5px] text-orange-900/60 font-medium">
                           {item.durationFormatted}
                         </span>
                       )}
@@ -446,10 +513,10 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
             <Trophy className="w-3 h-3 fill-white" />
           </div>
           <span className="text-[11px] font-black text-orange-950 uppercase tracking-wide flex items-center gap-1">
-            Secuencia
-            {validSequence.length > 0 && (
-              <span className="px-1.5 py-0.2 rounded-full bg-orange-200 text-orange-900 text-[9px] font-black border border-orange-300">
-                {validSequence.length}
+            Secuencia / Hoy
+            {displayedShortcuts.length > 0 && (
+              <span className="px-1.5 py-0.2 rounded-full bg-emerald-100 text-emerald-950 text-[9px] font-black border border-emerald-300">
+                {displayedShortcuts.length}
               </span>
             )}
           </span>
@@ -457,21 +524,24 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
 
         {/* Center: Scrollable Chips */}
         <div className="flex-1 flex items-center gap-1 overflow-x-auto py-0.5 px-1 scrollbar-thin">
-          {validSequence.length === 0 ? (
+          {displayedShortcuts.length === 0 ? (
             <div className="text-[10.5px] text-orange-900/60 italic font-medium px-2 flex items-center gap-1">
               <Sparkles className="w-3 h-3 text-orange-400" />
-              <span>Sin partidas registradas</span>
+              <span>Sin partidas guardadas hoy</span>
             </div>
           ) : (
-            validSequence.map((item, idx) => {
+            displayedShortcuts.map((item, idx) => {
               const letter =
-                item.letter || (mode === '75' ? getBingo75Letter(item.ballNumber) : undefined);
+                item.letter || (mode === '75' && item.ballNumber > 0 ? getBingo75Letter(item.ballNumber) : undefined);
               const row =
                 item.rowLeader ||
-                (mode === '75'
-                  ? ((item.ballNumber - 1) % 15) + 1
-                  : ((item.ballNumber - 1) % 10) + 1);
-              const isSelected = activeRowLeader === row;
+                (item.ballNumber > 0
+                  ? (mode === '75'
+                      ? ((item.ballNumber - 1) % 15) + 1
+                      : ((item.ballNumber - 1) % 10) + 1)
+                  : undefined);
+              const isSelected = row !== undefined && activeRowLeader === row;
+              const isSaved = Boolean(item.isSavedToday || item.sheet75Snapshot || item.sheet90Snapshot);
 
               return (
                 <button
@@ -481,17 +551,23 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
                   className={`flex items-center gap-1 px-2 py-0.5 rounded-lg text-xs font-black transition-all flex-shrink-0 cursor-pointer shadow-2xs active:scale-95 ${
                     isSelected
                       ? 'bg-amber-500 text-white border border-amber-600 shadow-xs'
+                      : isSaved
+                      ? 'bg-white hover:bg-emerald-50 text-emerald-950 border border-emerald-300 hover:border-emerald-500'
                       : 'bg-white/95 hover:bg-white text-orange-950 border border-orange-300 hover:border-orange-400'
                   }`}
-                  title={`Partida #${item.round}: Bola ${letter ? `${letter}-` : ''}${item.ballNumber} (Fila #${row}${item.tableNumber ? ` • Planilla #${item.tableNumber}` : ''}${item.winningPlayerName ? ` • ${item.winningPlayerName}` : ''}). Toca para ver planilla guardada`}
+                  title={`Partida #${item.round}: ${item.ballNumber > 0 ? `Bola ${letter ? `${letter}-` : ''}${item.ballNumber}` : 'Planilla'} (Fila #${row || '?'}${item.winningPlayerName ? ` • ${item.winningPlayerName}` : ''}). Toca para ver planilla guardada`}
                 >
-                  <span className="text-[9px] uppercase font-bold text-orange-800">
+                  <span className={`text-[9px] uppercase font-black ${isSaved ? 'text-emerald-700' : 'text-orange-800'}`}>
                     P{item.round}:
                   </span>
-                  <span className="font-black text-xs text-orange-950">
-                    {letter && <span className="text-[9px] mr-0.5 opacity-80">{letter}</span>}
-                    {item.ballNumber}
-                  </span>
+                  {item.ballNumber > 0 ? (
+                    <span className="font-black text-xs text-orange-950">
+                      {letter && <span className="text-[9px] mr-0.5 opacity-80">{letter}</span>}
+                      {item.ballNumber}
+                    </span>
+                  ) : (
+                    <Table2 className="w-3 h-3 text-emerald-600" />
+                  )}
                   {item.tableNumber && (
                     <span className="text-[8.5px] px-1 py-0.2 rounded bg-amber-100 text-amber-900 border border-amber-300 font-extrabold">
                       Pl.{item.tableNumber}
@@ -502,7 +578,7 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
                       {item.winningPlayerName}
                     </span>
                   )}
-                  <Eye className="w-2.5 h-2.5 text-orange-500" />
+                  <Eye className="w-2.5 h-2.5 text-emerald-600" />
                 </button>
               );
             })
@@ -573,7 +649,7 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
           {onSaveCurrentGame && (
             <button
               type="button"
-              onClick={onSaveCurrentGame}
+              onClick={() => onSaveCurrentGame && onSaveCurrentGame()}
               className="px-2 py-0.5 rounded-lg bg-orange-600 hover:bg-orange-500 text-white text-[10px] font-black transition-all shadow-2xs flex items-center gap-1 active:scale-95 cursor-pointer border border-orange-700"
               title="Guardar partida actual con su secuencia, líneas y saldos en partidas guardadas"
             >
@@ -624,7 +700,7 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
             </button>
           )}
 
-          {validSequence.length > 0 && onClearSequence && (
+          {displayedShortcuts.length > 0 && onClearSequence && (
             <button
               type="button"
               onClick={() => setShowClearModal(true)}

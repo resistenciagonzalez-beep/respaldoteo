@@ -5,21 +5,36 @@ import {
   SheetViewType,
   BingoMode,
   AppUser,
+  PlayerSummarySnapshotItem,
+  GameSequenceSnapshot,
 } from '../types';
 import { getBingo75Letter } from './ballColors';
 import { safeSetItem } from './safeStorage';
-import { getOperatorStorageKey, isGameOfOperator } from './savedGamesStorage';
+import {
+  getOperatorStorageKey,
+  isGameOfOperator,
+  getCurrentLocalDateKey,
+  getCurrentLocalTimeString,
+  getSavedGamesGallery,
+  sanitizeOperatorFolderName,
+  buildCanonicalGameId,
+} from './savedGamesStorage';
 
 export const STORAGE_KEY_SHEET_75 = 'bingo_custom_sheet_data_v5';
 export const STORAGE_KEY_SHEET_90 = 'bingo_traditional_90_sheet_v1';
 export const STORAGE_KEY_PREVIOUS_SHEET_75 = 'bingo_previous_sheet_75_archive';
 export const STORAGE_KEY_PREVIOUS_SHEET_90 = 'bingo_previous_sheet_90_archive';
 
+let memoryPreviousSheet75: BingoSheetData | null = null;
+let memoryPreviousSheet90: Traditional90SheetData | null = null;
+
 /**
  * Persist previous game 75-multiplier sheet for the "Mismos" auto-restore feature
  */
 export function savePreviousGameSheet75(sheet: BingoSheetData, user?: AppUser | null): void {
-  if (typeof window === 'undefined' || !sheet) return;
+  if (!sheet) return;
+  memoryPreviousSheet75 = JSON.parse(JSON.stringify(sheet));
+  if (typeof window === 'undefined') return;
   try {
     safeSetItem(STORAGE_KEY_PREVIOUS_SHEET_75, JSON.stringify(sheet));
     if (user) {
@@ -27,7 +42,7 @@ export function savePreviousGameSheet75(sheet: BingoSheetData, user?: AppUser | 
       safeSetItem(opKey, JSON.stringify(sheet));
     }
   } catch (e) {
-    console.error('Error saving previous sheet75', e);
+    console.error('Error caching previous sheet75', e);
   }
 }
 
@@ -35,7 +50,9 @@ export function savePreviousGameSheet75(sheet: BingoSheetData, user?: AppUser | 
  * Persist previous game 90-traditional sheet for the "Mismos" auto-restore feature
  */
 export function savePreviousGameSheet90(sheet: Traditional90SheetData, user?: AppUser | null): void {
-  if (typeof window === 'undefined' || !sheet) return;
+  if (!sheet) return;
+  memoryPreviousSheet90 = JSON.parse(JSON.stringify(sheet));
+  if (typeof window === 'undefined') return;
   try {
     safeSetItem(STORAGE_KEY_PREVIOUS_SHEET_90, JSON.stringify(sheet));
     if (user) {
@@ -43,7 +60,7 @@ export function savePreviousGameSheet90(sheet: Traditional90SheetData, user?: Ap
       safeSetItem(opKey, JSON.stringify(sheet));
     }
   } catch (e) {
-    console.error('Error saving previous sheet90', e);
+    console.error('Error caching previous sheet90', e);
   }
 }
 
@@ -69,19 +86,50 @@ export function hasAssignedRows90(sheet?: Traditional90SheetData | null): boolea
 }
 
 /**
- * Get previous game 75-multiplier sheet from archive, daily folders, or saved games gallery
+ * Get previous game 75-multiplier sheet from Firestore-backed gallery or in-session snapshot
  */
 export function getPreviousGameSheet75(user?: AppUser | null): BingoSheetData | null {
-  if (typeof window === 'undefined') return null;
   try {
     let candidateFallback: BingoSheetData | null = null;
 
-    // 0. Check operator-specific storage key first
+    // 1. Check authoritative Firestore-backed saved games gallery first
+    const gallery = getSavedGamesGallery();
     if (user) {
-      const opKey = getOperatorStorageKey(STORAGE_KEY_PREVIOUS_SHEET_75, user);
-      const opRaw = localStorage.getItem(opKey);
-      if (opRaw) {
-        const parsed: BingoSheetData = JSON.parse(opRaw);
+      for (const g of gallery) {
+        if (isGameOfOperator(g, user) && g.sheet75Snapshot && hasAssignedCells75(g.sheet75Snapshot)) {
+          return g.sheet75Snapshot;
+        }
+      }
+    }
+    for (const g of gallery) {
+      if (g.sheet75Snapshot && hasAssignedCells75(g.sheet75Snapshot)) {
+        return g.sheet75Snapshot;
+      }
+    }
+
+    // 2. Check in-memory previous sheet snapshot
+    if (memoryPreviousSheet75 && Array.isArray(memoryPreviousSheet75.columns)) {
+      if (hasAssignedCells75(memoryPreviousSheet75)) return memoryPreviousSheet75;
+      candidateFallback = memoryPreviousSheet75;
+    }
+
+    // 3. Temporary cache fallback
+    if (typeof window !== 'undefined') {
+      if (user) {
+        const opKey = getOperatorStorageKey(STORAGE_KEY_PREVIOUS_SHEET_75, user);
+        const opRaw = localStorage.getItem(opKey);
+        if (opRaw) {
+          const parsed: BingoSheetData = JSON.parse(opRaw);
+          if (parsed && Array.isArray(parsed.columns)) {
+            if (hasAssignedCells75(parsed)) return parsed;
+            if (!candidateFallback) candidateFallback = parsed;
+          }
+        }
+      }
+
+      const raw = localStorage.getItem(STORAGE_KEY_PREVIOUS_SHEET_75);
+      if (raw) {
+        const parsed: BingoSheetData = JSON.parse(raw);
         if (parsed && Array.isArray(parsed.columns)) {
           if (hasAssignedCells75(parsed)) return parsed;
           if (!candidateFallback) candidateFallback = parsed;
@@ -89,63 +137,6 @@ export function getPreviousGameSheet75(user?: AppUser | null): BingoSheetData | 
       }
     }
 
-    // 1. Check global previous sheet key
-    const raw = localStorage.getItem(STORAGE_KEY_PREVIOUS_SHEET_75);
-    if (raw) {
-      const parsed: BingoSheetData = JSON.parse(raw);
-      if (parsed && Array.isArray(parsed.columns)) {
-        if (hasAssignedCells75(parsed)) return parsed;
-        if (!candidateFallback) candidateFallback = parsed;
-      }
-    }
-
-    // Fallback 1: Check saved games gallery in localStorage (both main key and legacy)
-    const galleryRaw =
-      localStorage.getItem('bingo_saved_games_gallery') ||
-      localStorage.getItem('bingo_saved_games_gallery_v2');
-    if (galleryRaw) {
-      const gallery = JSON.parse(galleryRaw);
-      if (Array.isArray(gallery)) {
-        // First check for this operator's played games with actual cells
-        if (user) {
-          for (let i = 0; i < gallery.length; i++) {
-            const g = gallery[i];
-            if (isGameOfOperator(g, user) && g.sheet75Snapshot && hasAssignedCells75(g.sheet75Snapshot)) {
-              return g.sheet75Snapshot;
-            }
-          }
-        }
-        // Then check any saved game that has assigned cells
-        for (let i = 0; i < gallery.length; i++) {
-          const g = gallery[i];
-          if (g.sheet75Snapshot && hasAssignedCells75(g.sheet75Snapshot)) {
-            return g.sheet75Snapshot;
-          }
-        }
-      }
-    }
-
-    // Fallback 2: Check gameSequence history in localStorage
-    const seqRaw = localStorage.getItem('bingo_game_sequence_history');
-    if (seqRaw) {
-      const seq: GameSequenceItem[] = JSON.parse(seqRaw);
-      if (Array.isArray(seq)) {
-        if (user) {
-          for (let i = seq.length - 1; i >= 0; i--) {
-            if (isGameOfOperator(seq[i], user) && seq[i].sheet75Snapshot && hasAssignedCells75(seq[i].sheet75Snapshot)) {
-              return seq[i].sheet75Snapshot!;
-            }
-          }
-        }
-        for (let i = seq.length - 1; i >= 0; i--) {
-          if (seq[i].sheet75Snapshot && hasAssignedCells75(seq[i].sheet75Snapshot)) {
-            return seq[i].sheet75Snapshot!;
-          }
-        }
-      }
-    }
-
-    // If candidate fallback exists even if empty, return it
     if (candidateFallback) return candidateFallback;
   } catch (e) {
     console.error('Error reading previous sheet75', e);
@@ -154,76 +145,53 @@ export function getPreviousGameSheet75(user?: AppUser | null): BingoSheetData | 
 }
 
 /**
- * Get previous game 90-traditional sheet from archive, daily folders, or saved games gallery
+ * Get previous game 90-traditional sheet from Firestore-backed gallery or in-session snapshot
  */
 export function getPreviousGameSheet90(user?: AppUser | null): Traditional90SheetData | null {
-  if (typeof window === 'undefined') return null;
   try {
     let candidateFallback: Traditional90SheetData | null = null;
 
-    // 0. Check operator-specific storage key first
+    // 1. Check authoritative Firestore-backed saved games gallery first
+    const gallery = getSavedGamesGallery();
     if (user) {
-      const opKey = getOperatorStorageKey(STORAGE_KEY_PREVIOUS_SHEET_90, user);
-      const opRaw = localStorage.getItem(opKey);
-      if (opRaw) {
-        const parsed = JSON.parse(opRaw);
+      for (const g of gallery) {
+        if (isGameOfOperator(g, user) && g.sheet90Snapshot && hasAssignedRows90(g.sheet90Snapshot)) {
+          return g.sheet90Snapshot;
+        }
+      }
+    }
+    for (const g of gallery) {
+      if (g.sheet90Snapshot && hasAssignedRows90(g.sheet90Snapshot)) {
+        return g.sheet90Snapshot;
+      }
+    }
+
+    // 2. Check in-memory previous sheet snapshot
+    if (memoryPreviousSheet90 && (memoryPreviousSheet90.table1 || memoryPreviousSheet90.tables)) {
+      if (hasAssignedRows90(memoryPreviousSheet90)) return memoryPreviousSheet90;
+      candidateFallback = memoryPreviousSheet90;
+    }
+
+    // 3. Temporary cache fallback
+    if (typeof window !== 'undefined') {
+      if (user) {
+        const opKey = getOperatorStorageKey(STORAGE_KEY_PREVIOUS_SHEET_90, user);
+        const opRaw = localStorage.getItem(opKey);
+        if (opRaw) {
+          const parsed = JSON.parse(opRaw);
+          if (parsed && (parsed.table1 || parsed.tables)) {
+            if (hasAssignedRows90(parsed)) return parsed;
+            if (!candidateFallback) candidateFallback = parsed;
+          }
+        }
+      }
+
+      const raw = localStorage.getItem(STORAGE_KEY_PREVIOUS_SHEET_90);
+      if (raw) {
+        const parsed = JSON.parse(raw);
         if (parsed && (parsed.table1 || parsed.tables)) {
           if (hasAssignedRows90(parsed)) return parsed;
           if (!candidateFallback) candidateFallback = parsed;
-        }
-      }
-    }
-
-    // 1. Check global key
-    const raw = localStorage.getItem(STORAGE_KEY_PREVIOUS_SHEET_90);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && (parsed.table1 || parsed.tables)) {
-        if (hasAssignedRows90(parsed)) return parsed;
-        if (!candidateFallback) candidateFallback = parsed;
-      }
-    }
-
-    // Fallback: Check saved games gallery
-    const galleryRaw =
-      localStorage.getItem('bingo_saved_games_gallery') ||
-      localStorage.getItem('bingo_saved_games_gallery_v2');
-    if (galleryRaw) {
-      const gallery = JSON.parse(galleryRaw);
-      if (Array.isArray(gallery)) {
-        if (user) {
-          for (let i = 0; i < gallery.length; i++) {
-            const g = gallery[i];
-            if (isGameOfOperator(g, user) && g.sheet90Snapshot && hasAssignedRows90(g.sheet90Snapshot)) {
-              return g.sheet90Snapshot;
-            }
-          }
-        }
-        for (let i = 0; i < gallery.length; i++) {
-          const g = gallery[i];
-          if (g.sheet90Snapshot && hasAssignedRows90(g.sheet90Snapshot)) {
-            return g.sheet90Snapshot;
-          }
-        }
-      }
-    }
-
-    // Fallback 2: Check gameSequence history in localStorage
-    const seqRaw = localStorage.getItem('bingo_90_game_sequence_history');
-    if (seqRaw) {
-      const seq: GameSequenceItem[] = JSON.parse(seqRaw);
-      if (Array.isArray(seq)) {
-        if (user) {
-          for (let i = seq.length - 1; i >= 0; i--) {
-            if (isGameOfOperator(seq[i], user) && seq[i].sheet90Snapshot && hasAssignedRows90(seq[i].sheet90Snapshot)) {
-              return seq[i].sheet90Snapshot!;
-            }
-          }
-        }
-        for (let i = seq.length - 1; i >= 0; i--) {
-          if (seq[i].sheet90Snapshot && hasAssignedRows90(seq[i].sheet90Snapshot)) {
-            return seq[i].sheet90Snapshot!;
-          }
         }
       }
     }
@@ -235,179 +203,9 @@ export function getPreviousGameSheet90(user?: AppUser | null): Traditional90Shee
   return null;
 }
 
-export interface PlayerPreviousRowValue75 {
-  rowNumber: number;
-  totalMultiplier: number;
-  columnIndexes: number[];
-  columnMultipliers: number[];
-}
-
-/**
- * Get row-by-row total multipliers and column values a player had in previous game.
- * Performs a deep backwards search in saved games gallery to guarantee that any player
- * who participated in previous matches will have their exact numbers recovered.
- */
-export function getPreviousPlayerRowValues75(
-  playerId: string,
-  playerName?: string,
-  sheetOverride?: BingoSheetData | null,
-  user?: AppUser | null
-): Record<number, PlayerPreviousRowValue75> {
-  const targetName = playerName?.toLowerCase().trim();
-  const rowMap: Record<number, PlayerPreviousRowValue75> = {};
-
-  const extractFromSheet = (sheet?: BingoSheetData | null): boolean => {
-    if (!sheet || !Array.isArray(sheet.columns)) return false;
-    let found = false;
-    sheet.columns.forEach((col, cIdx) => {
-      if (!Array.isArray(col.cells)) return;
-      const mult = col.multiplier || 1;
-      col.cells.forEach((cell, rIdx) => {
-        const matchesId = cell.playerId && cell.playerId === playerId;
-        const matchesName = targetName && cell.playerName && cell.playerName.toLowerCase().trim() === targetName;
-        if (matchesId || matchesName) {
-          found = true;
-          const rowNum = cell.rowNumber || rIdx + 1;
-          if (!rowMap[rowNum]) {
-            rowMap[rowNum] = {
-              rowNumber: rowNum,
-              totalMultiplier: 0,
-              columnIndexes: [],
-              columnMultipliers: [],
-            };
-          }
-          rowMap[rowNum].totalMultiplier += mult;
-          rowMap[rowNum].columnIndexes.push(cIdx);
-          rowMap[rowNum].columnMultipliers.push(mult);
-        }
-      });
-    });
-    return found;
-  };
-
-  // 1. Try sheetOverride or primary previous sheet
-  const primarySheet = sheetOverride || getPreviousGameSheet75(user);
-  if (extractFromSheet(primarySheet)) {
-    return rowMap;
-  }
-
-  // 2. Deep backwards search through saved games gallery
-  if (typeof window !== 'undefined') {
-    try {
-      const galleryRaw =
-        localStorage.getItem('bingo_saved_games_gallery') ||
-        localStorage.getItem('bingo_saved_games_gallery_v2');
-      if (galleryRaw) {
-        const gallery = JSON.parse(galleryRaw);
-        if (Array.isArray(gallery)) {
-          // Search games belonging to this operator first
-          for (const g of gallery) {
-            if (user && !isGameOfOperator(g, user)) continue;
-            if (g.sheet75Snapshot && extractFromSheet(g.sheet75Snapshot)) {
-              return rowMap;
-            }
-          }
-          // Search across all saved games in gallery
-          for (const g of gallery) {
-            if (g.sheet75Snapshot && extractFromSheet(g.sheet75Snapshot)) {
-              return rowMap;
-            }
-          }
-        }
-      }
-
-      // 3. Fallback to sequence history
-      const seqRaw = localStorage.getItem('bingo_game_sequence_history');
-      if (seqRaw) {
-        const seq = JSON.parse(seqRaw);
-        if (Array.isArray(seq)) {
-          for (let i = seq.length - 1; i >= 0; i--) {
-            if (seq[i].sheet75Snapshot && extractFromSheet(seq[i].sheet75Snapshot)) {
-              return rowMap;
-            }
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('Deep search for player previous rows:', e);
-    }
-  }
-
-  return rowMap;
-}
-
-/**
- * Find all cells in the previous game that belonged to a given player in 75 Multipliers.
- * Deep searches saved games if not found in immediate snapshot.
- */
-export function getPreviousPlayerCells75(
-  playerId: string,
-  playerName?: string,
-  user?: AppUser | null
-): { columnIndex: number; rowIndex: number; rowNumber: number; multiplier?: number }[] {
-  const targetName = playerName?.toLowerCase().trim();
-  const found: { columnIndex: number; rowIndex: number; rowNumber: number; multiplier?: number }[] = [];
-
-  const extractCells = (sheet?: BingoSheetData | null): boolean => {
-    if (!sheet || !Array.isArray(sheet.columns)) return false;
-    let anyFound = false;
-    sheet.columns.forEach((col, cIdx) => {
-      if (!Array.isArray(col.cells)) return;
-      const mult = col.multiplier || 1;
-      col.cells.forEach((cell, rIdx) => {
-        const matchesId = cell.playerId && cell.playerId === playerId;
-        const matchesName = targetName && cell.playerName && cell.playerName.toLowerCase().trim() === targetName;
-        if (matchesId || matchesName) {
-          anyFound = true;
-          found.push({
-            columnIndex: cIdx,
-            rowIndex: rIdx,
-            rowNumber: cell.rowNumber || rIdx + 1,
-            multiplier: mult,
-          });
-        }
-      });
-    });
-    return anyFound;
-  };
-
-  // 1. Try primary sheet
-  const prevSheet = getPreviousGameSheet75(user);
-  if (extractCells(prevSheet)) {
-    return found;
-  }
-
-  // 2. Deep search in saved games gallery
-  if (typeof window !== 'undefined') {
-    try {
-      const galleryRaw =
-        localStorage.getItem('bingo_saved_games_gallery') ||
-        localStorage.getItem('bingo_saved_games_gallery_v2');
-      if (galleryRaw) {
-        const gallery = JSON.parse(galleryRaw);
-        if (Array.isArray(gallery)) {
-          for (const g of gallery) {
-            if (user && !isGameOfOperator(g, user)) continue;
-            if (g.sheet75Snapshot && extractCells(g.sheet75Snapshot)) {
-              return found;
-            }
-          }
-          for (const g of gallery) {
-            if (g.sheet75Snapshot && extractCells(g.sheet75Snapshot)) {
-              return found;
-            }
-          }
-        }
-      }
-    } catch {}
-  }
-
-  return found;
-}
-
 /**
  * Find all rows in the previous game that belonged to a given player in 90 Traditional.
- * Deep searches saved games if not found in immediate snapshot.
+ * Searches authoritative Firestore-backed saved games gallery and in-session snapshot.
  */
 export function getPreviousPlayerRows90(
   playerId: string,
@@ -419,19 +217,26 @@ export function getPreviousPlayerRows90(
 
   const extractRows = (sheet?: Traditional90SheetData | null): boolean => {
     if (!sheet) return false;
-    const allTables = sheet.tables && sheet.tables.length > 0
-      ? sheet.tables
-      : [sheet.table1, sheet.table2].filter(Boolean);
+    const allTables =
+      sheet.tables && sheet.tables.length > 0
+        ? sheet.tables
+        : [sheet.table1, sheet.table2].filter(Boolean);
     let anyFound = false;
     allTables.forEach((table, tIdx) => {
       if (table && Array.isArray(table.rows)) {
         const tblNum = table.tableNumber || tIdx + 1;
         table.rows.forEach((row, rIdx) => {
           const matchesId = row.playerId && row.playerId === playerId;
-          const matchesName = targetName && row.playerName && row.playerName.toLowerCase().trim() === targetName;
+          const matchesName =
+            targetName && row.playerName && row.playerName.toLowerCase().trim() === targetName;
           if (matchesId || matchesName) {
             anyFound = true;
-            found.push({ table: tblNum, rowIndex: rIdx, rowNumber: row.rowNumber || rIdx + 1, paid: row.paid });
+            found.push({
+              table: tblNum,
+              rowIndex: rIdx,
+              rowNumber: row.rowNumber || rIdx + 1,
+              paid: row.paid,
+            });
           }
         });
       }
@@ -445,34 +250,24 @@ export function getPreviousPlayerRows90(
     return found;
   }
 
-  // 2. Deep search in saved games gallery
-  if (typeof window !== 'undefined') {
-    try {
-      const galleryRaw =
-        localStorage.getItem('bingo_saved_games_gallery') ||
-        localStorage.getItem('bingo_saved_games_gallery_v2');
-      if (galleryRaw) {
-        const gallery = JSON.parse(galleryRaw);
-        if (Array.isArray(gallery)) {
-          for (const g of gallery) {
-            if (user && !isGameOfOperator(g, user)) continue;
-            if (g.sheet90Snapshot && extractRows(g.sheet90Snapshot)) {
-              return found;
-            }
-          }
-          for (const g of gallery) {
-            if (g.sheet90Snapshot && extractRows(g.sheet90Snapshot)) {
-              return found;
-            }
-          }
-        }
+  // 2. Deep search in authoritative Firestore-backed saved games gallery
+  const gallery = getSavedGamesGallery();
+  if (user) {
+    for (const g of gallery) {
+      if (!isGameOfOperator(g, user)) continue;
+      if (g.sheet90Snapshot && extractRows(g.sheet90Snapshot)) {
+        return found;
       }
-    } catch {}
+    }
+  }
+  for (const g of gallery) {
+    if (g.sheet90Snapshot && extractRows(g.sheet90Snapshot)) {
+      return found;
+    }
   }
 
   return found;
 }
-
 
 /**
  * Format duration in seconds to "Xm Ys" or "X min"
@@ -550,7 +345,7 @@ export function createDefaultSheet90(): Traditional90SheetData {
 }
 
 /**
- * Read current 75-ball multiplier sheet snapshot from localStorage
+ * Read current 75-ball multiplier sheet snapshot from temporary localStorage cache
  */
 export function getStoredSheet75Snapshot(): BingoSheetData | null {
   if (typeof window === 'undefined') return null;
@@ -569,7 +364,7 @@ export function getStoredSheet75Snapshot(): BingoSheetData | null {
 }
 
 /**
- * Read current 90-ball traditional sheet snapshot from localStorage
+ * Read current 90-ball traditional sheet snapshot from temporary localStorage cache
  */
 export function getStoredSheet90Snapshot(): Traditional90SheetData | null {
   if (typeof window === 'undefined') return null;
@@ -606,7 +401,6 @@ export function calculateSheet75Financials(
   const baseTernaPrize = sheet.baseTernaPrize ?? 0.50;
   const baseAmboPrize = sheet.baseAmboPrize ?? 0.25;
 
-  // Total collected = sum of cost of all occupied cells
   sheet.columns.forEach((col) => {
     const mult = col.multiplier || 1;
     const cellCost = col.columnPrice !== undefined ? col.columnPrice : mult * baseCost;
@@ -620,7 +414,6 @@ export function calculateSheet75Financials(
 
   let totalPrizesPaid = 0;
 
-  // 1. Bingo prize (if active / won)
   if (sheet.bingoEnabled !== false && winningRow && winningRow >= 1 && winningRow <= (sheet.totalRows || 15)) {
     sheet.columns.forEach((col) => {
       const mult = col.multiplier || 1;
@@ -632,7 +425,6 @@ export function calculateSheet75Financials(
     });
   }
 
-  // 2. Terna prize (if active / won)
   if (sheet.ternaEnabled && ternaRow && ternaRow >= 1 && ternaRow <= (sheet.totalRows || 15)) {
     sheet.columns.forEach((col) => {
       const mult = col.multiplier || 1;
@@ -644,7 +436,6 @@ export function calculateSheet75Financials(
     });
   }
 
-  // 3. Ambo prize (if active / won)
   if (sheet.amboEnabled && amboRow && amboRow >= 1 && amboRow <= (sheet.totalRows || 15)) {
     sheet.columns.forEach((col) => {
       const mult = col.multiplier || 1;
@@ -675,9 +466,10 @@ export function calculateSheet90Financials(
     return { totalCollected: 0, totalPrizesPaid: 0, netProfit: 0 };
   }
 
-  const allTables = sheet.tables && sheet.tables.length > 0
-    ? sheet.tables
-    : [sheet.table1, sheet.table2].filter(Boolean);
+  const allTables =
+    sheet.tables && sheet.tables.length > 0
+      ? sheet.tables
+      : [sheet.table1, sheet.table2].filter(Boolean);
 
   let totalCollected = 0;
   let totalPrizesPaid = 0;
@@ -710,7 +502,7 @@ export function calculateSheet90Financials(
 }
 
 /**
- * Factory to build a complete GameSequenceItem with snapshot & financials
+ * Factory to build a complete GameSequenceItem with deterministic ID, dailyDate subfolder, snapshot & financials
  */
 export function buildCompleteGameSequenceItem(params: {
   round: number;
@@ -740,8 +532,10 @@ export function buildCompleteGameSequenceItem(params: {
   shiftDate?: string;
   shiftStartTime?: string;
   shiftEndTime?: string;
-  playerSummarySnapshot?: any[];
-  sequenceSnapshot?: any;
+  playerSummarySnapshot?: PlayerSummarySnapshotItem[];
+  sequenceSnapshot?: GameSequenceSnapshot;
+  dailyDate?: string;
+  timestamp?: string;
 }): GameSequenceItem {
   const {
     round,
@@ -765,24 +559,31 @@ export function buildCompleteGameSequenceItem(params: {
     operatorEmail,
     shiftId,
     shiftName,
-    shiftDate,
     shiftStartTime,
     shiftEndTime,
     playerSummarySnapshot,
     sequenceSnapshot,
+    dailyDate: paramDailyDate,
+    timestamp: paramTimestamp,
   } = params;
 
   const resolvedLetter =
     letter || (mode === '75' && typeof ballNumber === 'number' && ballNumber > 0 ? getBingo75Letter(ballNumber) : undefined);
 
   const now = new Date();
-  const timestamp = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const timestamp = paramTimestamp || getCurrentLocalTimeString();
   const dateFormatted = now.toLocaleDateString('es-ES', {
     day: '2-digit',
     month: 'short',
     year: 'numeric',
   });
-  const dailyDate = now.toISOString().split('T')[0];
+  const dailyDate = paramDailyDate && /^\d{4}-\d{2}-\d{2}$/.test(paramDailyDate.trim())
+    ? paramDailyDate.trim()
+    : getCurrentLocalDateKey();
+  const cleanOperatorName = (operatorName || 'Operadora Principal').trim();
+  const operatorFolder = sanitizeOperatorFolderName(cleanOperatorName);
+  const subfolderDay = dailyDate;
+  const folderPath = `${operatorFolder}/${subfolderDay}`;
 
   const durationFormatted = formatGameDuration(durationSeconds);
 
@@ -814,7 +615,6 @@ export function buildCompleteGameSequenceItem(params: {
     netProfit = totalCollected - totalPrizesPaid;
   }
 
-  // Calculate exact total lines played in this match (NO hardcoded fake numbers, NO multiplying)
   let calculatedLines = 0;
   if (params.totalLinesPlayed !== undefined && params.totalLinesPlayed >= 0) {
     calculatedLines = params.totalLinesPlayed;
@@ -824,35 +624,30 @@ export function buildCompleteGameSequenceItem(params: {
       0
     );
   } else if (sheet90Snapshot) {
-    const allTables = sheet90Snapshot.tables && sheet90Snapshot.tables.length > 0
-      ? sheet90Snapshot.tables
-      : [sheet90Snapshot.table1, sheet90Snapshot.table2].filter(Boolean);
+    const allTables =
+      sheet90Snapshot.tables && sheet90Snapshot.tables.length > 0
+        ? sheet90Snapshot.tables
+        : [sheet90Snapshot.table1, sheet90Snapshot.table2].filter(Boolean);
     calculatedLines = allTables.length * 30;
-  } else {
-    calculatedLines = 0;
   }
 
-  // Fallback sequence snapshot from localStorage if not provided
   let resolvedSeqSnapshot = sequenceSnapshot;
-  if (!resolvedSeqSnapshot && typeof window !== 'undefined') {
-    try {
-      const rawSeq = localStorage.getItem('bingo_sheet_custom_sequence');
-      if (rawSeq) {
-        resolvedSeqSnapshot = {
-          customSeqEntries: JSON.parse(rawSeq),
-          amboRow: amboLeader,
-          ternaRow: ternaLeader,
-          bingoRow: rowLeader,
-          amboBall,
-          ternaBall,
-          bingoBall: ballNumber,
-        };
-      }
-    } catch {}
+  if (!resolvedSeqSnapshot && sheet75Snapshot?.customSeqEntries) {
+    resolvedSeqSnapshot = {
+      customSeqEntries: sheet75Snapshot.customSeqEntries,
+      amboRow: amboLeader,
+      ternaRow: ternaLeader,
+      bingoRow: rowLeader,
+      amboBall,
+      ternaBall,
+      bingoBall: ballNumber,
+    };
   }
+
+  const canonicalId = buildCanonicalGameId(operatorFolder, dailyDate, mode, round);
 
   return {
-    id: `game_${Date.now()}_${round}`,
+    id: canonicalId,
     round,
     ballNumber,
     ternaBall,
@@ -860,11 +655,15 @@ export function buildCompleteGameSequenceItem(params: {
     amboBall,
     amboLeader,
     letter: resolvedLetter,
+    mode,
     timestamp,
     dateFormatted,
     dailyDate,
+    subfolderDay,
+    operatorFolder,
+    folderPath,
     operatorUid: operatorUid || 'anon',
-    operatorName: (operatorName || 'Operadora Principal').trim(),
+    operatorName: cleanOperatorName,
     operatorEmail: operatorEmail || '',
     durationSeconds,
     durationFormatted,
@@ -884,7 +683,7 @@ export function buildCompleteGameSequenceItem(params: {
     markedNumbers: [...drawnBallsPlayed],
     shiftId,
     shiftName,
-    shiftDate: shiftDate || dailyDate,
+    shiftDate: dailyDate,
     shiftStartTime,
     shiftEndTime,
     playerSummarySnapshot,
@@ -913,30 +712,17 @@ export function dispatchResetSheetMarksEvent(
 }
 
 /**
- * Get the most recent previous game result item to show direct results immediately
+ * Get the most recent previous game result item from Firestore-backed gallery or in-session snapshot
  */
 export function getPreviousGameResultItem(): GameSequenceItem | null {
-  if (typeof window === 'undefined') return null;
   try {
-    // 1. Try saved games gallery (ordered most recent first)
-    const galleryRaw = localStorage.getItem('bingo_saved_games_gallery');
-    if (galleryRaw) {
-      const parsed = JSON.parse(galleryRaw);
-      if (Array.isArray(parsed) && parsed.length > 0 && parsed[0]) {
-        return parsed[0];
-      }
+    // 1. Primary source: Firestore-backed saved games gallery (ordered most recent first)
+    const gallery = getSavedGamesGallery();
+    if (gallery.length > 0 && gallery[0]) {
+      return gallery[0];
     }
 
-    // 2. Try sequence history
-    const seqRaw = localStorage.getItem('bingo_game_sequence_history');
-    if (seqRaw) {
-      const seq: GameSequenceItem[] = JSON.parse(seqRaw);
-      if (Array.isArray(seq) && seq.length > 0) {
-        return seq[seq.length - 1];
-      }
-    }
-
-    // 3. Try previous sheet 75 snapshot
+    // 2. Fallback: in-session previous sheet 75 snapshot
     const sheet75 = getPreviousGameSheet75();
     if (sheet75) {
       const fin75 = calculateSheet75Financials(sheet75);
@@ -945,6 +731,7 @@ export function getPreviousGameResultItem(): GameSequenceItem | null {
         round: 1,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
         dateFormatted: new Date().toLocaleDateString(),
+        dailyDate: getCurrentLocalDateKey(),
         sheetType: 'multipliers-15',
         sheet75Snapshot: sheet75,
         totalCollected: fin75.totalCollected,
@@ -959,7 +746,7 @@ export function getPreviousGameResultItem(): GameSequenceItem | null {
       };
     }
 
-    // 4. Try previous sheet 90 snapshot
+    // 3. Fallback: in-session previous sheet 90 snapshot
     const sheet90 = getPreviousGameSheet90();
     if (sheet90) {
       const fin90 = calculateSheet90Financials(sheet90);
@@ -968,6 +755,7 @@ export function getPreviousGameResultItem(): GameSequenceItem | null {
         round: 1,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
         dateFormatted: new Date().toLocaleDateString(),
+        dailyDate: getCurrentLocalDateKey(),
         sheetType: 'traditional-90',
         sheet90Snapshot: sheet90,
         totalCollected: fin90.totalCollected,

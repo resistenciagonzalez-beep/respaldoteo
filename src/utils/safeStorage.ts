@@ -46,7 +46,8 @@ export function cleanupLocalStorageForQuota(): void {
           });
           try {
             localStorage.setItem('bingo_saved_games_gallery', JSON.stringify(cleaned));
-          } catch {
+          } catch (shrinkErr) {
+            console.warn('Gallery still exceeds quota, stripping images:', shrinkErr);
             // If still too large, strip all cageSnapshotImages
             const noImages = cleaned.map((g) => {
               if (g.cageSnapshotImage) {
@@ -58,10 +59,14 @@ export function cleanupLocalStorageForQuota(): void {
             });
             try {
               localStorage.setItem('bingo_saved_games_gallery', JSON.stringify(noImages.slice(0, 30)));
-            } catch {}
+            } catch (innerErr) {
+              console.warn('Could not shrink gallery storage further:', innerErr);
+            }
           }
         }
-      } catch {}
+      } catch (galleryErr) {
+        console.warn('Error parsing gallery during quota cleanup:', galleryErr);
+      }
     }
 
     // 2. Clean cageSnapshotImage from sequence histories (they never need images!)
@@ -71,11 +76,11 @@ export function cleanupLocalStorageForQuota(): void {
         const parsed: GameSequenceItem[] = JSON.parse(seq75Raw);
         if (Array.isArray(parsed)) {
           const cleaned = sanitizeSequenceForStorage(parsed);
-          try {
-            localStorage.setItem('bingo_game_sequence_history', JSON.stringify(cleaned.slice(0, 40)));
-          } catch {}
+          localStorage.setItem('bingo_game_sequence_history', JSON.stringify(cleaned.slice(0, 40)));
         }
-      } catch {}
+      } catch (seq75Err) {
+        console.warn('Error cleaning seq75 storage:', seq75Err);
+      }
     }
 
     const seq90Raw = localStorage.getItem('bingo_90_game_sequence_history');
@@ -84,11 +89,11 @@ export function cleanupLocalStorageForQuota(): void {
         const parsed: GameSequenceItem[] = JSON.parse(seq90Raw);
         if (Array.isArray(parsed)) {
           const cleaned = sanitizeSequenceForStorage(parsed);
-          try {
-            localStorage.setItem('bingo_90_game_sequence_history', JSON.stringify(cleaned.slice(0, 40)));
-          } catch {}
+          localStorage.setItem('bingo_90_game_sequence_history', JSON.stringify(cleaned.slice(0, 40)));
         }
-      } catch {}
+      } catch (seq90Err) {
+        console.warn('Error cleaning seq90 storage:', seq90Err);
+      }
     }
 
     // 3. Clean cageSnapshotImage from operator day subfolder caches
@@ -104,11 +109,15 @@ export function cleanupLocalStorageForQuota(): void {
                 const cleaned = sanitizeSequenceForStorage(parsed);
                 localStorage.setItem(k, JSON.stringify(cleaned));
               }
-            } catch {}
+            } catch (folderErr) {
+              console.warn('Error cleaning folder cache item:', folderErr);
+            }
           }
         }
       }
-    } catch {}
+    } catch (scanErr) {
+      console.warn('Error scanning localStorage keys:', scanErr);
+    }
 
     // 4. Remove obsolete legacy keys (NEVER delete previous_sheet archives which are needed for Mismos!)
     const legacyKeys = [
@@ -119,11 +128,19 @@ export function cleanupLocalStorageForQuota(): void {
     legacyKeys.forEach((k) => {
       try {
         localStorage.removeItem(k);
-      } catch {}
+      } catch (rmErr) {
+        console.warn('Error removing legacy key:', rmErr);
+      }
     });
   } catch (err) {
     console.warn('cleanupLocalStorageForQuota encountered an error:', err);
   }
+}
+
+interface StorageErrorLike {
+  name?: string;
+  code?: number;
+  message?: string;
 }
 
 /**
@@ -137,14 +154,15 @@ export function safeSetItem(key: string, value: string): boolean {
   try {
     localStorage.setItem(key, value);
     return true;
-  } catch (e: any) {
+  } catch (err: unknown) {
+    const e = err as StorageErrorLike | null;
     const isQuotaError =
-      e &&
-      (e.name === 'QuotaExceededError' ||
-        e.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
-        e.code === 22 ||
-        e.code === 1014 ||
-        String(e.message || '').toLowerCase().includes('quota'));
+      Boolean(e) &&
+      (e?.name === 'QuotaExceededError' ||
+        e?.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+        e?.code === 22 ||
+        e?.code === 1014 ||
+        String(e?.message || '').toLowerCase().includes('quota'));
 
     if (isQuotaError) {
       console.warn(`localStorage quota exceeded while saving key "${key}". Running emergency cleanup...`);
@@ -163,12 +181,13 @@ export function safeSetItem(key: string, value: string): boolean {
             localStorage.setItem(key, JSON.stringify(sanitized.slice(0, 30)));
             return true;
           } else if (typeof parsed === 'object' && parsed !== null) {
-            const sanitizedObj = sanitizeItemForStorage(parsed);
+            const sanitizedObj = sanitizeItemForStorage(parsed as GameSequenceItem);
             localStorage.setItem(key, JSON.stringify(sanitizedObj));
             return true;
           }
-        } catch {
+        } catch (parseErr) {
           // Non-JSON or cannot be sanitized further
+          console.warn('Value could not be sanitized as JSON during quota recovery:', parseErr);
         }
 
         // Retry 3: If this is a critical small key (like user session), free non-critical caches
@@ -178,7 +197,9 @@ export function safeSetItem(key: string, value: string): boolean {
             localStorage.removeItem('bingo_90_game_sequence_history');
             localStorage.setItem(key, value);
             return true;
-          } catch {}
+          } catch (finalErr) {
+            console.warn('Final retry for session key failed:', finalErr);
+          }
         }
 
         console.warn(`Could not persist key "${key}" to localStorage even after cleanup:`, retryErr);
@@ -186,7 +207,7 @@ export function safeSetItem(key: string, value: string): boolean {
       }
     }
 
-    console.warn(`Error writing to localStorage for key "${key}":`, e);
+    console.warn(`Error writing to localStorage for key "${key}":`, err);
     return false;
   }
 }

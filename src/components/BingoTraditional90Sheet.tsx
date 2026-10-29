@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import {
   BingoSheetPlayer,
   Traditional90SheetData,
@@ -16,18 +16,12 @@ import {
   Users,
   Sparkles,
   Plus,
-  Coins,
   Trophy,
   X,
-  Palette,
-  CheckCircle2,
   AlertCircle,
   Sliders,
-  Maximize2,
-  Minimize2,
   Heart,
   RotateCcw,
-  Target,
   Layers,
   ChevronRight,
   ChevronUp,
@@ -78,18 +72,6 @@ interface BingoTraditional90SheetProps {
   savedGamesCount?: number;
 }
 
-// Preset highlighter colors matching authentic physical fluorescent markers
-const HIGHLIGHTER_COLORS = [
-  { name: 'Amarillo Neón', hex: '#fef08a', border: '#facc15', text: '#713f12' },
-  { name: 'Rosa Chicle', hex: '#fbcfe8', border: '#f472b6', text: '#831843' },
-  { name: 'Verde Lima', hex: '#bbf7d0', border: '#4ade80', text: '#14532d' },
-  { name: 'Naranja Vivo', hex: '#fed7aa', border: '#fb923c', text: '#7c2d12' },
-  { name: 'Celeste / Cyan', hex: '#bae6fd', border: '#38bdf8', text: '#0c4a6e' },
-  { name: 'Lavanda / Violeta', hex: '#ddd6fe', border: '#a78bfa', text: '#4c1d95' },
-  { name: 'Coral / Salmón', hex: '#fecdd3', border: '#fb7185', text: '#881337' },
-  { name: 'Turquesa', hex: '#99f6e4', border: '#2dd4bf', text: '#134e4a' },
-];
-
 const STORAGE_KEY = 'bingo_traditional_90_sheet_v1';
 
 // Generate default 30 rows with triples: [r, r+30, r+60]
@@ -115,7 +97,6 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
   onStopBolillero,
   onBingoCompleted,
   autoHighlightDrawn: autoHighlightDrawnProp,
-  onToggleAutoHighlightDrawn,
   currentBall,
   onDrawBall,
   isPlaying = false,
@@ -168,8 +149,8 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
           table2: parsedTables[1] || defaultTable2,
         };
       }
-    } catch {
-      // Fallback to default
+    } catch (err) {
+      console.warn('Error loading initial 90-ball sheet:', err);
     }
 
     return {
@@ -211,8 +192,8 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
       if (saved && ['ultra', 'compact', 'mini', 'standard'].includes(saved)) {
         return saved;
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      console.warn('Error reading bingo_90_sheet_density:', err);
     }
     return 'ultra';
   });
@@ -221,8 +202,8 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
     setSheetDensity(newDensity);
     try {
       localStorage.setItem('bingo_90_sheet_density', newDensity);
-    } catch {
-      // ignore
+    } catch (err) {
+      console.warn('Error saving bingo_90_sheet_density:', err);
     }
   };
   const [showPlayersBar, setShowPlayersBar] = useState<boolean>(true);
@@ -231,28 +212,17 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
   const celebratedSheetBingosRef = useRef<Set<string>>(new Set());
 
   // Auto highlight drawn balls toggle (persisted)
-  const [localAutoHighlightDrawn, setLocalAutoHighlightDrawn] = useState<boolean>(() => {
+  const [localAutoHighlightDrawn] = useState<boolean>(() => {
     try {
       return localStorage.getItem('bingo_auto_highlight_drawn') === 'true';
-    } catch {
+    } catch (err) {
+      console.warn('Error reading bingo_auto_highlight_drawn:', err);
       return true;
     }
   });
 
   const isAutoHighlightActive =
     autoHighlightDrawnProp !== undefined ? autoHighlightDrawnProp : localAutoHighlightDrawn;
-
-  const handleToggleAutoHighlight = (checked: boolean) => {
-    setLocalAutoHighlightDrawn(checked);
-    try {
-      localStorage.setItem('bingo_auto_highlight_drawn', String(checked));
-    } catch {
-      // ignore
-    }
-    if (onToggleAutoHighlightDrawn) {
-      onToggleAutoHighlightDrawn(checked);
-    }
-  };
 
   const [manuallyCircledNumbers, setManuallyCircledNumbers] = useState<Set<number>>(new Set());
 
@@ -274,7 +244,8 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
 
   // Listen to new game / clean slate event to wipe old marks and reset celebration locks
   useEffect(() => {
-    const handleResetEvent = (e: any) => {
+    const handleResetEvent = (evt: Event) => {
+      const e = evt as CustomEvent<{ keepPlayers?: boolean }>;
       if (sheetDataRef.current) {
         savePreviousGameSheet90(sheetDataRef.current, currentUser);
       }
@@ -306,14 +277,30 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
     return () => {
       window.removeEventListener('bingo_reset_sheet_for_new_game', handleResetEvent);
     };
-  }, []);
+  }, [currentUser]);
 
   // Toast notification
   const [notification, setNotification] = useState<string | null>(null);
-  const notify = (msg: string) => {
+  const notifyTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (notifyTimeoutRef.current) {
+        clearTimeout(notifyTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const notify = useCallback((msg: string) => {
     setNotification(msg);
-    setTimeout(() => setNotification(null), 3000);
-  };
+    if (notifyTimeoutRef.current) {
+      clearTimeout(notifyTimeoutRef.current);
+    }
+    notifyTimeoutRef.current = setTimeout(() => {
+      setNotification(null);
+      notifyTimeoutRef.current = null;
+    }, 3000);
+  }, []);
 
   // Range assignment modal state
   const [showRangeModal, setShowRangeModal] = useState<boolean>(false);
@@ -328,7 +315,8 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
   const [isToolbarHidden, setIsToolbarHidden] = useState<boolean>(() => {
     try {
       return localStorage.getItem('bingo_90_toolbar_hidden') === 'true';
-    } catch {
+    } catch (err) {
+      console.warn('Error reading bingo_90_toolbar_hidden:', err);
       return false;
     }
   });
@@ -338,8 +326,8 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
       const next = !prev;
       try {
         localStorage.setItem('bingo_90_toolbar_hidden', String(next));
-      } catch {
-        // ignore
+      } catch (err) {
+        console.warn('Error saving bingo_90_toolbar_hidden:', err);
       }
       notify(next ? 'Barra de opciones oculta. Máximo espacio vertical activo.' : 'Barra de opciones restaurada.');
       return next;
@@ -349,7 +337,7 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
   // Undo history stack for up to 4 moves / actions
   const [sheet90UndoStack, setSheet90UndoStack] = useState<Traditional90Table[][]>([]);
 
-  const pushUndoSnapshot90 = (tablesToSave?: Traditional90Table[]) => {
+  const pushUndoSnapshot90 = useCallback((tablesToSave?: Traditional90Table[]) => {
     setSheetData((current) => {
       const source = tablesToSave || (current.tables && current.tables.length > 0 ? current.tables : [current.table1, current.table2]);
       const cloned = source.map((tbl) => ({
@@ -359,9 +347,9 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
       setSheet90UndoStack((prev) => [cloned, ...prev].slice(0, 4));
       return current;
     });
-  };
+  }, []);
 
-  const handleUndo90 = () => {
+  const handleUndo90 = useCallback(() => {
     if (sheet90UndoStack.length === 0) {
       notify('No hay movimientos previos para deshacer (máximo 4)');
       return;
@@ -375,7 +363,7 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
       table2: prevTables[1] || prev.table2,
     }));
     notify(`Acción deshecha. Movimientos restantes: ${rest.length}/4`);
-  };
+  }, [sheet90UndoStack, notify]);
 
   // Keyboard shortcut listener for Ctrl+Z / Cmd+Z to undo in 90-ball sheet
   useEffect(() => {
@@ -389,7 +377,7 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [sheet90UndoStack]);
+  }, [handleUndo90]);
 
   // Direct modal for viewing previous game results
   const [directPreviousGameItem, setDirectPreviousGameItem] = useState<GameSequenceItem | null>(null);
@@ -602,13 +590,16 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
   }, [drawnSet, manuallyCircledNumbers]);
 
   // Helper to calculate hits on 3 numbers
-  const getRowHits = (numbers: number[]) => {
-    const hitCount = numbers.filter((n) => effectiveHitsSet.has(n)).length;
-    return {
-      count: hitCount,
-      isBingo: hitCount === 3,
-    };
-  };
+  const getRowHits = useCallback(
+    (numbers: number[]) => {
+      const hitCount = numbers.filter((n) => effectiveHitsSet.has(n)).length;
+      return {
+        count: hitCount,
+        isBingo: hitCount === 3,
+      };
+    },
+    [effectiveHitsSet]
+  );
 
   // Winning rows across ALL open planillas
   const winningRows = useMemo(() => {
@@ -637,7 +628,7 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
     });
 
     return list;
-  }, [tablesList, effectiveHitsSet]);
+  }, [tablesList, getRowHits]);
 
   // AUTOMATICALLY STOP BOLILLERO WHEN A ROW REACHES 3 NUMBERS ON ANY OPEN PLANILLA
   useEffect(() => {
@@ -668,7 +659,7 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
         }
       }
     }
-  }, [winningRows, onStopBolillero, onBingoCompleted]);
+  }, [winningRows, onStopBolillero, onBingoCompleted, notify]);
 
   // Selected player object
   const activePlayer = useMemo(() => {

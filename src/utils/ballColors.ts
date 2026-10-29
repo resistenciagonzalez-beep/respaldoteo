@@ -116,3 +116,15 @@ export function getBallSpec(number: number, mode: BingoMode, theme: ThemeName): 
     }
   }
 }
+
+export function getBallBadgeColor(num: number, is90: boolean = false): string {
+  if (is90) {
+    return 'from-orange-500 to-amber-600 text-white border-orange-300';
+  }
+  if (num <= 15) return 'from-blue-600 to-indigo-700 text-white border-blue-400';
+  if (num <= 30) return 'from-rose-500 to-red-600 text-white border-rose-400';
+  if (num <= 45) return 'from-amber-400 to-yellow-500 text-amber-950 border-amber-300';
+  if (num <= 60) return 'from-emerald-500 to-green-600 text-white border-emerald-400';
+  return 'from-purple-600 to-violet-700 text-white border-purple-400';
+}
+

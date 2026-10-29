@@ -1,10 +1,37 @@
 import { OperatorShift, GameSequenceItem } from '../types';
-import { doc, setDoc, collection, onSnapshot, serverTimestamp } from 'firebase/firestore';
+import { doc, setDoc, serverTimestamp, collection, onSnapshot } from 'firebase/firestore';
 import { db } from '../firebase';
 import { safeSetItem } from './safeStorage';
 
 export const STORAGE_KEY_OPERATOR_SHIFTS = 'bingo_operator_shifts_v1';
-export const STORAGE_KEY_ACTIVE_LINES_PREFIX = 'bingo_active_lines_';
+
+const firestoreShiftsMemoryStore = new Map<string, OperatorShift>();
+let hasSyncedShiftsWithFirestore = false;
+let shiftsUnsubscribe: (() => void) | null = null;
+
+function ensureShiftsSubscription(): void {
+  if (typeof window === 'undefined' || shiftsUnsubscribe) return;
+  try {
+    shiftsUnsubscribe = onSnapshot(
+      collection(db, 'operator_shifts'),
+      (snapshot) => {
+        firestoreShiftsMemoryStore.clear();
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data() as OperatorShift;
+          const id = data.id || docSnap.id;
+          firestoreShiftsMemoryStore.set(id, { ...data, id });
+        });
+        hasSyncedShiftsWithFirestore = true;
+        saveShiftsToLocalCache(Array.from(firestoreShiftsMemoryStore.values()));
+      },
+      (err) => {
+        console.warn('Firestore operator_shifts subscription notice:', err);
+      }
+    );
+  } catch (err) {
+    console.warn('Could not initialize operator_shifts listener:', err);
+  }
+}
 
 function getCanonicalOpKey(operatorUid?: string, operatorName?: string): string {
   if (operatorUid && operatorUid !== 'anon') return operatorUid;
@@ -13,9 +40,14 @@ function getCanonicalOpKey(operatorUid?: string, operatorName?: string): string 
 }
 
 /**
- * Get all stored shifts from localStorage
+ * Get all stored shifts from Firestore-backed memory store (with temporary cache fallback on boot)
  */
 export function getAllShifts(): OperatorShift[] {
+  ensureShiftsSubscription();
+  if (hasSyncedShiftsWithFirestore || firestoreShiftsMemoryStore.size > 0) {
+    return Array.from(firestoreShiftsMemoryStore.values());
+  }
+
   if (typeof window === 'undefined') return [];
   try {
     const raw = localStorage.getItem(STORAGE_KEY_OPERATOR_SHIFTS);
@@ -24,17 +56,17 @@ export function getAllShifts(): OperatorShift[] {
       if (Array.isArray(parsed)) return parsed;
     }
   } catch (e) {
-    console.error('Error reading operator shifts', e);
+    console.error('Error reading temporary operator shifts cache', e);
   }
   return [];
 }
 
 /**
- * Save shifts list to localStorage
+ * Save shifts list to temporary localStorage cache
  */
-function saveShiftsToLocal(shifts: OperatorShift[]): void {
+function saveShiftsToLocalCache(shifts: OperatorShift[]): void {
   if (typeof window === 'undefined') return;
-  safeSetItem(STORAGE_KEY_OPERATOR_SHIFTS, JSON.stringify(shifts));
+  safeSetItem(STORAGE_KEY_OPERATOR_SHIFTS, JSON.stringify(shifts.slice(0, 50)));
 }
 
 /**
@@ -59,7 +91,6 @@ export function getActiveShift(
     return existing;
   }
 
-  // Create fresh active shift
   const now = new Date();
   const newShift: OperatorShift = {
     id: `shift_${Date.now()}_${canonical}`,
@@ -78,16 +109,18 @@ export function getActiveShift(
     gameIds: [],
   };
 
+  firestoreShiftsMemoryStore.set(newShift.id, newShift);
   const updated = [newShift, ...all];
-  saveShiftsToLocal(updated);
+  saveShiftsToLocalCache(updated);
 
-  // Sync to Firestore in background
   try {
     setDoc(doc(db, 'operator_shifts', newShift.id), {
       ...newShift,
       createdAt: serverTimestamp(),
-    }).catch(() => {});
-  } catch {}
+    }).catch((err) => console.warn('Could not sync new shift to Firestore:', err));
+  } catch (err) {
+    console.warn('Error scheduling shift Firestore write:', err);
+  }
 
   return newShift;
 }
@@ -123,15 +156,20 @@ export function resetOperatorActiveLines(
         ...s,
         totalLines: 0,
       };
+      firestoreShiftsMemoryStore.set(s.id, resetShift);
       try {
-        setDoc(doc(db, 'operator_shifts', s.id), resetShift).catch(() => {});
-      } catch {}
+        setDoc(doc(db, 'operator_shifts', s.id), resetShift).catch((err) =>
+          console.warn('Error syncing reset shift to Firestore:', err)
+        );
+      } catch (err) {
+        console.warn('Error invoking setDoc for reset shift:', err);
+      }
       return resetShift;
     }
     return s;
   });
 
-  saveShiftsToLocal(updated);
+  saveShiftsToLocalCache(updated);
 
   if (typeof window !== 'undefined') {
     window.dispatchEvent(
@@ -184,7 +222,6 @@ export async function recordGameToActiveShift(
     };
   }
 
-  // Add this game's exact metrics to shift
   const gameId = game.id || `game_${Date.now()}`;
   const updatedGameIds = currentActive.gameIds.includes(gameId)
     ? currentActive.gameIds
@@ -214,7 +251,6 @@ export async function recordGameToActiveShift(
     updatedShift.endTime = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     updatedShift.closedAtISO = now.toISOString();
 
-    // Prepare fresh new active shift for next games
     nextNewShift = {
       id: `shift_${Date.now() + 1}_${canonical}`,
       operatorUid,
@@ -233,13 +269,15 @@ export async function recordGameToActiveShift(
     };
   }
 
-  // Replace in shifts array
+  firestoreShiftsMemoryStore.set(updatedShift.id, updatedShift);
+  if (nextNewShift) {
+    firestoreShiftsMemoryStore.set(nextNewShift.id, nextNewShift);
+  }
+
   const filtered = all.filter((s) => s.id !== updatedShift.id);
   const nextList = nextNewShift ? [nextNewShift, updatedShift, ...filtered] : [updatedShift, ...filtered];
+  saveShiftsToLocalCache(nextList);
 
-  saveShiftsToLocal(nextList);
-
-  // Sync to Firestore
   try {
     await setDoc(doc(db, 'operator_shifts', updatedShift.id), {
       ...updatedShift,
@@ -269,55 +307,4 @@ export async function recordGameToActiveShift(
   }
 
   return { shift: updatedShift, isClosed };
-}
-
-/**
- * Real-time listener for Firestore operator_shifts collection
- */
-export function subscribeToShiftsFirestore(
-  callback: (shifts: OperatorShift[]) => void
-): () => void {
-  if (typeof window === 'undefined') return () => {};
-
-  try {
-    const q = collection(db, 'operator_shifts');
-    const unsubscribe = onSnapshot(
-      q,
-      (snapshot) => {
-        const remoteMap = new Map<string, OperatorShift>();
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data() as OperatorShift;
-          const key = data.id || docSnap.id;
-          remoteMap.set(key, { ...data, id: key });
-        });
-
-        // Merge with local storage
-        const localList = getAllShifts();
-        localList.forEach((localItem) => {
-          if (!localItem || !localItem.id) return;
-          if (!remoteMap.has(localItem.id)) {
-            remoteMap.set(localItem.id, localItem);
-          }
-        });
-
-        const merged = Array.from(remoteMap.values());
-        merged.sort((a, b) => {
-          const timeA = new Date(a.timestampISO || 0).getTime();
-          const timeB = new Date(b.timestampISO || 0).getTime();
-          return timeB - timeA;
-        });
-
-        saveShiftsToLocal(merged);
-        callback(merged);
-      },
-      (error) => {
-        console.warn('Firestore operator_shifts subscription error:', error);
-      }
-    );
-
-    return unsubscribe;
-  } catch (err) {
-    console.warn('Could not initialize operator_shifts subscription:', err);
-    return () => {};
-  }
 }

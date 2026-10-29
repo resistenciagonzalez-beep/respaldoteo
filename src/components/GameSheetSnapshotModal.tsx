@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { GameSequenceItem } from '../types';
-import { getBingo75Letter } from '../utils/ballColors';
+import { getBingo75Letter, getBallBadgeColor } from '../utils/ballColors';
 import {
   X,
   Trophy,
@@ -12,9 +12,6 @@ import {
   Printer,
   ChevronLeft,
   ChevronRight,
-  Hash,
-  Sparkles,
-  CheckCircle2,
   Table2,
   ListOrdered,
   FileDown,
@@ -63,18 +60,6 @@ export const GameSheetSnapshotModal: React.FC<GameSheetSnapshotModalProps> = ({
 
   const handlePrint = () => {
     window.print();
-  };
-
-  // Ball badge color
-  const getBallBadgeColor = (num: number) => {
-    if (item.sheetType === 'traditional-90') {
-      return 'from-orange-500 to-amber-600 text-white border-orange-300';
-    }
-    if (num <= 15) return 'from-blue-600 to-indigo-700 text-white border-blue-400';
-    if (num <= 30) return 'from-rose-500 to-red-600 text-white border-rose-400';
-    if (num <= 45) return 'from-amber-400 to-yellow-500 text-amber-950 border-amber-300';
-    if (num <= 60) return 'from-emerald-500 to-green-600 text-white border-emerald-400';
-    return 'from-purple-600 to-violet-700 text-white border-purple-400';
   };
 
   const letter = item.letter || (item.sheetType !== 'traditional-90' ? getBingo75Letter(item.ballNumber) : undefined);
@@ -196,7 +181,8 @@ export const GameSheetSnapshotModal: React.FC<GameSheetSnapshotModalProps> = ({
           <div className="bg-white p-2.5 rounded-2xl border border-orange-200 shadow-2xs flex items-center gap-2.5">
             <div
               className={`w-11 h-11 rounded-2xl bg-gradient-to-tr ${getBallBadgeColor(
-                item.ballNumber
+                item.ballNumber,
+                item.sheetType === 'traditional-90'
               )} flex flex-col items-center justify-center font-black shadow-xs border flex-shrink-0`}
             >
               {letter && <span className="text-[9px] uppercase leading-none opacity-90">{letter}</span>}
@@ -417,7 +403,7 @@ export const GameSheetSnapshotModal: React.FC<GameSheetSnapshotModalProps> = ({
                               </td>
 
                               {/* Cells */}
-                              {item.sheet75Snapshot?.columns.map((col, cIdx) => {
+                              {item.sheet75Snapshot?.columns.map((col) => {
                                 const cell = col.cells.find((c) => c.rowNumber === rowNum);
                                 const hasPlayer = cell && (cell.playerName || cell.playerId);
 

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Lock,
   Mail,
@@ -14,7 +14,6 @@ import {
   Crown,
   Gamepad2,
   Loader2,
-  KeyRound,
   ShieldAlert,
   CircleDot,
   Grid3X3,
@@ -35,7 +34,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   onOpenAdmin,
   onAccessDeniedNotice,
 }) => {
-  const { currentUser, login, register, logout, loading, error, clearError, isAdmin } = useAuth();
+  const { currentUser, login, register, logout, error, clearError, isAdmin } = useAuth();
 
   const [mode, setMode] = useState<'login' | 'register'>('login');
   
@@ -53,6 +52,15 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [localSuccessMsg, setLocalSuccessMsg] = useState<string | null>(null);
+  const closeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (closeTimeoutRef.current) {
+        clearTimeout(closeTimeoutRef.current);
+      }
+    };
+  }, []);
 
   if (!isOpen) return null;
 
@@ -74,7 +82,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
     if (res.success) {
       setLocalSuccessMsg('¡Inicio de sesión exitoso!');
-      setTimeout(() => {
+      if (closeTimeoutRef.current) clearTimeout(closeTimeoutRef.current);
+      closeTimeoutRef.current = setTimeout(() => {
         setLocalSuccessMsg(null);
         onClose();
       }, 750);
@@ -97,7 +106,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
     if (res.success) {
       setLocalSuccessMsg(`¡Cuenta creada con éxito! Bienvenido a Bingo ${regAssignedMode}, ${regName.trim()}.`);
-      setTimeout(() => {
+      if (closeTimeoutRef.current) clearTimeout(closeTimeoutRef.current);
+      closeTimeoutRef.current = setTimeout(() => {
         setLocalSuccessMsg(null);
         onClose();
       }, 950);

@@ -1,6 +1,6 @@
 import React from 'react';
-import { BingoSheetData, BingoSheetColumn } from '../types';
-import { Trophy, Award, Sparkles, X, Users, ChevronDown, ChevronUp } from 'lucide-react';
+import { BingoSheetData } from '../types';
+import { Trophy, X, Users, ChevronDown, ChevronUp } from 'lucide-react';
 
 interface BingoWinningRowBannerProps {
   winningRowNumber: number;

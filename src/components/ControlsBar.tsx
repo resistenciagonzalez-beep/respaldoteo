@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { memo } from 'react';
 import { SpeedPreset } from '../types';
 import {
   Play,
@@ -39,12 +39,10 @@ const SPEED_OPTIONS: { preset: SpeedPreset; label: string; seconds: number }[] =
   { preset: 'turbo', label: 'Turbo (0.8s)', seconds: 0.8 },
 ];
 
-export const ControlsBar: React.FC<ControlsBarProps> = ({
+export const ControlsBar: React.FC<ControlsBarProps> = memo(({
   isPlaying,
   isExtracting,
   remainingCount,
-  totalBalls,
-  speed,
   speedSeconds,
   voiceEnabled,
   sfxEnabled,
@@ -231,4 +229,4 @@ export const ControlsBar: React.FC<ControlsBarProps> = ({
       </div>
     </div>
   );
-};
+});

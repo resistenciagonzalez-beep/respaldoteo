@@ -2,7 +2,7 @@ import React from 'react';
 import { Ball, BingoMode, ThemeName } from '../types';
 import { getBallSpec } from '../utils/ballColors';
 import { getSpanishNickname } from '../utils/bingoNicknames';
-import { X, History, FileText } from 'lucide-react';
+import { X, History } from 'lucide-react';
 
 interface HistoryModalProps {
   isOpen: boolean;

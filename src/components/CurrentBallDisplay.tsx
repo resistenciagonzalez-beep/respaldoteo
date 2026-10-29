@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo, memo } from 'react';
 import { Ball, BingoMode, ThemeName } from '../types';
 import { getBallSpec } from '../utils/ballColors';
 import { getSpanishNickname } from '../utils/bingoNicknames';
@@ -14,7 +14,7 @@ interface CurrentBallDisplayProps {
   ternaInfo?: { ballNumber: number; rowLeader: number } | null;
 }
 
-export const CurrentBallDisplay: React.FC<CurrentBallDisplayProps> = ({
+export const CurrentBallDisplay: React.FC<CurrentBallDisplayProps> = memo(({
   currentBall,
   drawnBalls,
   mode,
@@ -24,9 +24,15 @@ export const CurrentBallDisplay: React.FC<CurrentBallDisplayProps> = ({
   ternaInfo = null,
 }) => {
   // Last 5 balls excluding current (or last 5 drawn overall)
-  const recentBalls = drawnBalls.slice(-6, -1).reverse();
-  const currentSpec = currentBall ? getBallSpec(currentBall.number, mode, theme) : null;
-  const nickname = currentBall && sayNicknames ? getSpanishNickname(currentBall.number) : null;
+  const recentBalls = useMemo(() => drawnBalls.slice(-6, -1).reverse(), [drawnBalls]);
+  const currentSpec = useMemo(
+    () => (currentBall ? getBallSpec(currentBall.number, mode, theme) : null),
+    [currentBall, mode, theme]
+  );
+  const nickname = useMemo(
+    () => (currentBall && sayNicknames ? getSpanishNickname(currentBall.number) : null),
+    [currentBall, sayNicknames]
+  );
 
   return (
     <div id="current-ball-container" className="flex flex-col items-center justify-center p-2.5 sm:p-3 w-full">
@@ -180,4 +186,4 @@ export const CurrentBallDisplay: React.FC<CurrentBallDisplayProps> = ({
       </div>
     </div>
   );
-};
+});

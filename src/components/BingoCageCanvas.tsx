@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, memo } from 'react';
 import { ThemeName } from '../types';
 import { sfx } from '../utils/audio';
 
@@ -22,7 +22,7 @@ interface SimulatedBall {
   number: number;
 }
 
-export const BingoCageCanvas: React.FC<BingoCageCanvasProps> = ({
+export const BingoCageCanvas: React.FC<BingoCageCanvasProps> = memo(({
   isSpinning,
   isExtracting,
   theme,
@@ -35,6 +35,16 @@ export const BingoCageCanvas: React.FC<BingoCageCanvasProps> = ({
   const rotationAngleRef = useRef<number>(0);
   const rotationSpeedRef = useRef<number>(0.02);
   const lastRattleTimeRef = useRef<number>(0);
+
+  // Refs for animation loop so prop updates don't reset canvas dimensions or restart RAF loop
+  const isSpinningRef = useRef<boolean>(isSpinning);
+  isSpinningRef.current = isSpinning;
+  const isExtractingRef = useRef<boolean>(isExtracting);
+  isExtractingRef.current = isExtracting;
+  const themeRef = useRef<ThemeName>(theme);
+  themeRef.current = theme;
+  const sfxEnabledRef = useRef<boolean>(sfxEnabled);
+  sfxEnabledRef.current = sfxEnabled;
 
   // Initialize particles / balls inside the cage
   useEffect(() => {
@@ -103,28 +113,33 @@ export const BingoCageCanvas: React.FC<BingoCageCanvasProps> = ({
     window.addEventListener('resize', handleResize);
 
     const render = (time: number) => {
+      const currentIsSpinning = isSpinningRef.current;
+      const currentIsExtracting = isExtractingRef.current;
+      const currentTheme = themeRef.current;
+      const currentSfxEnabled = sfxEnabledRef.current;
+
       ctx.clearRect(0, 0, width, height);
 
       const centerX = width / 2;
       const centerY = height / 2 - 10;
 
       // Determine rotation speed
-      const targetSpeed = isExtracting ? 0.18 : isSpinning ? 0.09 : 0.012;
+      const targetSpeed = currentIsExtracting ? 0.18 : currentIsSpinning ? 0.09 : 0.012;
       rotationSpeedRef.current += (targetSpeed - rotationSpeedRef.current) * 0.08;
       rotationAngleRef.current += rotationSpeedRef.current;
 
       const angle = rotationAngleRef.current;
 
       // Play audio rattle occasionally when spinning fast
-      if (sfxEnabled && (isSpinning || isExtracting)) {
-        if (time - lastRattleTimeRef.current > (isExtracting ? 120 : 220)) {
-          sfx.playBallRattle(isExtracting ? 0.6 : 0.35);
+      if (currentSfxEnabled && (currentIsSpinning || currentIsExtracting)) {
+        if (time - lastRattleTimeRef.current > (currentIsExtracting ? 120 : 220)) {
+          sfx.playBallRattle(currentIsExtracting ? 0.6 : 0.35);
           lastRattleTimeRef.current = time;
         }
       }
 
       // 1. Draw Stand & Base (Mechanical structure)
-      drawStand(ctx, centerX, centerY, SPHERE_RADIUS, theme);
+      drawStand(ctx, centerX, centerY, SPHERE_RADIUS, currentTheme);
 
       // 2. Update and simulate balls inside sphere
       const balls = ballsRef.current;
@@ -135,8 +150,8 @@ export const BingoCageCanvas: React.FC<BingoCageCanvasProps> = ({
       balls.forEach((b) => {
         // Gravity & Centrifugal force when rotating
         b.vy += gravity;
-        if (isSpinning || isExtracting) {
-          const turb = isExtracting ? 4.5 : 2.2;
+        if (currentIsSpinning || currentIsExtracting) {
+          const turb = currentIsExtracting ? 4.5 : 2.2;
           b.vx += (Math.random() - 0.5) * turb - b.y * 0.015 * (rotationSpeedRef.current * 10);
           b.vy += (Math.random() - 0.5) * turb + b.x * 0.015 * (rotationSpeedRef.current * 10);
           b.vz += (Math.random() - 0.5) * turb;
@@ -172,7 +187,7 @@ export const BingoCageCanvas: React.FC<BingoCageCanvasProps> = ({
       });
 
       // 3. Draw Back Wires of the Cage Sphere
-      drawCageWireframe(ctx, centerX, centerY, SPHERE_RADIUS, angle, theme, false);
+      drawCageWireframe(ctx, centerX, centerY, SPHERE_RADIUS, angle, currentTheme, false);
 
       // 4. Sort and Draw Balls (sorted by Z for 3D depth)
       const sortedBalls = [...balls].sort((a, b) => a.z - b.z);
@@ -189,7 +204,7 @@ export const BingoCageCanvas: React.FC<BingoCageCanvasProps> = ({
         ctx.beginPath();
         ctx.arc(projX, projY, radius, 0, Math.PI * 2);
 
-        if (theme === 'neon') {
+        if (currentTheme === 'neon') {
           ctx.fillStyle = '#0a0e1a';
           ctx.fill();
           ctx.lineWidth = 1.5;
@@ -200,10 +215,10 @@ export const BingoCageCanvas: React.FC<BingoCageCanvasProps> = ({
           ctx.arc(projX, projY, radius * 0.35, 0, Math.PI * 2);
           ctx.fillStyle = b.color;
           ctx.fill();
-        } else if (theme === 'minimalist') {
+        } else if (currentTheme === 'minimalist') {
           ctx.fillStyle = b.color;
           ctx.fill();
-        } else if (theme === 'vintage') {
+        } else if (currentTheme === 'vintage') {
           const grad = ctx.createRadialGradient(
             projX - radius * 0.3,
             projY - radius * 0.3,
@@ -236,11 +251,11 @@ export const BingoCageCanvas: React.FC<BingoCageCanvasProps> = ({
       });
 
       // 5. Draw Front Wires and Glass Sphere Sheen
-      drawCageWireframe(ctx, centerX, centerY, SPHERE_RADIUS, angle, theme, true);
-      drawSphereGlassHighlight(ctx, centerX, centerY, SPHERE_RADIUS, theme);
+      drawCageWireframe(ctx, centerX, centerY, SPHERE_RADIUS, angle, currentTheme, true);
+      drawSphereGlassHighlight(ctx, centerX, centerY, SPHERE_RADIUS, currentTheme);
 
       // 6. Draw Ejection Chute / Output Hopper
-      drawEjectionChute(ctx, centerX, centerY, SPHERE_RADIUS, theme, isExtracting);
+      drawEjectionChute(ctx, centerX, centerY, SPHERE_RADIUS, currentTheme, currentIsExtracting);
 
       animFrameRef.current = requestAnimationFrame(render);
     };
@@ -251,7 +266,7 @@ export const BingoCageCanvas: React.FC<BingoCageCanvasProps> = ({
       window.removeEventListener('resize', handleResize);
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
     };
-  }, [isSpinning, isExtracting, theme, sfxEnabled]);
+  }, []);
 
   return (
     <div id="bingo-cage-wrapper" className="relative w-full h-36 sm:h-44 lg:h-40 xl:h-48 flex items-center justify-center select-none overflow-hidden flex-shrink-0">
@@ -275,7 +290,7 @@ export const BingoCageCanvas: React.FC<BingoCageCanvasProps> = ({
       </div>
     </div>
   );
-};
+});
 
 // Helper renderer: Mechanical Stand
 function drawStand(

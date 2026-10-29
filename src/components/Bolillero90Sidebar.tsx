@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useCallback, memo } from 'react';
 import { Ball, GameSettings, GameSequenceItem } from '../types';
 import { getBallSpec } from '../utils/ballColors';
 import { MiniBallsTumbler } from './MiniBallsTumbler';
@@ -10,7 +10,6 @@ import {
   VolumeX,
   Radio,
   Trophy,
-  History,
   Grid,
   ChevronDown,
   ChevronUp,
@@ -18,7 +17,6 @@ import {
   Sparkles,
   Eye,
   Trash2,
-  ListOrdered,
   Layers,
   Gauge,
 } from 'lucide-react';
@@ -45,7 +43,7 @@ interface Bolillero90SidebarProps {
   hideSequence?: boolean;
 }
 
-export const Bolillero90Sidebar: React.FC<Bolillero90SidebarProps> = ({
+export const Bolillero90Sidebar: React.FC<Bolillero90SidebarProps> = memo(({
   drawnBalls,
   currentBall,
   onDrawBall,
@@ -62,7 +60,6 @@ export const Bolillero90Sidebar: React.FC<Bolillero90SidebarProps> = ({
   onOpenSavedGamesGallery,
   savedGamesCount,
   compact = false,
-  isSheetExpanded = false,
   onToggleCollapse,
   hideSequence = false,
 }) => {
@@ -71,29 +68,30 @@ export const Bolillero90Sidebar: React.FC<Bolillero90SidebarProps> = ({
   const [showClearSeqConfirm, setShowClearSeqConfirm] = useState<boolean>(false);
 
   // Set of drawn numbers
-  const drawnNumbersSet = new Set(drawnBalls.map((b) => b.number));
+  const drawnNumbersSet = useMemo(() => new Set(drawnBalls.map((b) => b.number)), [drawnBalls]);
 
   // Current ball styling
-  const currentSpec = currentBall
-    ? getBallSpec(currentBall.number, '90', settings.theme)
-    : null;
+  const currentSpec = useMemo(
+    () => (currentBall ? getBallSpec(currentBall.number, '90', settings.theme) : null),
+    [currentBall, settings.theme]
+  );
 
   // Recent balls excluding current (last 6)
-  const recentBalls = drawnBalls.slice(-7, -1).reverse();
+  const recentBalls = useMemo(() => drawnBalls.slice(-7, -1).reverse(), [drawnBalls]);
 
-  const handleToggleVoice = () => {
+  const handleToggleVoice = useCallback(() => {
     onUpdateSettings({
       ...settings,
       voiceEnabled: !settings.voiceEnabled,
     });
-  };
+  }, [onUpdateSettings, settings]);
 
-  const handleToggleSfx = () => {
+  const handleToggleSfx = useCallback(() => {
     onUpdateSettings({
       ...settings,
       sfxEnabled: !settings.sfxEnabled,
     });
-  };
+  }, [onUpdateSettings, settings]);
 
   return (
     <aside
@@ -583,4 +581,4 @@ export const Bolillero90Sidebar: React.FC<Bolillero90SidebarProps> = ({
       )}
     </aside>
   );
-};
+});

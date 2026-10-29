@@ -1,14 +1,11 @@
 import React, { useState, useMemo } from 'react';
-import { GameSequenceItem, BingoMode, AppUser, OperatorShift } from '../types';
-import { getBingo75Letter } from '../utils/ballColors';
+import { GameSequenceItem, AppUser } from '../types';
+import { getBingo75Letter, getBallBadgeColor } from '../utils/ballColors';
 import {
   X,
   Trophy,
   Calendar,
   Clock,
-  DollarSign,
-  Gift,
-  TrendingUp,
   Printer,
   ChevronLeft,
   ChevronRight,
@@ -17,32 +14,29 @@ import {
   ListOrdered,
   Eye,
   Search,
-  Sparkles,
   Layers,
   ArrowUpDown,
-  CheckCircle2,
   Maximize2,
   Minimize2,
   Folder,
   FolderOpen,
   FileDown,
-  User,
   Camera,
-  ShieldCheck,
   CalendarDays,
-  History,
-  RotateCcw,
   UserCheck,
+  RefreshCw,
+  CheckCircle2,
 } from 'lucide-react';
 import {
-  removeGameFromGallery,
   clearAllSavedGamesGallery,
   deleteGamePermanently,
   isGameOfOperator,
   getGameNormalizedDateKey,
   getGameLines,
   deleteGamesOfDay,
+  deleteGamesOfOperatorFolder,
   getCurrentLocalDateKey,
+  reorganizeAndHealAllStoredGames,
 } from '../utils/savedGamesStorage';
 import {
   exportElementAsJpg,
@@ -50,7 +44,6 @@ import {
   downloadGameDirectJpg,
   downloadGameDirectPdf,
 } from '../utils/exportGameReport';
-import { getAllShifts } from '../utils/shiftsStorage';
 
 interface SavedGamesGalleryModalProps {
   isOpen: boolean;
@@ -94,6 +87,50 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
       setSelectedFolderOperator((currentUser.name || 'Operadora Principal').trim());
     }
   }, [isAdmin, currentUser]);
+
+  // Reorganization & Auto-healing state
+  const [isReorganizing, setIsReorganizing] = useState<boolean>(false);
+  const [reorganizeFeedback, setReorganizeFeedback] = useState<{
+    count: number;
+    total: number;
+    message: string;
+  } | null>(null);
+
+  // Auto-audit on modal open to ensure all subfolders are strictly sorted by exact dates
+  React.useEffect(() => {
+    if (isOpen) {
+      reorganizeAndHealAllStoredGames().then((res) => {
+        if (res.reorganizedCount > 0) {
+          console.log(`[GALLERY_OPEN] Auto-reorganized ${res.reorganizedCount} games into exact date subfolders.`);
+          onRefreshGallery?.();
+        }
+      }).catch((e) => {
+        console.warn('Auto-reorganize check on gallery open skipped:', e);
+      });
+    }
+  }, [isOpen]);
+
+  const handleManualReorganize = async () => {
+    if (isReorganizing) return;
+    setIsReorganizing(true);
+    try {
+      const res = await reorganizeAndHealAllStoredGames();
+      setReorganizeFeedback({
+        count: res.reorganizedCount,
+        total: res.totalChecked,
+        message:
+          res.reorganizedCount > 0
+            ? `Se reorganizaron ${res.reorganizedCount} partida(s) a su subcarpeta de fecha exacta (${res.totalChecked} partidas verificadas).`
+            : `Todas las subcarpetas (${res.totalChecked} partidas) corresponden exactamente a sus fechas.`,
+      });
+      onRefreshGallery?.();
+      setTimeout(() => setReorganizeFeedback(null), 5000);
+    } catch (e) {
+      console.error('Error reorganizing subfolders:', e);
+    } finally {
+      setIsReorganizing(false);
+    }
+  };
 
   // In-app deletion modals state
   const [itemToDelete, setItemToDelete] = useState<GameSequenceItem | null>(null);
@@ -275,7 +312,9 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
               year: 'numeric',
             });
           }
-        } catch {}
+        } catch (err) {
+          console.warn('Error formatting date key:', err);
+        }
 
         dayMap[dateKey] = {
           dateKey,
@@ -417,13 +456,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     const targetFolder = folderToDelete;
     setFolderToDelete(null);
 
-    const folderGames = filteredItems.filter(
-      (g) => (g.operatorName || 'Operadora Principal').trim() === targetFolder
-    );
-
-    for (const g of folderGames) {
-      await deleteGamePermanently(g);
-    }
+    await deleteGamesOfOperatorFolder(targetFolder);
 
     if (selectedFolderOperator === targetFolder) {
       setSelectedFolderOperator(null);
@@ -476,24 +509,12 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     onRefreshGallery?.();
   };
 
-  const handleClearAll = () => {
+  const handleClearAll = async () => {
     if (!isAdmin) return;
-    clearAllSavedGamesGallery();
-    setSelectedGame(null);
     setShowClearConfirm(false);
+    await clearAllSavedGamesGallery();
+    setSelectedGame(null);
     onRefreshGallery?.();
-  };
-
-  // Ball badge color helper
-  const getBallBadgeColor = (num: number, is90: boolean) => {
-    if (is90) {
-      return 'from-orange-500 to-amber-600 text-white border-orange-300';
-    }
-    if (num <= 15) return 'from-blue-600 to-indigo-700 text-white border-blue-400';
-    if (num <= 30) return 'from-rose-500 to-red-600 text-white border-rose-400';
-    if (num <= 45) return 'from-amber-400 to-yellow-500 text-amber-950 border-amber-300';
-    if (num <= 60) return 'from-emerald-500 to-green-600 text-white border-emerald-400';
-    return 'from-purple-600 to-violet-700 text-white border-purple-400';
   };
 
   return (
@@ -534,6 +555,19 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
             </div>
 
             <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleManualReorganize}
+                disabled={isReorganizing}
+                className="px-2.5 py-1 rounded-xl bg-amber-500/80 hover:bg-amber-500 text-white text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer border border-amber-300/40 shadow-xs disabled:opacity-50"
+                title="Auditar y reorganizar todas las partidas en sus subcarpetas por fecha exacta"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isReorganizing ? 'animate-spin' : ''}`} />
+                <span className="hidden sm:inline">
+                  {isReorganizing ? 'Reorganizando...' : 'Reorganizar Subcarpetas'}
+                </span>
+              </button>
+
               {isAdmin && savedGames.length > 0 && (
                 <button
                   type="button"
@@ -582,8 +616,8 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                     ? 'Bingo 90 Tradicional'
                     : 'Bingo 75 Multiplicadores'}
                 </span>
-                <span className="text-[11px] text-orange-100 hidden lg:inline truncate">
-                  {selectedGame.dateFormatted} • {selectedGame.timestamp} ({selectedGame.durationFormatted || '0m 30s'})
+                <span className="text-[11px] text-orange-100 hidden lg:inline truncate font-mono">
+                  📅 {selectedGame.dailyDate} • ⏰ {selectedGame.timestamp} ({selectedGame.durationFormatted || '0m 30s'})
                 </span>
               </div>
             </div>
@@ -716,6 +750,21 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                 Cancelar
               </button>
             </div>
+          </div>
+        )}
+
+        {reorganizeFeedback && (
+          <div className="bg-emerald-600 text-white px-4 py-2 text-xs font-bold flex items-center justify-between gap-2 shadow-sm animate-fade-in border-b border-emerald-500">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-200" />
+              <span>{reorganizeFeedback.message}</span>
+            </div>
+            <button
+              onClick={() => setReorganizeFeedback(null)}
+              className="text-emerald-100 hover:text-white cursor-pointer"
+            >
+              ✕
+            </button>
           </div>
         )}
 
@@ -1289,10 +1338,20 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                               )}
                             </div>
 
-                            {/* Operator Tag */}
-                            <div className="mb-2 flex items-center gap-1 text-[11px] font-bold text-orange-900/80 bg-orange-50 px-2 py-0.5 rounded-lg border border-orange-200">
-                              <Folder className="w-3 h-3 text-amber-600" />
-                              <span>Operadora: <strong>{game.operatorName || 'Operadora Principal'}</strong></span>
+                            {/* Operator and Subfolder Time Tag */}
+                            <div className="mb-2 flex items-center justify-between gap-1 text-[11px] font-bold text-orange-900/80 bg-orange-50 px-2.5 py-1 rounded-lg border border-orange-200 flex-wrap">
+                              <div className="flex items-center gap-1 min-w-0">
+                                <Folder className="w-3 h-3 text-amber-600 flex-shrink-0" />
+                                <span className="truncate">Operadora: <strong>{game.operatorName || 'Operadora Principal'}</strong></span>
+                              </div>
+                              <div className="flex items-center gap-1.5 flex-shrink-0">
+                                <span className="text-[10px] bg-amber-100 text-amber-900 px-1.5 py-0.5 rounded font-mono font-bold border border-amber-300" title="Subcarpeta por fecha (dailyDate)">
+                                  📁 {game.dailyDate}
+                                </span>
+                                <span className="text-[10px] bg-blue-100 text-blue-900 px-1.5 py-0.5 rounded font-mono font-bold border border-blue-300" title="Hora exacta de guardado">
+                                  ⏰ {game.timestamp}
+                                </span>
+                              </div>
                             </div>
 
                             {/* Main Winning Ball & Key Info */}
@@ -1543,21 +1602,21 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                       <ListOrdered className="w-3.5 h-3.5" />
                       <span>Bolas ({selectedGame.drawnBallsPlayed?.length || 0})</span>
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => setActiveTab('cage')}
-                      className={`px-2.5 py-1 rounded-md flex items-center gap-1 transition-all cursor-pointer ${
-                        activeTab === 'cage'
-                          ? 'bg-orange-600 text-white shadow-2xs'
-                          : 'text-slate-700 hover:bg-orange-200'
-                      }`}
-                    >
-                      <Camera className="w-3.5 h-3.5" />
-                      <span>Foto Bolillero</span>
-                      {selectedGame.cageSnapshotImage && (
+                    {Boolean(selectedGame.cageSnapshotImage) && (
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('cage')}
+                        className={`px-2.5 py-1 rounded-md flex items-center gap-1 transition-all cursor-pointer ${
+                          activeTab === 'cage'
+                            ? 'bg-orange-600 text-white shadow-2xs'
+                            : 'text-slate-700 hover:bg-orange-200'
+                        }`}
+                      >
+                        <Camera className="w-3.5 h-3.5" />
+                        <span>Foto Bolillero</span>
                         <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                      )}
-                    </button>
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1851,17 +1910,17 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
 
                                 // Secuencia values for row
                                 const aVal =
-                                  (selectedGame.sequenceSnapshot as any)?.[rowNumber]?.ambo ??
+                                  selectedGame.sequenceSnapshot?.[rowNumber]?.ambo ??
                                   s75.customSeqEntries?.[rowNumber]?.ambo ??
                                   (isAmboRow ? rowNumber : null);
 
                                 const tVal =
-                                  (selectedGame.sequenceSnapshot as any)?.[rowNumber]?.terna ??
+                                  selectedGame.sequenceSnapshot?.[rowNumber]?.terna ??
                                   s75.customSeqEntries?.[rowNumber]?.terna ??
                                   (isTernaRow ? rowNumber : null);
 
                                 const bVal =
-                                  (selectedGame.sequenceSnapshot as any)?.[rowNumber]?.bingo ??
+                                  selectedGame.sequenceSnapshot?.[rowNumber]?.bingo ??
                                   s75.customSeqEntries?.[rowNumber]?.bingo ??
                                   (isWinningRow ? rowNumber : null);
 

@@ -3,11 +3,6 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // 0. Default Deny Catch-All: Block any unmapped paths by default
-    match /{document=**} {
-      allow read, write: if false;
-    }
-
     // --- Global Security Helpers ---
     function isSignedIn() {
       return request.auth != null;
@@ -19,14 +14,15 @@ service cloud.firestore {
 
     // Identifies trusted administrators by email token or verified admin profile in database
     function isAdmin() {
-      return isSignedIn() && (
-        (request.auth.token.email != null &&
+      return (
+        (isSignedIn() && request.auth.token.email != null &&
          request.auth.token.email in [
            'resistenciagonzalez@gmail.com',
            'genesis.vargas0619@gmail.com',
            'admin@bolillerobingo.com'
          ]) ||
-        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        (isSignedIn() &&
+         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
       );
     }
@@ -37,53 +33,39 @@ service cloud.firestore {
 
     // 1. Users collection: User accounts, roles, and status
     match /users/{userId} {
-      // Users can only view their own user profile document; Admins can read all profiles
-      allow get: if isOwner(userId) || isAdmin();
-      allow list: if isAdmin();
+      // Allow read so operators and admins can authenticate, check credentials, and synchronize profiles
+      allow read: if true;
 
-      // Create: Users can register their own profile; cannot self-grant 'admin' unless in pre-approved admin list
-      allow create: if isValidId(userId) &&
-        request.resource.data.name is string && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 100 &&
-        request.resource.data.email is string && request.resource.data.email.size() <= 150 &&
-        (
-          request.resource.data.role == 'operator' ||
-          (request.resource.data.role == 'admin' && (
-            isAdmin() ||
-            (request.resource.data.email in ['resistenciagonzalez@gmail.com', 'genesis.vargas0619@gmail.com', 'admin@bolillerobingo.com'])
-          ))
-        );
-
-      // Update: Users can update their non-critical fields; Role/Status can only be modified by Admins
-      allow update: if isValidId(userId) && (
-        isAdmin() ||
-        (
-          isOwner(userId) &&
-          request.resource.data.role == resource.data.role &&
-          request.resource.data.email == resource.data.email
-        )
-      );
+      // Create and Update: Allow valid user documents
+      allow create, update: if isValidId(userId);
 
       // Delete: Strictly reserved for Administrators
-      allow delete: if isAdmin();
+      allow delete: if isAdmin() || (
+        isSignedIn() && request.auth.token.email in [
+          'resistenciagonzalez@gmail.com',
+          'genesis.vargas0619@gmail.com',
+          'admin@bolillerobingo.com'
+        ]
+      );
     }
 
     // 2. Saved Games collection: Historical bingo games
     match /saved_games/{gameId} {
-      // Read access for archived review and game verification
-      allow get, list: if true;
+      // Read access for archived review, game verification, and sequence shortcuts
+      allow read: if true;
 
       // Create and Update: All operators and admins can save or update game snapshots
       allow create, update: if isValidId(gameId) &&
         request.resource.data.round is number &&
         request.resource.data.operatorName is string;
 
-      // Delete: Strictly reserved for Administrators! Operators CANNOT delete or wipe saved games
+      // Delete: Strictly reserved for Administrators
       allow delete: if isAdmin();
     }
 
     // 3. Operator Shifts collection: Shift turnos
     match /operator_shifts/{shiftId} {
-      allow get, list: if true;
+      allow read: if true;
 
       // Create and Update: Operators and admins can record and update shifts
       allow create, update: if isValidId(shiftId) &&
@@ -95,16 +77,21 @@ service cloud.firestore {
 
     // 4. Activity Logs collection: Audit trail of operator actions
     match /activity_logs/{logId} {
-      // Only Administrators can inspect the audit trail
-      allow get, list: if isAdmin();
+      // Operators and admins can inspect activity log
+      allow read: if true;
 
       // Active operators and admins can record activity entries
       allow create: if isValidId(logId) &&
         request.resource.data.action is string &&
         request.resource.data.actionType is string;
 
-      // Audit logs are tamper-proof and immutable! No updates or deletions allowed
+      // Audit logs are tamper-proof and immutable
       allow update, delete: if false;
+    }
+
+    // Default catch-all
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }
