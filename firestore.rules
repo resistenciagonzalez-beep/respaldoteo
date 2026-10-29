@@ -72,19 +72,10 @@ service cloud.firestore {
       // Read access for archived review and game verification
       allow get, list: if true;
 
-      // Create: Operators and Admins can save game snapshots
-      allow create: if isValidId(gameId) &&
+      // Create and Update: All operators and admins can save or update game snapshots
+      allow create, update: if isValidId(gameId) &&
         request.resource.data.round is number &&
         request.resource.data.operatorName is string;
-
-      // Update: Admins or the operator who created the game
-      allow update: if isValidId(gameId) && (
-        isAdmin() ||
-        (
-          isSignedIn() &&
-          (resource.data.operatorUid == request.auth.uid || resource.data.operatorEmail == request.auth.token.email)
-        )
-      );
 
       // Delete: Strictly reserved for Administrators! Operators CANNOT delete or wipe saved games
       allow delete: if isAdmin();
@@ -94,16 +85,9 @@ service cloud.firestore {
     match /operator_shifts/{shiftId} {
       allow get, list: if true;
 
-      allow create: if isValidId(shiftId) &&
+      // Create and Update: Operators and admins can record and update shifts
+      allow create, update: if isValidId(shiftId) &&
         request.resource.data.operatorName is string;
-
-      allow update: if isValidId(shiftId) && (
-        isAdmin() ||
-        (
-          isSignedIn() &&
-          (resource.data.operatorUid == request.auth.uid || resource.data.operatorEmail == request.auth.token.email)
-        )
-      );
 
       // Delete: Strictly reserved for Administrators
       allow delete: if isAdmin();

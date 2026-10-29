@@ -1,7 +1,7 @@
 import { GameSequenceItem, SheetViewType, BingoMode, BingoSheetData, Traditional90SheetData, AppUser } from '../types';
 import { doc, setDoc, serverTimestamp, deleteDoc, collection, getDocs, onSnapshot } from 'firebase/firestore';
 import { db } from '../firebase';
-import { safeSetItem, sanitizeSequenceForStorage, cleanupLocalStorageForQuota } from './safeStorage';
+import { safeSetItem, sanitizeItemForStorage, sanitizeSequenceForStorage, cleanupLocalStorageForQuota } from './safeStorage';
 
 export const STORAGE_KEY_SAVED_GAMES_GALLERY = 'bingo_saved_games_gallery';
 export const STORAGE_KEY_SEQUENCE_75 = 'bingo_game_sequence_history';
@@ -295,10 +295,11 @@ export function recordGameToIsolatedDayFolder(game: GameSequenceItem): void {
         (g.round === game.round && (g.mode === game.mode || g.sheetType === game.sheetType))
     );
 
+    const cleanGame = sanitizeItemForStorage(game);
     if (existingIdx >= 0) {
-      items[existingIdx] = { ...items[existingIdx], ...game };
+      items[existingIdx] = { ...items[existingIdx], ...cleanGame };
     } else {
-      items.unshift(game);
+      items.unshift(cleanGame);
     }
 
     // Sort descending by round
@@ -728,8 +729,9 @@ export function saveGameToGallery(item: GameSequenceItem): void {
       totalLinesPlayed: exactLines,
     };
 
-    // 3. Save directly to the isolated day subfolder
-    recordGameToIsolatedDayFolder(normalizedItem);
+    // 3. Save directly to the isolated day subfolder (lightweight, zero quota bloat)
+    const cleanItem = sanitizeItemForStorage(normalizedItem);
+    recordGameToIsolatedDayFolder(cleanItem);
 
     // 4. Update the main gallery
     const existingIdx = current.findIndex(

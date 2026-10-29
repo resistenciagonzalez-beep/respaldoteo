@@ -91,12 +91,29 @@ export function cleanupLocalStorageForQuota(): void {
       } catch {}
     }
 
-    // 3. Remove obsolete legacy keys
+    // 3. Clean cageSnapshotImage from operator day subfolder caches
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith('bingo_folder_day_')) {
+          const raw = localStorage.getItem(k);
+          if (raw && raw.includes('data:image')) {
+            try {
+              const parsed = JSON.parse(raw);
+              if (Array.isArray(parsed)) {
+                const cleaned = sanitizeSequenceForStorage(parsed);
+                localStorage.setItem(k, JSON.stringify(cleaned));
+              }
+            } catch {}
+          }
+        }
+      }
+    } catch {}
+
+    // 4. Remove obsolete legacy keys (NEVER delete previous_sheet archives which are needed for Mismos!)
     const legacyKeys = [
       'bingo_game_sequence',
       'bingo_history',
-      'bingo_previous_sheet_75_archive',
-      'bingo_previous_sheet_90_archive',
       'bingo_sheet_cell_font_scale',
     ];
     legacyKeys.forEach((k) => {

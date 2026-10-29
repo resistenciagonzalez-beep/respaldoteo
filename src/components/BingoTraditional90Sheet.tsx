@@ -276,7 +276,7 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
   useEffect(() => {
     const handleResetEvent = (e: any) => {
       if (sheetDataRef.current) {
-        savePreviousGameSheet90(sheetDataRef.current);
+        savePreviousGameSheet90(sheetDataRef.current, currentUser);
       }
 
       setManuallyCircledNumbers(new Set());
@@ -410,7 +410,7 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
   // "Mismos": Anotar automáticamente las mismas filas que tenía un jugador en la partida anterior
   // Regla: No quitar filas a otros jugadores; solo anotar las que estén disponibles
   const handleAssignSameRowsFromPreviousGame = (player: BingoSheetPlayer) => {
-    const prevRows = getPreviousPlayerRows90(player.id, player.name);
+    const prevRows = getPreviousPlayerRows90(player.id, player.name, currentUser);
     if (!prevRows || prevRows.length === 0) {
       notify(`No hay filas previas guardadas para ${player.name}`);
       return;
@@ -488,7 +488,7 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
         const tableNum = tbl.tableNumber || tIdx + 1;
         const newRows = [...tbl.rows];
         players.forEach((player) => {
-          const prevRows = getPreviousPlayerRows90(player.id, player.name);
+          const prevRows = getPreviousPlayerRows90(player.id, player.name, currentUser);
           if (prevRows && prevRows.length > 0) {
             const pNameLower = player.name.toLowerCase().trim();
             prevRows.forEach((item) => {

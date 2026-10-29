@@ -1172,7 +1172,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     const handleResetEvent = (e: any) => {
       // Save snapshot of current sheet into previous game storage before wiping
       if (sheetRef.current) {
-        savePreviousGameSheet75(sheetRef.current);
+        savePreviousGameSheet75(sheetRef.current, currentUser);
       }
 
       const keepPlayers = e?.detail?.keepPlayers ?? true;
@@ -2413,11 +2413,11 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     skippedSummary: string[];
   } => {
     const pNameLower = player.name.toLowerCase().trim();
-    let rowValues = getPreviousPlayerRowValues75(player.id, player.name);
+    let rowValues = getPreviousPlayerRowValues75(player.id, player.name, undefined, currentUser);
 
     // Fallback: Check getPreviousPlayerCells75 if rowValues is empty
     if (!rowValues || Object.keys(rowValues).length === 0) {
-      const prevCells = getPreviousPlayerCells75(player.id, player.name);
+      const prevCells = getPreviousPlayerCells75(player.id, player.name, currentUser);
       if (prevCells && prevCells.length > 0) {
         rowValues = {};
         prevCells.forEach((c) => {

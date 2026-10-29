@@ -796,9 +796,9 @@ export default function App() {
 
       // Save snapshots of current sheets as previous game for the "Mismos" auto-restore feature
       const s75 = getStoredSheet75Snapshot();
-      if (s75) savePreviousGameSheet75(s75);
+      if (s75) savePreviousGameSheet75(s75, currentUser);
       const s90 = getStoredSheet90Snapshot();
-      if (s90) savePreviousGameSheet90(s90);
+      if (s90) savePreviousGameSheet90(s90, currentUser);
 
       // 5. Clear sheet marks and optionally players via custom event
       dispatchResetSheetMarksEvent(
@@ -840,6 +840,9 @@ export default function App() {
 
     const s75Now = getStoredSheet75Snapshot();
     const s90Now = getStoredSheet90Snapshot();
+    if (s75Now) savePreviousGameSheet75(s75Now, currentUser);
+    if (s90Now) savePreviousGameSheet90(s90Now, currentUser);
+
     const exactLines = isBingo90
       ? (s90Now?.tables?.length ? s90Now.tables.length * 30 : 30)
       : (s75Now?.columns?.length
