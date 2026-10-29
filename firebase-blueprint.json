@@ -1,0 +1,111 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile with role-based access control (admin or operator)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "password": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "operator"] },
+        "status": { "type": "string", "enum": ["active", "suspended"] },
+        "joinedDate": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "lastActive": { "type": "string" },
+        "gamesPlayed": { "type": "number" },
+        "notes": { "type": "string" },
+        "avatarColor": { "type": "string" },
+        "assignedMode": { "type": "string", "enum": ["75", "90", "all"] }
+      },
+      "required": ["id", "name", "email", "role", "status"]
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "Audit record of actions performed by operators and admins in the bingo platform",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "operatorUid": { "type": "string" },
+        "operatorName": { "type": "string" },
+        "operatorEmail": { "type": "string" },
+        "action": { "type": "string" },
+        "actionType": { "type": "string" },
+        "details": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "mode": { "type": "string" }
+      },
+      "required": ["operatorName", "action", "actionType", "timestamp"]
+    },
+    "SavedGame": {
+      "title": "SavedGame",
+      "description": "Full record of archived matches/games conducted by operators with complete balls, winners, financials and metrics",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "round": { "type": "number" },
+        "ballNumber": { "type": "number" },
+        "letter": { "type": "string" },
+        "mode": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "dailyDate": { "type": "string" },
+        "operatorUid": { "type": "string" },
+        "operatorName": { "type": "string" },
+        "operatorEmail": { "type": "string" },
+        "durationSeconds": { "type": "number" },
+        "durationFormatted": { "type": "string" },
+        "totalBallsDrawnCount": { "type": "number" },
+        "drawnBallsPlayed": { "type": "string" },
+        "winningPlayerName": { "type": "string" },
+        "tableNumber": { "type": "number" },
+        "sheetType": { "type": "string" }
+      },
+      "required": ["round", "mode", "timestamp", "dailyDate", "operatorName"]
+    },
+    "OperatorShift": {
+      "title": "OperatorShift",
+      "description": "Work shift / turno performed by an operator, recording total games, exact lines played, financials, and timestamps",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "operatorUid": { "type": "string" },
+        "operatorName": { "type": "string" },
+        "operatorEmail": { "type": "string" },
+        "startDate": { "type": "string" },
+        "startTime": { "type": "string" },
+        "endDate": { "type": "string" },
+        "endTime": { "type": "string" },
+        "timestampISO": { "type": "string" },
+        "closedAtISO": { "type": "string" },
+        "totalGames": { "type": "number" },
+        "totalLines": { "type": "number" },
+        "totalCollected": { "type": "number" },
+        "totalPrizes": { "type": "number" },
+        "netProfit": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "completed"] },
+        "gameIds": { "type": "string" }
+      },
+      "required": ["id", "operatorName", "startDate", "startTime", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Stores user profiles, roles, and status"
+    },
+    "/activity_logs/{logId}": {
+      "schema": "ActivityLog",
+      "description": "Real-time activity logs and audit trail for operators and game events"
+    },
+    "/saved_games/{gameId}": {
+      "schema": "SavedGame",
+      "description": "Daily saved games conducted by operators, exportable and auditable by administrators"
+    },
+    "/operator_shifts/{shiftId}": {
+      "schema": "OperatorShift",
+      "description": "Archived and active operator work shifts with exact line counts and game references"
+    }
+  }
+}

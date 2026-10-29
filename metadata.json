@@ -1,0 +1,8 @@
+{
+  "name": "Bolillero Virtual y Planilla de Juego",
+  "description": "Sorteador y bolillero virtual con bombo giratorio, locución por voz masculina natural, creador de planillas oficiales y planilla tradicional de Triples Bingo 90.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
