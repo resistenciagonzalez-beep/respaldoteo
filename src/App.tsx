@@ -37,9 +37,11 @@ import { AuthScreen } from './components/AuthScreen';
 import { GameSheetSnapshotModal } from './components/GameSheetSnapshotModal';
 import { NewGameModal } from './components/NewGameModal';
 import { SavedGamesGalleryModal } from './components/SavedGamesGalleryModal';
+import { SyncStatusIndicator } from './components/SyncStatusIndicator';
 import {
   getSavedGamesGallery,
   saveGameUnified,
+  deleteGamePermanently,
   subscribeToSavedGamesFirestore,
   isGameOfOperator,
   getOperatorStorageKey,
@@ -378,6 +380,7 @@ export default function App() {
   }, [currentUser]);
 
   const handleClearSequence = useCallback(() => {
+    if (!isAdmin) return;
     setGameSequence([]);
     try {
       localStorage.removeItem(STORAGE_KEY_SEQUENCE_75);
@@ -387,9 +390,17 @@ export default function App() {
     } catch (err) {
       console.warn('Error clearing sequence 75 from storage:', err);
     }
-  }, [currentUser]);
+    const todayKey = getCurrentLocalDateKey();
+    const today75Games = getSavedGamesGallery().filter(
+      (g) => g && g.mode !== '90' && g.sheetType !== 'traditional-90' && getGameNormalizedDateKey(g) === todayKey
+    );
+    today75Games.forEach((g) => {
+      void deleteGamePermanently(g);
+    });
+  }, [currentUser, isAdmin]);
 
   const handleClearSequence90 = useCallback(() => {
+    if (!isAdmin) return;
     setGameSequence90([]);
     try {
       localStorage.removeItem(STORAGE_KEY_SEQUENCE_90);
@@ -397,7 +408,14 @@ export default function App() {
     } catch (err) {
       console.warn('Error clearing sequence 90 from storage:', err);
     }
-  }, [currentUser]);
+    const todayKey = getCurrentLocalDateKey();
+    const today90Games = getSavedGamesGallery().filter(
+      (g) => g && (g.mode === '90' || g.sheetType === 'traditional-90') && getGameNormalizedDateKey(g) === todayKey
+    );
+    today90Games.forEach((g) => {
+      void deleteGamePermanently(g);
+    });
+  }, [currentUser, isAdmin]);
 
   const [lastWinningBall, setLastWinningBall] = useState<number | null>(null);
   const lastWinnerInfoRef = useRef<{
@@ -520,8 +538,27 @@ export default function App() {
   // Listen to global save/delete events and Firestore real-time updates so all operator games stay 100% synchronized
   useEffect(() => {
     refreshSavedGamesList();
-    const handleSavedGamesUpdated = () => {
+    const handleSavedGamesUpdated = (e?: Event) => {
       refreshSavedGamesList();
+      const customEv = e as CustomEvent<{ deletedIds?: string[] }> | undefined;
+      const deletedIds = customEv?.detail?.deletedIds;
+      if (Array.isArray(deletedIds) && deletedIds.length > 0) {
+        const deletedSet = new Set(deletedIds);
+        setGameSequence((prev) =>
+          prev.filter((p) => {
+            if (!p) return false;
+            if (p.id && deletedSet.has(p.id)) return false;
+            return true;
+          })
+        );
+        setGameSequence90((prev) =>
+          prev.filter((p) => {
+            if (!p) return false;
+            if (p.id && deletedSet.has(p.id)) return false;
+            return true;
+          })
+        );
+      }
     };
 
     window.addEventListener('bingo_saved_games_updated', handleSavedGamesUpdated);
@@ -551,36 +588,16 @@ export default function App() {
           const myToday75 = myTodayGames
             .filter((g) => g.mode !== '90' && g.sheetType !== 'traditional-90' && g.ballNumber > 0)
             .sort((a, b) => (a.round || 0) - (b.round || 0));
-          if (myToday75.length > 0) {
-            setGameSequence((prev) => {
-              const prevToday = prev.filter(
-                (p) => p && p.ballNumber > 0 && getGameNormalizedDateKey(p) === todayKey
-              );
-              if (prevToday.length > 0) return prevToday;
-              return myToday75;
-            });
-          }
+          setGameSequence(myToday75);
 
           const myToday90 = myTodayGames
             .filter((g) => (g.mode === '90' || g.sheetType === 'traditional-90') && g.ballNumber > 0)
             .sort((a, b) => (a.round || 0) - (b.round || 0));
-          if (myToday90.length > 0) {
-            setGameSequence90((prev) => {
-              const prevToday = prev.filter(
-                (p) => p && p.ballNumber > 0 && getGameNormalizedDateKey(p) === todayKey
-              );
-              if (prevToday.length > 0) return prevToday;
-              return myToday90;
-            });
-          }
+          setGameSequence90(myToday90);
         } else {
-          // If no games saved today yet, ensure sequence doesn't retain old games from previous days
-          setGameSequence((prev) =>
-            prev.filter((p) => p && p.ballNumber > 0 && getGameNormalizedDateKey(p) === todayKey)
-          );
-          setGameSequence90((prev) =>
-            prev.filter((p) => p && p.ballNumber > 0 && getGameNormalizedDateKey(p) === todayKey)
-          );
+          // If no games saved today yet (or all deleted), clear sequence
+          setGameSequence([]);
+          setGameSequence90([]);
         }
       }
     });
@@ -685,9 +702,12 @@ export default function App() {
     [settings.mode, activeSheetType, getMatchElapsedSeconds, currentMatchRound, currentUser]
   );
 
-  // Finalize current match, snapshot its sheet and state, and save to gallery (synchronizing both areas)
+  const isArchivingNewGameRef = useRef<boolean>(false);
+
+  // Finalize current match, snapshot its sheet and state, and save to gallery (Offline-First + Sequential Save Queue)
+  // Strictly guarantees that the current game is finalized and stored before creating the next game.
   const handleConfirmArchiveAndNewGame = useCallback(
-    ({
+    async ({
       keepPlayers,
       keepSequence = true,
       keepBalances = true,
@@ -698,233 +718,277 @@ export default function App() {
       keepBalances?: boolean;
       endTurno?: boolean;
     }) => {
-      const isBingo90 = activeSheetType === 'traditional-90' || settings.mode === '90';
-      const modeToUse: BingoMode = isBingo90 ? '90' : '75';
-      const drawnNumbersPlayed = drawnBallsRef.current.map((b) => b.number);
-      const lastBall = drawnBallsRef.current[drawnBallsRef.current.length - 1];
-      const winBallNum =
-        currentMatchBingoBallRef.current ||
-        lastWinningBall ||
-        (lastBall ? lastBall.number : 0);
-      const winRow =
-        currentMatchBingoRowRef.current ||
-        (winBallNum > 0
-          ? (((winBallNum - 1) % (modeToUse === '75' ? 15 : 30)) + 1)
-          : (lastWinnerInfoRef.current?.rowLeader ?? undefined));
+      if (isArchivingNewGameRef.current) {
+        return;
+      }
+      isArchivingNewGameRef.current = true;
 
-      const roundNum = currentMatchRound;
-
-      // Operator & Current Active Shift
-      const opUid = currentUser?.id || currentUser?.uid || 'anon';
-      const opName = (currentUser?.name || 'Operadora Principal').trim();
-      const opEmail = currentUser?.email || '';
-      const currentShift = getActiveShift(opUid, opName, opEmail);
-
-      // Total exact lines played:
-      // Bingo 75: suma del valor/multiplicador de cada columna abierta (ej: 4 columnas X2 = 8 líneas)
-      // Bingo 90: count of tables * 30 rows
-      const s75Now = getStoredSheet75Snapshot();
-      const s90Now = getStoredSheet90Snapshot();
-      const exactLines = isBingo90
-        ? (s90Now?.tables?.length ? s90Now.tables.length * 30 : 30)
-        : (s75Now?.columns?.length
-            ? s75Now.columns.reduce((sum, col) => sum + (Number(col.multiplier) || 1), 0)
-            : 11);
-
-      // Extract current player summaries (GANO, DEBE, TOTAL) and recorded sequence
-      let customSeq: CustomSequenceMap | undefined = undefined;
       try {
-        const rawSeq = localStorage.getItem('bingo_sheet_custom_sequence');
-        if (rawSeq) customSeq = JSON.parse(rawSeq) as CustomSequenceMap;
-      } catch (err) {
-        console.warn('Error reading custom sequence:', err);
-      }
-      if (!customSeq && s75Now?.customSeqEntries) {
-        customSeq = s75Now.customSeqEntries;
-      }
+        const isBingo90 = activeSheetType === 'traditional-90' || settings.mode === '90';
+        const modeToUse: BingoMode = isBingo90 ? '90' : '75';
+        const drawnNumbersPlayed = drawnBallsRef.current.map((b) => b.number);
+        const lastBall = drawnBallsRef.current[drawnBallsRef.current.length - 1];
+        const winBallNum =
+          currentMatchBingoBallRef.current ||
+          lastWinningBall ||
+          (lastBall ? lastBall.number : 0);
+        const winRow =
+          currentMatchBingoRowRef.current ||
+          (winBallNum > 0
+            ? (((winBallNum - 1) % (modeToUse === '75' ? 15 : 30)) + 1)
+            : (lastWinnerInfoRef.current?.rowLeader ?? undefined));
 
-      const playerSummaries = s75Now?.playerSummaryList && s75Now.playerSummaryList.length > 0
-        ? s75Now.playerSummaryList
-        : (s75Now?.players || []).map((p) => ({
-            id: p.id,
-            name: p.name,
-            color: p.color,
-            totalGano: p.cumulativeWon || 0,
-            debe: p.cumulativeDebt || 0,
-            total: (p.cumulativeWon || 0) - (p.cumulativeDebt || 0),
-          }));
+        const capturedTernaBall = currentMatchTernaBallRef.current ?? undefined;
+        const capturedTernaRow = currentMatchTernaRowRef.current ?? undefined;
+        const capturedAmboBall = currentMatchAmboBallRef.current ?? undefined;
+        const capturedAmboRow = currentMatchAmboRowRef.current ?? undefined;
 
-      const now = new Date();
-      const exactTime = getCurrentLocalTimeString();
-      const localDate = getCurrentLocalDateKey();
-      const endShiftTime = endTurno
-        ? now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-        : undefined;
+        const roundNum = currentMatchRound;
 
-      const completeItem = buildCompleteGameSequenceItem({
-        round: roundNum,
-        ballNumber: winBallNum,
-        letter: winBallNum > 0 && modeToUse === '75' ? getBingo75Letter(winBallNum) : undefined,
-        rowLeader: winRow ?? lastWinnerInfoRef.current?.rowLeader,
-        ternaBall: currentMatchTernaBallRef.current ?? undefined,
-        ternaLeader: currentMatchTernaRowRef.current ?? undefined,
-        amboBall: currentMatchAmboBallRef.current ?? undefined,
-        amboLeader: currentMatchAmboRowRef.current ?? undefined,
-        winningPlayerName: lastWinnerInfoRef.current?.playerName,
-        tableNumber: lastWinnerInfoRef.current?.tableNumber,
-        mode: modeToUse,
-        sheetType: activeSheetType,
-        durationSeconds: getMatchElapsedSeconds() > 0 ? getMatchElapsedSeconds() : 60,
-        drawnBallsPlayed: drawnNumbersPlayed,
-        operatorUid: opUid,
-        operatorName: opName,
-        operatorEmail: opEmail,
-        totalLinesPlayed: exactLines,
-        shiftId: currentShift.id,
-        shiftName: `Turno: ${currentShift.startDate} ${currentShift.startTime}`,
-        shiftDate: currentShift.startDate,
-        shiftStartTime: currentShift.startTime,
-        shiftEndTime: endShiftTime,
-        playerSummarySnapshot: playerSummaries,
-        dailyDate: localDate,
-        timestamp: exactTime,
-        sequenceSnapshot: {
-          customSeqEntries: customSeq,
-          gameSequence: isBingo90 ? gameSequence90 : gameSequence,
-          amboRow: currentMatchAmboRowRef.current ?? undefined,
-          ternaRow: currentMatchTernaRowRef.current ?? undefined,
-          bingoRow: winRow,
-          amboBall: currentMatchAmboBallRef.current ?? undefined,
-          ternaBall: currentMatchTernaBallRef.current ?? undefined,
-          bingoBall: winBallNum,
-        },
-      });
+        // Operator & Current Active Shift
+        const opUid = currentUser?.id || currentUser?.uid || 'anon';
+        const opName = (currentUser?.name || 'Operadora Principal').trim();
+        const opEmail = currentUser?.email || '';
+        const currentShift = getActiveShift(opUid, opName, opEmail);
 
-      // Synchronize exact lines and shift state immediately
-      recordGameToActiveShift(completeItem, Boolean(endTurno)).catch((err) => {
-        console.error('Error recording game to shift', err);
-      });
+        // Capture current sheets BEFORE any reset occurs
+        const s75Now = getStoredSheet75Snapshot();
+        const s90Now = getStoredSheet90Snapshot();
 
-      // 1. SAVE & ARCHIVE COMPLETED GAME TO FIRESTORE (CENTRALIZED SERVICE WITH IMMEDIATE READBACK VERIFICATION)
-      saveGameUnified(completeItem)
-        .then(({ game: confirmedGame }) => {
-          refreshSavedGamesList();
+        // Save snapshots of current sheets as previous game for the "Mismos" auto-restore feature
+        if (s75Now) savePreviousGameSheet75(s75Now, currentUser);
+        if (s90Now) savePreviousGameSheet90(s90Now, currentUser);
+
+        const exactLines = isBingo90
+          ? (s90Now?.tables?.length ? s90Now.tables.length * 30 : 30)
+          : (s75Now?.columns?.length
+              ? s75Now.columns.reduce((sum, col) => sum + (Number(col.multiplier) || 1), 0)
+              : 11);
+
+        // Extract current player summaries (GANO, DEBE, TOTAL) and recorded sequence
+        let customSeq: CustomSequenceMap | undefined = undefined;
+        try {
+          const rawSeq = localStorage.getItem('bingo_sheet_custom_sequence');
+          if (rawSeq) customSeq = JSON.parse(rawSeq) as CustomSequenceMap;
+        } catch (err) {
+          console.warn('Error reading custom sequence:', err);
+        }
+        if (!customSeq && s75Now?.customSeqEntries) {
+          customSeq = s75Now.customSeqEntries;
+        }
+
+        // Fallback to manual sequence entry if operator typed numbers directly in the sheet sequence
+        const manualEntryForRound = (() => {
+          if (!customSeq) return undefined;
+          if (customSeq[roundNum]) return customSeq[roundNum];
+          const keys = Object.keys(customSeq)
+            .map((k) => Number(k))
+            .filter((k) => !isNaN(k) && k > 0)
+            .sort((a, b) => b - a);
+          return keys.length > 0 ? customSeq[keys[0]] : undefined;
+        })();
+
+        const manualBingoNum =
+          manualEntryForRound?.bingo !== undefined && !isNaN(Number(manualEntryForRound.bingo)) && Number(manualEntryForRound.bingo) > 0
+            ? Number(manualEntryForRound.bingo)
+            : 0;
+        const manualTernaNum =
+          manualEntryForRound?.terna !== undefined && !isNaN(Number(manualEntryForRound.terna)) && Number(manualEntryForRound.terna) > 0
+            ? Number(manualEntryForRound.terna)
+            : undefined;
+        const manualAmboNum =
+          manualEntryForRound?.ambo !== undefined && !isNaN(Number(manualEntryForRound.ambo)) && Number(manualEntryForRound.ambo) > 0
+            ? Number(manualEntryForRound.ambo)
+            : undefined;
+
+        const effectiveWinBallNum = winBallNum > 0 ? winBallNum : manualBingoNum;
+        const effectiveWinRow =
+          winRow ??
+          (effectiveWinBallNum > 0
+            ? (((effectiveWinBallNum - 1) % (modeToUse === '75' ? 15 : 30)) + 1)
+            : undefined);
+
+        const effectiveTernaBall = capturedTernaBall ?? manualTernaNum;
+        const effectiveTernaRow =
+          capturedTernaRow ??
+          (effectiveTernaBall && effectiveTernaBall > 0
+            ? (((effectiveTernaBall - 1) % (modeToUse === '75' ? 15 : 30)) + 1)
+            : undefined);
+
+        const effectiveAmboBall = capturedAmboBall ?? manualAmboNum;
+        const effectiveAmboRow =
+          capturedAmboRow ??
+          (effectiveAmboBall && effectiveAmboBall > 0
+            ? (((effectiveAmboBall - 1) % (modeToUse === '75' ? 15 : 30)) + 1)
+            : undefined);
+
+        const playerSummaries = s75Now?.playerSummaryList && s75Now.playerSummaryList.length > 0
+          ? s75Now.playerSummaryList
+          : (s75Now?.players || []).map((p) => ({
+              id: p.id,
+              name: p.name,
+              color: p.color,
+              totalGano: p.cumulativeWon || 0,
+              debe: p.cumulativeDebt || 0,
+              total: (p.cumulativeWon || 0) - (p.cumulativeDebt || 0),
+            }));
+
+        const now = new Date();
+        const exactTime = getCurrentLocalTimeString();
+        const localDate = getCurrentLocalDateKey();
+        const endShiftTime = endTurno
+          ? now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+          : undefined;
+
+        const completeItem = buildCompleteGameSequenceItem({
+          round: roundNum,
+          ballNumber: effectiveWinBallNum,
+          letter: effectiveWinBallNum > 0 && modeToUse === '75' ? getBingo75Letter(effectiveWinBallNum) : undefined,
+          rowLeader: effectiveWinRow ?? lastWinnerInfoRef.current?.rowLeader,
+          ternaBall: effectiveTernaBall,
+          ternaLeader: effectiveTernaRow,
+          amboBall: effectiveAmboBall,
+          amboLeader: effectiveAmboRow,
+          winningPlayerName: lastWinnerInfoRef.current?.playerName,
+          tableNumber: lastWinnerInfoRef.current?.tableNumber,
+          mode: modeToUse,
+          sheetType: activeSheetType,
+          durationSeconds: getMatchElapsedSeconds() > 0 ? getMatchElapsedSeconds() : 60,
+          drawnBallsPlayed: drawnNumbersPlayed,
+          sheet75Override: s75Now,
+          sheet90Override: s90Now,
+          operatorUid: opUid,
+          operatorName: opName,
+          operatorEmail: opEmail,
+          totalLinesPlayed: exactLines,
+          shiftId: currentShift.id,
+          shiftName: `Turno: ${currentShift.startDate} ${currentShift.startTime}`,
+          shiftDate: currentShift.startDate,
+          shiftStartTime: currentShift.startTime,
+          shiftEndTime: endShiftTime,
+          playerSummarySnapshot: playerSummaries,
+          dailyDate: localDate,
+          timestamp: exactTime,
+          sequenceSnapshot: {
+            customSeqEntries: customSeq,
+            gameSequence: isBingo90 ? gameSequence90 : gameSequence,
+            amboRow: effectiveAmboRow,
+            ternaRow: effectiveTernaRow,
+            bingoRow: effectiveWinRow,
+            amboBall: effectiveAmboBall,
+            ternaBall: effectiveTernaBall,
+            bingoBall: effectiveWinBallNum,
+          },
+        });
+
+        // 1. FINALIZE & SAVE CURRENT GAME FIRST (IndexedDB -> Save Queue -> Firestore verification)
+        const { game: confirmedGame } = await saveGameUnified(completeItem);
+        refreshSavedGamesList();
+
+        // Synchronize exact lines and shift state
+        recordGameToActiveShift(confirmedGame, Boolean(endTurno)).catch((err) => {
+          console.error('Error recording game to shift', err);
+        });
+
+        // Log operator activity
+        void logActivity(
+          'Partida guardada y archivada',
+          'save_game',
+          `Partida #${roundNum} archivada con ${drawnNumbersPlayed.length} bolas jugadas por ${currentUser?.name || 'Operadora Principal'}`,
+          modeToUse
+        );
+
+        // 2. ONLY AFTER CURRENT GAME IS STORED: Advance round and prepare the new game
+        if (keepSequence) {
           if (isBingo90) {
             setGameSequence90((prev) => [confirmedGame, ...prev.filter((i) => i.round !== confirmedGame.round)]);
           } else {
             setGameSequence((prev) => [confirmedGame, ...prev.filter((i) => i.round !== confirmedGame.round)]);
           }
-        })
-        .catch((err) => {
-          console.error('Error saving archived game to Firestore:', err);
-        });
-
-      // Create direct shortcut immediately in sequence
-      if (isBingo90) {
-        setGameSequence90((prev) => [completeItem, ...prev.filter((i) => i.round !== completeItem.round)]);
-      } else {
-        setGameSequence((prev) => [completeItem, ...prev.filter((i) => i.round !== completeItem.round)]);
-      }
-
-      // Log operator activity in Firestore
-      logActivity(
-        'Partida guardada y archivada',
-        'save_game',
-        `Partida #${roundNum} archivada con ${drawnNumbersPlayed.length} bolas jugadas por ${currentUser?.name || 'Operadora Principal'}`,
-        modeToUse
-      );
-
-      // 2. Advance round
-      if (keepSequence) {
-        setCurrentMatchRound((prev) => Math.max(prev + 1, roundNum + 1));
-      } else {
-        // Reset active session sequence only for the upcoming game
-        if (isBingo90) {
-          setGameSequence90([]);
-          try {
-            localStorage.removeItem(STORAGE_KEY_SEQUENCE_90);
-          } catch (err) {
-            console.warn('Error clearing seq90:', err);
-          }
+          setCurrentMatchRound((prev) => Math.max(prev + 1, roundNum + 1));
         } else {
-          setGameSequence([]);
-          try {
-            localStorage.removeItem(STORAGE_KEY_SEQUENCE_75);
-          } catch (err) {
-            console.warn('Error clearing seq75:', err);
+          if (isBingo90) {
+            setGameSequence90([]);
+            try {
+              localStorage.removeItem(STORAGE_KEY_SEQUENCE_90);
+            } catch (err) {
+              console.warn('Error clearing seq90:', err);
+            }
+          } else {
+            setGameSequence([]);
+            try {
+              localStorage.removeItem(STORAGE_KEY_SEQUENCE_75);
+            } catch (err) {
+              console.warn('Error clearing seq75:', err);
+            }
           }
+          try {
+            localStorage.removeItem('bingo_sheet_custom_sequence');
+          } catch (err) {
+            console.warn('Error clearing custom sequence:', err);
+          }
+          setCurrentMatchRound(1);
         }
-        try {
-          localStorage.removeItem('bingo_sheet_custom_sequence');
-        } catch (err) {
-          console.warn('Error clearing custom sequence:', err);
+
+        // Reset live ambo, terna and bingo tracking for the new game
+        currentMatchAmboBallRef.current = null;
+        currentMatchAmboRowRef.current = null;
+        setCurrentMatchAmboBall(null);
+        setCurrentMatchAmboRow(null);
+        currentMatchTernaBallRef.current = null;
+        currentMatchTernaRowRef.current = null;
+        setCurrentMatchTernaBall(null);
+        setCurrentMatchTernaRow(null);
+        currentMatchBingoBallRef.current = null;
+        currentMatchBingoRowRef.current = null;
+        setCurrentMatchBingoBall(null);
+        setCurrentMatchBingoRow(null);
+
+        // 3. Reset bolillero engine completely
+        setIsPlaying(false);
+        if (autoPlayTimerRef.current) {
+          clearInterval(autoPlayTimerRef.current);
+          autoPlayTimerRef.current = null;
         }
-        setCurrentMatchRound(1);
+        if (drawTimeoutRef.current) {
+          clearTimeout(drawTimeoutRef.current);
+          drawTimeoutRef.current = null;
+        }
+        isExtractingRef.current = false;
+        setIsExtracting(false);
+
+        const total = modeToUse === '90' ? 90 : 75;
+        const all: number[] = [];
+        for (let i = 1; i <= total; i++) all.push(i);
+        setRemainingBalls(all);
+        setDrawnBalls([]);
+        drawnBallsRef.current = [];
+        setCurrentBall(null);
+        setIsFinished(false);
+
+        // 4. Clear row locks, timers, and winner info
+        completedRowsRef.current.clear();
+        setCompletedRowLeaders([]);
+        matchStartTimeRef.current = null;
+        setMatchElapsedSeconds(0);
+        setLastWinningBall(null);
+        lastWinnerInfoRef.current = null;
+
+        // 5. Clear sheet marks and optionally players via custom event (using captured rows from the finished game)
+        dispatchResetSheetMarksEvent(
+          keepPlayers,
+          keepSequence,
+          keepBalances,
+          winRow,
+          capturedTernaRow,
+          capturedAmboRow
+        );
+
+        // 6. Close new game modal
+        setShowNewGameModal(false);
+      } finally {
+        isArchivingNewGameRef.current = false;
       }
-
-      // Reset live ambo, terna and bingo tracking
-      currentMatchAmboBallRef.current = null;
-      currentMatchAmboRowRef.current = null;
-      setCurrentMatchAmboBall(null);
-      setCurrentMatchAmboRow(null);
-      currentMatchTernaBallRef.current = null;
-      currentMatchTernaRowRef.current = null;
-      setCurrentMatchTernaBall(null);
-      setCurrentMatchTernaRow(null);
-      currentMatchBingoBallRef.current = null;
-      currentMatchBingoRowRef.current = null;
-      setCurrentMatchBingoBall(null);
-      setCurrentMatchBingoRow(null);
-
-      // 3. Reset bolillero engine completely without prompts
-      setIsPlaying(false);
-      if (autoPlayTimerRef.current) {
-        clearInterval(autoPlayTimerRef.current);
-        autoPlayTimerRef.current = null;
-      }
-      if (drawTimeoutRef.current) {
-        clearTimeout(drawTimeoutRef.current);
-        drawTimeoutRef.current = null;
-      }
-      isExtractingRef.current = false;
-      setIsExtracting(false);
-
-      // Re-populate all balls in tumbler
-      const total = modeToUse === '90' ? 90 : 75;
-      const all: number[] = [];
-      for (let i = 1; i <= total; i++) all.push(i);
-      setRemainingBalls(all);
-      setDrawnBalls([]);
-      drawnBallsRef.current = [];
-      setCurrentBall(null);
-      setIsFinished(false);
-
-      // 4. Clear row locks, timers, and winner info
-      completedRowsRef.current.clear();
-      setCompletedRowLeaders([]);
-      matchStartTimeRef.current = null;
-      setMatchElapsedSeconds(0);
-      setLastWinningBall(null);
-      lastWinnerInfoRef.current = null;
-
-      // Save snapshots of current sheets as previous game for the "Mismos" auto-restore feature
-      const s75 = getStoredSheet75Snapshot();
-      if (s75) savePreviousGameSheet75(s75, currentUser);
-      const s90 = getStoredSheet90Snapshot();
-      if (s90) savePreviousGameSheet90(s90, currentUser);
-
-      // 5. Clear sheet marks and optionally players via custom event
-      dispatchResetSheetMarksEvent(
-        keepPlayers,
-        keepSequence,
-        keepBalances,
-        winRow,
-        currentMatchTernaRowRef.current ?? undefined,
-        currentMatchAmboRowRef.current ?? undefined
-      );
-
-      // 6. Close new game modal
-      setShowNewGameModal(false);
     },
     [settings.mode, activeSheetType, getMatchElapsedSeconds, lastWinningBall, currentMatchRound, refreshSavedGamesList, currentUser, gameSequence, gameSequence90, logActivity]
   );
@@ -2002,6 +2066,9 @@ export default function App() {
                 <Gamepad2 className="w-3.5 h-3.5" />
                 <span>Formato Arcade</span>
               </button>
+
+              {/* Permanent Real-Time Offline-First Sync Indicator */}
+              <SyncStatusIndicator />
 
               {/* Mode Selector: Interactive buttons for Admin, locked badge for Operator */}
               {isAdmin ? (

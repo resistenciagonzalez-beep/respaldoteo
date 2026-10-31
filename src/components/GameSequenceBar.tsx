@@ -41,6 +41,8 @@ interface GameSequenceBarProps {
   onShowPreviousGameResults?: () => void;
   isExpanded?: boolean;
   onToggleExpand?: () => void;
+  isAdmin?: boolean;
+  onDeleteGameItem?: (item: GameSequenceItem) => void;
 }
 
 export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
@@ -63,6 +65,8 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
   onShowPreviousGameResults,
   isExpanded = false,
   onToggleExpand,
+  isAdmin = false,
+  onDeleteGameItem,
 }) => {
   // Combine ONLY today's saved games and current sequence so that ONLY games
   // made/saved on the current day (without games from the previous day) appear in this right sequence bar.
@@ -108,6 +112,7 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
   const [inputTernaStr, setInputTernaStr] = useState<string>('');
   const [inputBallStr, setInputBallStr] = useState<string>('');
   const [showClearModal, setShowClearModal] = useState<boolean>(false);
+  const [itemToDelete, setItemToDelete] = useState<GameSequenceItem | null>(null);
 
   const handleAdd = (e: React.FormEvent) => {
     e.preventDefault();
@@ -217,16 +222,16 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
           </div>
         )}
 
-        {/* Modal to confirm clear sequence */}
-        {showClearModal && (
+        {/* Modal to confirm clear sequence (Admin Only) */}
+        {isAdmin && showClearModal && (
           <div className="fixed inset-0 z-[99999] bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
             <div className="bg-[#fffaf5] border-2 border-orange-300 rounded-2xl p-4 max-w-xs w-full shadow-2xl space-y-3 animate-scale-up text-[#431407]">
               <h4 className="text-xs font-black text-rose-700 flex items-center gap-1.5">
                 <Trash2 className="w-3.5 h-3.5 text-rose-600" />
-                ¿Limpiar Secuencia?
+                ¿Limpiar Secuencia de Hoy?
               </h4>
               <p className="text-[11px] text-orange-950 leading-normal">
-                Se borrará el historial de las {sequence.length} partidas registradas.
+                Se borrará el historial de las {displayedShortcuts.length} partidas registradas hoy.
               </p>
               <div className="flex gap-2 pt-1 border-t border-orange-200">
                 <button
@@ -245,6 +250,40 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
                   className="flex-1 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-black shadow-sm cursor-pointer"
                 >
                   Limpiar
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Modal to confirm deleting a single game from sequence (Admin Only) */}
+        {isAdmin && itemToDelete && (
+          <div className="fixed inset-0 z-[99999] bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="bg-[#fffaf5] border-2 border-rose-300 rounded-2xl p-4 max-w-xs w-full shadow-2xl space-y-3 animate-scale-up text-[#431407]">
+              <h4 className="text-xs font-black text-rose-700 flex items-center gap-1.5">
+                <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+                ¿Borrar Partida #{itemToDelete.round}?
+              </h4>
+              <p className="text-[11px] text-orange-950 leading-normal">
+                Se eliminará permanentemente esta partida de la secuencia del día y de las partidas guardadas.
+              </p>
+              <div className="flex gap-2 pt-1 border-t border-orange-200">
+                <button
+                  type="button"
+                  onClick={() => setItemToDelete(null)}
+                  className="flex-1 py-1.5 rounded-xl bg-orange-100 hover:bg-orange-200 text-orange-950 text-xs font-bold cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (onDeleteGameItem) onDeleteGameItem(itemToDelete);
+                    setItemToDelete(null);
+                  }}
+                  className="flex-1 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-black shadow-sm cursor-pointer"
+                >
+                  Sí, Borrar
                 </button>
               </div>
             </div>
@@ -343,12 +382,12 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
               </button>
             )}
 
-            {displayedShortcuts.length > 0 && onClearSequence && (
+            {isAdmin && displayedShortcuts.length > 0 && onClearSequence && (
               <button
                 type="button"
                 onClick={() => setShowClearModal(true)}
-                className="p-1 rounded-lg bg-orange-50 hover:bg-rose-100 text-orange-800 hover:text-rose-700 transition-all border border-orange-200 active:scale-95 cursor-pointer"
-                title="Limpiar historial de secuencia"
+                className="p-1 rounded-lg bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white transition-all border border-rose-200 active:scale-95 cursor-pointer"
+                title="Limpiar historial de secuencia (Solo Admin)"
               >
                 <Trash2 className="w-3 h-3" />
               </button>
@@ -410,12 +449,27 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
                       )}
                     </div>
 
-                    {item.timestamp && (
-                      <span className="text-[8.5px] text-orange-900/60 font-semibold flex items-center gap-0.5">
-                        <Clock className="w-2 h-2 text-orange-400" />
-                        {item.timestamp}
-                      </span>
-                    )}
+                    <div className="flex items-center gap-1">
+                      {item.timestamp && (
+                        <span className="text-[8.5px] text-orange-900/60 font-semibold flex items-center gap-0.5">
+                          <Clock className="w-2 h-2 text-orange-400" />
+                          {item.timestamp}
+                        </span>
+                      )}
+                      {isAdmin && onDeleteGameItem && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setItemToDelete(item);
+                          }}
+                          className="p-0.5 rounded bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white border border-rose-200 transition-colors cursor-pointer"
+                          title={`Borrar Partida #${item.round} (Solo Admin)`}
+                        >
+                          <Trash2 className="w-2.5 h-2.5" />
+                        </button>
+                      )}
+                    </div>
                   </div>
 
                   {/* Ball + Row Info */}
@@ -700,12 +754,12 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
             </button>
           )}
 
-          {displayedShortcuts.length > 0 && onClearSequence && (
+          {isAdmin && displayedShortcuts.length > 0 && onClearSequence && (
             <button
               type="button"
               onClick={() => setShowClearModal(true)}
-              className="p-1 rounded-lg bg-orange-100 hover:bg-rose-100 text-orange-700 hover:text-rose-700 transition-all border border-orange-200 active:scale-95 cursor-pointer"
-              title="Limpiar secuencia de juego"
+              className="p-1 rounded-lg bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white transition-all border border-rose-200 active:scale-95 cursor-pointer"
+              title="Limpiar secuencia de juego (Solo Admin)"
             >
               <Trash2 className="w-3 h-3" />
             </button>

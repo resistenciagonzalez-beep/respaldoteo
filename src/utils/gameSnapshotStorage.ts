@@ -644,7 +644,7 @@ export function buildCompleteGameSequenceItem(params: {
     };
   }
 
-  const canonicalId = buildCanonicalGameId(operatorFolder, dailyDate, mode, round);
+  const canonicalId = buildCanonicalGameId(operatorFolder, dailyDate, mode, round, operatorUid);
 
   return {
     id: canonicalId,

@@ -38,6 +38,7 @@ import {
 import { GameSheetSnapshotModal } from './GameSheetSnapshotModal';
 import { Bolillero90Sidebar } from './Bolillero90Sidebar';
 import { GameSequenceBar } from './GameSequenceBar';
+import { deleteGamePermanently } from '../utils/savedGamesStorage';
 
 interface BingoTraditional90SheetProps {
   drawnBalls?: Ball[];
@@ -1819,6 +1820,11 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
                 isSheetExpanded={isSheetExpanded}
                 onToggleCollapse={() => setIsLeftPanelCollapsed(true)}
                 hideSequence={isSheetExpanded}
+                isAdmin={currentUser?.role === 'admin'}
+                onDeleteGameItem={(item) => {
+                  void deleteGamePermanently(item);
+                  notify(`Partida #${item.round} eliminada.`);
+                }}
               />
             </div>
           )}
@@ -1943,6 +1949,11 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
                   onToggleBuilderHeaders();
                 }
                 notify(next ? 'Planilla amplificada en pantalla completa' : 'Vista normal restaurada');
+              }}
+              isAdmin={currentUser?.role === 'admin'}
+              onDeleteGameItem={(item) => {
+                void deleteGamePermanently(item);
+                notify(`Partida #${item.round} eliminada.`);
               }}
             />
           </div>

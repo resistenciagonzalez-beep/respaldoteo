@@ -337,8 +337,8 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
       dayMap[dateKey].netProfit = Math.round((dayMap[dateKey].totalCollected - dayMap[dateKey].totalPrizes) * 100) / 100;
     });
 
-    // If no games exist yet for this operator, provide today's empty folder so it's ready
-    if (Object.keys(dayMap).length === 0) {
+    // If no games exist yet for this operator, only provide today's empty placeholder folder for non-admin operators
+    if (Object.keys(dayMap).length === 0 && !isAdmin) {
       const todayKey = getCurrentLocalDateKey();
       const todayObj = new Date();
       const weekday = todayObj.toLocaleDateString('es-ES', { weekday: 'long' });
@@ -367,7 +367,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     }
 
     return Object.values(dayMap).sort((a, b) => b.dateKey.localeCompare(a.dateKey));
-  }, [selectedFolderOperator, filteredItems]);
+  }, [selectedFolderOperator, filteredItems, isAdmin]);
 
   // Actual display list based on folder and day subfolder selection (STRICT ISOLATION)
   const displayItems = useMemo(() => {
@@ -394,7 +394,10 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
 
   // Day deletion handlers (ONLY ADMIN)
   const handleRequestDeleteDay = (dateKey: string, e?: React.MouseEvent) => {
-    if (e) e.stopPropagation();
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
     if (!isAdmin) return;
     setDayToDelete(dateKey);
   };
@@ -410,6 +413,22 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     if (selectedFolderDay === targetDay) {
       setSelectedFolderDay(null);
     }
+
+    // Check if the operator still has any remaining games; if not, return to main folders view
+    const remainingForOp = filteredItems.filter(
+      (g) =>
+        (g.operatorName || 'Operadora Principal').trim().toLowerCase() === targetOp.trim().toLowerCase() &&
+        getGameNormalizedDateKey(g) !== targetDay
+    );
+    if (remainingForOp.length === 0) {
+      setSelectedFolderOperator(null);
+    }
+
+    setReorganizeFeedback({
+      count: 0,
+      total: 0,
+      message: `Subcarpeta del día ${targetDay} (${targetOp}) eliminada correctamente.`,
+    });
     onRefreshGallery?.();
   };
 
@@ -446,6 +465,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
   };
 
   const handleRequestDeleteFolder = (folderName: string, e: React.MouseEvent) => {
+    e.preventDefault();
     e.stopPropagation();
     if (!isAdmin) return;
     setFolderToDelete(folderName);
@@ -460,7 +480,13 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
 
     if (selectedFolderOperator === targetFolder) {
       setSelectedFolderOperator(null);
+      setSelectedFolderDay(null);
     }
+    setReorganizeFeedback({
+      count: 0,
+      total: 0,
+      message: `Carpeta de "${targetFolder}" y todas sus partidas fueron eliminadas permanentemente.`,
+    });
     onRefreshGallery?.();
   };
 
@@ -487,7 +513,10 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
   };
 
   const handleRequestDeleteItem = (game: GameSequenceItem, e?: React.MouseEvent) => {
-    if (e) e.stopPropagation();
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
     if (!isAdmin) return;
     setItemToDelete(game);
   };
@@ -506,6 +535,11 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     ) {
       setSelectedGame(null);
     }
+    setReorganizeFeedback({
+      count: 0,
+      total: 0,
+      message: `Partida #${target.round} eliminada permanentemente.`,
+    });
     onRefreshGallery?.();
   };
 
@@ -514,6 +548,13 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     setShowClearConfirm(false);
     await clearAllSavedGamesGallery();
     setSelectedGame(null);
+    setSelectedFolderOperator(null);
+    setSelectedFolderDay(null);
+    setReorganizeFeedback({
+      count: 0,
+      total: 0,
+      message: 'Todas las partidas y carpetas de la galería fueron eliminadas permanentemente.',
+    });
     onRefreshGallery?.();
   };
 
@@ -940,10 +981,11 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                               <button
                                 type="button"
                                 onClick={(e) => handleRequestDeleteFolder(folder.operatorName, e)}
-                                className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors opacity-0 group-hover:opacity-100 cursor-pointer"
+                                className="px-2.5 py-1.5 rounded-xl bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white border border-rose-200 hover:border-rose-600 transition-all shadow-2xs cursor-pointer flex items-center gap-1 flex-shrink-0 active:scale-95"
                                 title={`Eliminar todas las partidas de la carpeta "${folder.operatorName}"`}
                               >
                                 <Trash2 className="w-4 h-4" />
+                                <span className="text-[10px] font-black">Borrar</span>
                               </button>
                             )}
                           </div>
@@ -1094,10 +1136,11 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                                 <button
                                   type="button"
                                   onClick={(e) => handleRequestDeleteDay(dayFolder.dateKey, e)}
-                                  className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors opacity-0 group-hover:opacity-100 cursor-pointer"
+                                  className="px-2 py-1 rounded-xl bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white border border-rose-200 hover:border-rose-600 transition-all shadow-2xs cursor-pointer flex items-center gap-1 flex-shrink-0 active:scale-95"
                                   title={`Eliminar únicamente las partidas del día ${dayFolder.dateKey}`}
                                 >
-                                  <Trash2 className="w-4 h-4" />
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                  <span className="text-[10px] font-black">Borrar</span>
                                 </button>
                               )}
                             </div>
@@ -1329,10 +1372,11 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                                   <button
                                     type="button"
                                     onClick={(e) => handleRequestDeleteItem(game, e)}
-                                    className="p-1 rounded-md text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
+                                    className="px-2 py-1 rounded-lg bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white border border-rose-200 hover:border-rose-600 transition-all shadow-2xs cursor-pointer flex items-center gap-1 active:scale-95"
                                     title="Eliminar registro de esta partida"
                                   >
                                     <Trash2 className="w-3.5 h-3.5" />
+                                    <span className="text-[10px] font-black">Borrar</span>
                                   </button>
                                 </div>
                               )}
@@ -2220,7 +2264,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
 
       {/* Delete Single Game Confirmation Dialog */}
       {isAdmin && itemToDelete && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-fade-in select-none">
+        <div className="fixed inset-0 z-[100000] flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-fade-in select-none">
           <div className="w-full max-w-md bg-white border-2 border-rose-300 rounded-3xl shadow-2xl p-5 sm:p-6 space-y-4">
             <div className="flex items-start gap-3.5">
               <div className="w-12 h-12 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center flex-shrink-0 shadow-xs">
@@ -2259,7 +2303,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
 
       {/* Delete Folder Confirmation Dialog */}
       {isAdmin && folderToDelete && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-fade-in select-none">
+        <div className="fixed inset-0 z-[100000] flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-fade-in select-none">
           <div className="w-full max-w-md bg-white border-2 border-rose-300 rounded-3xl shadow-2xl p-5 sm:p-6 space-y-4">
             <div className="flex items-start gap-3.5">
               <div className="w-12 h-12 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center flex-shrink-0 shadow-xs">
@@ -2298,7 +2342,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
 
       {/* Delete Day Subfolder Confirmation Dialog */}
       {isAdmin && dayToDelete && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-fade-in select-none">
+        <div className="fixed inset-0 z-[100000] flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-fade-in select-none">
           <div className="w-full max-w-md bg-white border-2 border-rose-300 rounded-3xl shadow-2xl p-5 sm:p-6 space-y-4">
             <div className="flex items-start gap-3.5">
               <div className="w-12 h-12 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center flex-shrink-0 shadow-xs">

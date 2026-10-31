@@ -54,6 +54,7 @@ import { GameSequenceBar } from './GameSequenceBar';
 import { BingoWinningRowBanner } from './BingoWinningRowBanner';
 import { BingoTraditional90Sheet } from './BingoTraditional90Sheet';
 import { GameSheetSnapshotModal } from './GameSheetSnapshotModal';
+import { SyncStatusIndicator } from './SyncStatusIndicator';
 import { VIBRANT_PLAYER_COLORS, FLUORESCENT_TEXT_COLORS } from '../utils/playerColors';
 import {
   savePreviousGameSheet75,
@@ -65,7 +66,7 @@ import {
   getOperatorActiveLines,
 } from '../utils/shiftsStorage';
 import { safeSetItem } from '../utils/safeStorage';
-import { getOperatorStorageKey, getCurrentLocalDateKey, getGameNormalizedDateKey } from '../utils/savedGamesStorage';
+import { getOperatorStorageKey, getCurrentLocalDateKey, getGameNormalizedDateKey, deleteGamePermanently } from '../utils/savedGamesStorage';
 import { sanitizePlayerName } from '../utils/security';
 
 interface BingoSheetBuilderProps {
@@ -353,8 +354,12 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
   platformColor,
   onSelectPlatformColor,
   currentMatchRound = 1,
+  currentMatchAmboBall = null,
   currentMatchAmboRow = null,
+  currentMatchTernaBall = null,
+  currentMatchBingoBall = null,
   currentMatchTernaRow = null,
+  currentMatchBingoRow = null,
   gameObjectives,
   onToggleObjective,
 }) => {
@@ -505,6 +510,99 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
   const [seqModalTerna, setSeqModalTerna] = useState<string>('');
   const [seqModalBingo, setSeqModalBingo] = useState<string>('');
 
+  // Helper: map any entered ball or row number (1..75 or 1..90) to its corresponding sheet row (1..15)
+  const getWinningRowFromEnteredNumber = useCallback(
+    (val: number | string | undefined | null, totalRows = 15): number | null => {
+      if (val === undefined || val === null || val === '') return null;
+      const num = typeof val === 'number' ? val : parseInt(String(val).trim(), 10);
+      if (isNaN(num) || num <= 0) return null;
+      return ((num - 1) % totalRows) + 1;
+    },
+    []
+  );
+
+  // Manual balls entered in the sheet's sequence for the active match
+  const [manualAmboBall, setManualAmboBall] = useState<number | null>(null);
+  const [manualTernaBall, setManualTernaBall] = useState<number | null>(null);
+  const [manualBingoBall, setManualBingoBall] = useState<number | null>(null);
+  const [isWinningBannerDismissed, setIsWinningBannerDismissed] = useState<boolean>(false);
+
+  // Apply a manual sequence entry (Ambo, Terna, Bingo) to automatically recognize winning rows and calculate prizes
+  const applySequenceEntryToWinningRows = useCallback(
+    (entry?: { ambo?: number | string; terna?: number | string; bingo?: number | string }) => {
+      const rowsCount = sheetRef.current?.totalRows || 15;
+      const aNum =
+        entry?.ambo !== undefined && entry?.ambo !== '' && !isNaN(Number(entry.ambo)) && Number(entry.ambo) > 0
+          ? Number(entry.ambo)
+          : null;
+      const tNum =
+        entry?.terna !== undefined && entry?.terna !== '' && !isNaN(Number(entry.terna)) && Number(entry.terna) > 0
+          ? Number(entry.terna)
+          : null;
+      const bNum =
+        entry?.bingo !== undefined && entry?.bingo !== '' && !isNaN(Number(entry.bingo)) && Number(entry.bingo) > 0
+          ? Number(entry.bingo)
+          : null;
+
+      setManualAmboBall(aNum);
+      setManualTernaBall(tNum);
+      setManualBingoBall(bNum);
+
+      const aRow = getWinningRowFromEnteredNumber(aNum, rowsCount);
+      const tRow = getWinningRowFromEnteredNumber(tNum, rowsCount);
+      const bRow = getWinningRowFromEnteredNumber(bNum, rowsCount);
+
+      setActiveAmboRow(aRow);
+      setActiveTernaRow(tRow);
+      setActiveWinningRow(bRow);
+
+      if (aRow !== null || tRow !== null || bRow !== null) {
+        setIsWinningBannerDismissed(false);
+      }
+    },
+    [getWinningRowFromEnteredNumber]
+  );
+
+  // Direct inline input handler for the sheet's SECUENCIA cells (A | T | B)
+  const handleInlineSeqChange = useCallback(
+    (rowNum: number, field: 'ambo' | 'terna' | 'bingo', rawValue: string) => {
+      const cleaned = rawValue.replace(/[^0-9]/g, '').slice(0, 2);
+      const numVal = cleaned ? parseInt(cleaned, 10) : undefined;
+      const validNum = numVal !== undefined && !isNaN(numVal) && numVal > 0 ? numVal : undefined;
+
+      setCustomSeqEntries((prev) => {
+        const next = { ...prev };
+        const existingRow = next[rowNum] || {};
+        const updatedRow = {
+          ...existingRow,
+          [field]: validNum,
+        };
+
+        if (
+          updatedRow.ambo === undefined &&
+          updatedRow.terna === undefined &&
+          updatedRow.bingo === undefined
+        ) {
+          delete next[rowNum];
+        } else {
+          next[rowNum] = updatedRow;
+        }
+
+        try {
+          const opKey = getOperatorStorageKey('bingo_sheet_custom_sequence', currentUser);
+          localStorage.setItem(opKey, JSON.stringify(next));
+          localStorage.setItem('bingo_sheet_custom_sequence', JSON.stringify(next));
+        } catch (err) {
+          console.error(err);
+        }
+
+        applySequenceEntryToWinningRows(updatedRow);
+        return next;
+      });
+    },
+    [currentUser, applySequenceEntryToWinningRows]
+  );
+
   const handleOpenEditSeqRow = (rowNum: number) => {
     setEditingSeqRowModal(rowNum);
     const existing = customSeqEntries[rowNum];
@@ -512,28 +610,28 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     setSeqModalAmbo(
       existing?.ambo !== undefined
         ? String(existing.ambo)
+        : seqItem?.amboBall !== undefined
+        ? String(seqItem.amboBall)
         : seqItem?.amboLeader !== undefined
         ? String(seqItem.amboLeader)
-        : seqItem?.amboBall
-        ? String(((seqItem.amboBall - 1) % 15) + 1)
         : ''
     );
     setSeqModalTerna(
       existing?.terna !== undefined
         ? String(existing.terna)
+        : seqItem?.ternaBall !== undefined
+        ? String(seqItem.ternaBall)
         : seqItem?.ternaLeader !== undefined
         ? String(seqItem.ternaLeader)
-        : seqItem?.ternaBall
-        ? String(((seqItem.ternaBall - 1) % 15) + 1)
         : ''
     );
     setSeqModalBingo(
       existing?.bingo !== undefined
         ? String(existing.bingo)
+        : seqItem?.ballNumber !== undefined && seqItem.ballNumber > 0
+        ? String(seqItem.ballNumber)
         : seqItem?.rowLeader !== undefined
         ? String(seqItem.rowLeader)
-        : seqItem?.ballNumber
-        ? String(((seqItem.ballNumber - 1) % 15) + 1)
         : ''
     );
   };
@@ -545,16 +643,22 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     const tVal = seqModalTerna.trim() ? parseInt(seqModalTerna.trim(), 10) : undefined;
     const bVal = seqModalBingo.trim() ? parseInt(seqModalBingo.trim(), 10) : undefined;
 
+    const validAmbo = aVal !== undefined && !isNaN(aVal) && aVal > 0 ? aVal : undefined;
+    const validTerna = tVal !== undefined && !isNaN(tVal) && tVal > 0 ? tVal : undefined;
+    const validBingo = bVal !== undefined && !isNaN(bVal) && bVal > 0 ? bVal : undefined;
+
+    const updatedRowEntry = {
+      ambo: validAmbo,
+      terna: validTerna,
+      bingo: validBingo,
+    };
+
     setCustomSeqEntries((prev) => {
       const next = { ...prev };
-      if (aVal === undefined && tVal === undefined && bVal === undefined) {
+      if (validAmbo === undefined && validTerna === undefined && validBingo === undefined) {
         delete next[editingSeqRowModal];
       } else {
-        next[editingSeqRowModal] = {
-          ambo: isNaN(aVal!) ? undefined : aVal,
-          terna: isNaN(tVal!) ? undefined : tVal,
-          bingo: isNaN(bVal!) ? undefined : bVal,
-        };
+        next[editingSeqRowModal] = updatedRowEntry;
       }
       try {
         const opKey = getOperatorStorageKey('bingo_sheet_custom_sequence', currentUser);
@@ -566,10 +670,68 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       return next;
     });
 
+    // Automatically recognize winning rows from entered numbers and compute player prizes
+    applySequenceEntryToWinningRows(updatedRowEntry);
+
+    const rowsCount = sheetRef.current?.totalRows || 15;
+    const aRow = getWinningRowFromEnteredNumber(validAmbo, rowsCount);
+    const tRow = getWinningRowFromEnteredNumber(validTerna, rowsCount);
+    const bRow = getWinningRowFromEnteredNumber(validBingo, rowsCount);
+
     notify(
-      `Secuencia Fila #${editingSeqRowModal}:${aVal !== undefined ? ` Ambo=${aVal},` : ''} Terna=${tVal ?? '-'}, Bingo=${bVal ?? '-'}`
+      `Secuencia registrada:${validAmbo !== undefined ? ` Ambo=${validAmbo} (Fila #${aRow}),` : ''}${
+        validTerna !== undefined ? ` Terna=${validTerna} (Fila #${tRow}),` : ''
+      }${validBingo !== undefined ? ` Bingo=${validBingo} (Fila #${bRow})` : ''}`
     );
     setEditingSeqRowModal(null);
+  };
+
+  // Mark ONLY a player's winnings (GANO) as paid/sent to the player, setting their GANO box to 0.00
+  const handleMarkPlayerGanoPaid = (playerId: string, playerName: string) => {
+    const cKey = getCanonicalPlayerKey(playerId, playerName);
+    const pNameKey = playerName.toLowerCase().trim();
+
+    const summaryItem = playerSummaryListRef.current?.find(
+      (p) => p.id === playerId || p.name.toLowerCase().trim() === pNameKey
+    );
+    const rawCurWonToOffset = summaryItem ? summaryItem.rawCurrentWon : 999999;
+
+    // 1. Reset cumulative winnings (from previous games) to 0 for this player
+    setPlayerCumulativeWinnings((prev) => {
+      const updated = {
+        ...prev,
+        [cKey]: 0,
+        [playerId]: 0,
+        [pNameKey]: 0,
+        [playerName]: 0,
+      };
+      try {
+        localStorage.setItem('bingo_player_cumulative_winnings_v2', JSON.stringify(updated));
+      } catch (err) {
+        console.warn('Error saving reset winnings:', err);
+      }
+      return updated;
+    });
+
+    // 2. Offset current match winnings so GANO becomes 0.00 immediately
+    setPlayerPayoutOffsets((prev) => {
+      const updated = {
+        ...prev,
+        [cKey]: rawCurWonToOffset,
+        [playerId]: rawCurWonToOffset,
+        [pNameKey]: rawCurWonToOffset,
+        [playerName]: rawCurWonToOffset,
+      };
+      try {
+        localStorage.setItem('bingo_player_payout_offsets_v1', JSON.stringify(updated));
+      } catch (err) {
+        console.warn('Error saving payout offsets:', err);
+      }
+      return updated;
+    });
+
+    notify(`¡Premio de ${playerName.toUpperCase()} marcado como enviado/pagado! Casilla GANO en $0.00.`);
+    setEditingPlayerBalance(null);
   };
 
   // Reset individual player balance (Ganó = 0, Debe = 0, Total = 0)
@@ -1153,7 +1315,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
   // Objectives active state
   const isAmboActive = Boolean(gameObjectives ? gameObjectives.ambo : sheet.amboEnabled);
   const isTernaActive = Boolean(gameObjectives ? gameObjectives.terna : sheet.ternaEnabled);
-  const seqColWidth = isAmboActive ? 80 : 62;
+  const seqColWidth = 86;
 
   // Find currently active player for brush painting
   const activePlayer = useMemo(() => {
@@ -1173,10 +1335,22 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     );
   }, [sheet.players]);
 
-  // Active winning rows selected for prize calculation (100% manual por la operadora)
+  // Active winning rows selected for prize calculation
   const [activeWinningRow, setActiveWinningRow] = useState<number | null>(null);
   const [activeTernaRow, setActiveTernaRow] = useState<number | null>(null);
   const [activeAmboRow, setActiveAmboRow] = useState<number | null>(null);
+
+  // Reference to latest playerSummaryList so event handlers always read exact live GANO and DEBE
+  const playerSummaryListRef = useRef<
+    Array<{
+      id: string;
+      name: string;
+      rawCurrentWon: number;
+      totalGano: number;
+      debe: number;
+      total: number;
+    }>
+  >([]);
 
   // Clean slate listener when starting a new game: save snapshot for "Mismos" feature before wiping
   useEffect(() => {
@@ -1199,9 +1373,6 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       const keepPlayers = e?.detail?.keepPlayers ?? true;
       const keepSequence = e?.detail?.keepSequence ?? true;
       const keepBalances = e?.detail?.keepBalances ?? true;
-      const eventWinningRow = e?.detail?.winningRow;
-      const eventTernaRow = e?.detail?.ternaRow;
-      const eventAmboRow = e?.detail?.amboRow;
 
       // Handle sequence reset if operator chose to clear
       if (!keepSequence) {
@@ -1226,128 +1397,46 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
           console.warn('Error clearing balances on reset:', err);
         }
       } else {
-        // 1. Consolidate current match winnings (Bingo, Terna, Ambo) into cumulative winnings
-        const isBingoActive = gameObjectives ? gameObjectives.bingo : (sheetRef.current?.bingoEnabled !== false);
-        const isTernaActive = gameObjectives ? gameObjectives.terna : Boolean(sheetRef.current?.ternaEnabled);
-        const isAmboActive = gameObjectives ? gameObjectives.ambo : Boolean(sheetRef.current?.amboEnabled);
+        // Consolidate exact current GANO (totalGano) and DEBE (debe) for every active player into cumulative state
+        // If a player's GANO was NOT marked as paid (totalGano > 0), it carries over into the next game's GANO.
+        // If a player's GANO WAS marked as paid (totalGano === 0), it stays 0.00 in the next game.
+        const currentSummaries = playerSummaryListRef.current || [];
 
-        const targetBingoRow = isBingoActive
-          ? (eventWinningRow !== undefined && eventWinningRow !== null
-              ? eventWinningRow
-              : activeWinningRow !== null
-              ? activeWinningRow
-              : completedRowLeaders && completedRowLeaders.length > 0
-              ? completedRowLeaders[completedRowLeaders.length - 1]
-              : null)
-          : null;
-
-        const targetTernaRow = isTernaActive
-          ? (eventTernaRow !== undefined && eventTernaRow !== null
-              ? eventTernaRow
-              : activeTernaRow !== null
-              ? activeTernaRow
-              : currentMatchTernaRow !== null && currentMatchTernaRow !== undefined
-              ? currentMatchTernaRow
-              : null)
-          : null;
-
-        const targetAmboRow = isAmboActive
-          ? (eventAmboRow !== undefined && eventAmboRow !== null
-              ? eventAmboRow
-              : activeAmboRow !== null
-              ? activeAmboRow
-              : currentMatchAmboRow !== null && currentMatchAmboRow !== undefined
-              ? currentMatchAmboRow
-              : null)
-          : null;
-
-        if ((targetBingoRow !== null || targetTernaRow !== null || targetAmboRow !== null) && sheetRef.current) {
-          setPlayerCumulativeWinnings((prev) => {
-            const updated = { ...prev };
-
-            const creditPrize = (cell: BingoSheetCell | undefined, prizeAmount: number) => {
-              if (!cell || (!cell.playerId && !cell.playerName) || prizeAmount <= 0) return;
-              if (cell.playerId) {
-                updated[cell.playerId] = (updated[cell.playerId] || 0) + prizeAmount;
-              }
-              if (cell.playerName) {
-                const nameKey = cell.playerName.toLowerCase().trim();
-                updated[nameKey] = (updated[nameKey] || 0) + prizeAmount;
-                updated[cell.playerName] = (updated[cell.playerName] || 0) + prizeAmount;
-              }
-            };
-
-            sheetRef.current!.columns.forEach((col) => {
-              const mult = col.multiplier || 1;
-
-              // Bingo prize
-              if (targetBingoRow !== null) {
-                const cell = col.cells[targetBingoRow - 1];
-                const colPrize = col.columnPrize !== undefined ? col.columnPrize : mult * (sheetRef.current!.basePrize ?? 1.35);
-                creditPrize(cell, colPrize);
-              }
-
-              // Terna prize
-              if (targetTernaRow !== null) {
-                const cell = col.cells[targetTernaRow - 1];
-                const colTernaPrize = col.columnTernaPrize !== undefined ? col.columnTernaPrize : mult * (sheetRef.current!.baseTernaPrize ?? 0.50);
-                creditPrize(cell, colTernaPrize);
-              }
-
-              // Ambo prize
-              if (targetAmboRow !== null) {
-                const cell = col.cells[targetAmboRow - 1];
-                const colAmboPrize = col.columnAmboPrize !== undefined ? col.columnAmboPrize : mult * (sheetRef.current!.baseAmboPrize ?? 0.25);
-                creditPrize(cell, colAmboPrize);
-              }
-            });
-            try {
-              localStorage.setItem('bingo_player_cumulative_winnings_v2', JSON.stringify(updated));
-            } catch (err) {
-              console.warn('Error saving consolidated winnings:', err);
-            }
-            return updated;
+        setPlayerCumulativeWinnings((prev) => {
+          const updated = { ...prev };
+          currentSummaries.forEach((p) => {
+            const cKey = getCanonicalPlayerKey(p.id, p.name);
+            const pNameKey = p.name.toLowerCase().trim();
+            updated[cKey] = p.totalGano;
+            updated[p.id] = p.totalGano;
+            updated[pNameKey] = p.totalGano;
+            updated[p.name] = p.totalGano;
           });
-        }
+          try {
+            localStorage.setItem('bingo_player_cumulative_winnings_v2', JSON.stringify(updated));
+          } catch (err) {
+            console.warn('Error saving consolidated winnings:', err);
+          }
+          return updated;
+        });
 
-        // 2. Consolidate current match unpaid costs into cumulative debts
-        if (sheetRef.current) {
-          const currentCosts: Record<string, number> = {};
-          sheetRef.current.columns.forEach((col) => {
-            const cost = col.columnCost !== undefined ? col.columnCost : (col.multiplier || 1) * (sheetRef.current!.baseCost ?? 0.10);
-            col.cells.forEach((cell) => {
-              if (cell.playerId || cell.playerName) {
-                const isPaid = Boolean(
-                  (cell.playerId && paidPlayerIds.has(cell.playerId)) ||
-                  (cell.playerName && paidPlayerNames.has(cell.playerName.toLowerCase().trim()))
-                );
-                if (!isPaid) {
-                  const pKey = cell.playerId || cell.playerName!;
-                  currentCosts[pKey] = (currentCosts[pKey] || 0) + cost;
-                  if (cell.playerName) {
-                    const nameKey = cell.playerName.toLowerCase().trim();
-                    currentCosts[nameKey] = (currentCosts[nameKey] || 0) + cost;
-                  }
-                }
-              }
-            });
+        setPlayerCumulativeDebt((prev) => {
+          const updated = { ...prev };
+          currentSummaries.forEach((p) => {
+            const cKey = getCanonicalPlayerKey(p.id, p.name);
+            const pNameKey = p.name.toLowerCase().trim();
+            updated[cKey] = p.debe;
+            updated[p.id] = p.debe;
+            updated[pNameKey] = p.debe;
+            updated[p.name] = p.debe;
           });
-
-          setPlayerCumulativeDebt((prev) => {
-            const updated = { ...prev };
-            Object.entries(currentCosts).forEach(([pKey, unpaidCost]) => {
-              if (unpaidCost > 0) {
-                updated[pKey] = (updated[pKey] || 0) + unpaidCost;
-              }
-            });
-            try {
-              localStorage.setItem('bingo_player_cumulative_debt_v2', JSON.stringify(updated));
-            } catch (err) {
-              console.warn('Error saving consolidated debt:', err);
-            }
-            return updated;
-          });
-        }
+          try {
+            localStorage.setItem('bingo_player_cumulative_debt_v2', JSON.stringify(updated));
+          } catch (err) {
+            console.warn('Error saving consolidated debt:', err);
+          }
+          return updated;
+        });
       }
 
       setPlayerPayoutOffsets({});
@@ -1360,6 +1449,10 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       setActiveWinningRow(null);
       setActiveTernaRow(null);
       setActiveAmboRow(null);
+      setManualBingoBall(null);
+      setManualTernaBall(null);
+      setManualAmboBall(null);
+      setIsWinningBannerDismissed(false);
 
       if (!keepPlayers) {
         setSheet((prev) => ({
@@ -1535,29 +1628,25 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     const isAmboActive = gameObjectives ? gameObjectives.ambo : Boolean(sheet.amboEnabled);
 
     const targetWinningRow =
-      isBingoActive
-        ? (activeWinningRow !== null
-            ? activeWinningRow
-            : completedRowLeaders && completedRowLeaders.length > 0
-            ? completedRowLeaders[completedRowLeaders.length - 1]
-            : null)
+      activeWinningRow !== null
+        ? activeWinningRow
+        : isBingoActive && completedRowLeaders && completedRowLeaders.length > 0
+        ? completedRowLeaders[completedRowLeaders.length - 1]
         : null;
 
-    const targetTernaRow = isTernaActive
-      ? (activeTernaRow !== null
-          ? activeTernaRow
-          : currentMatchTernaRow !== null && currentMatchTernaRow !== undefined
-          ? currentMatchTernaRow
-          : null)
-      : null;
+    const targetTernaRow =
+      activeTernaRow !== null
+        ? activeTernaRow
+        : isTernaActive && currentMatchTernaRow !== null && currentMatchTernaRow !== undefined
+        ? currentMatchTernaRow
+        : null;
 
-    const targetAmboRow = isAmboActive
-      ? (activeAmboRow !== null
-          ? activeAmboRow
-          : currentMatchAmboRow !== null && currentMatchAmboRow !== undefined
-          ? currentMatchAmboRow
-          : null)
-      : null;
+    const targetAmboRow =
+      activeAmboRow !== null
+        ? activeAmboRow
+        : isAmboActive && currentMatchAmboRow !== null && currentMatchAmboRow !== undefined
+        ? currentMatchAmboRow
+        : null;
 
     const getCanonicalKey = (id?: string, name?: string): string => {
       if (name && name.trim()) return name.trim().toLowerCase();
@@ -1692,6 +1781,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
         textColor: player.textColor || '#000000',
         paid: totalAssignedCells > 0 ? unpaidCellsCount === 0 : Boolean(player.paid),
         previousWon: prevWon,
+        rawCurrentWon: rawCurWon,
         currentWon: curWon,
         currentBingoWon: currentRoundBingoWon[cKey] || 0,
         currentTernaWon: currentRoundTernaWon[cKey] || 0,
@@ -1727,6 +1817,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     playerCumulativeDebt,
     playerPayoutOffsets,
   ]);
+
+  playerSummaryListRef.current = playerSummaryList;
 
   // Persist full sheet snapshot including player summaries and custom sequence
   useEffect(() => {
@@ -2741,30 +2833,30 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
             </div>
 
             <p className="text-xs text-slate-600">
-              Configura los valores de la secuencia para esta fila: {isAmboActive && <><strong className="text-sky-800 font-black">A</strong> (Ambo), </>}<strong className="text-purple-800 font-black">T</strong> (Terna) y <strong className="text-amber-800 font-black">B</strong> (Bingo).
+              Ingresa los números de <strong>Ambo (A)</strong>, <strong>Terna (T)</strong> y/o <strong>Bingo (B)</strong>. El sistema reconocerá automáticamente las filas ganadoras y calculará los premios de cada jugador:
             </p>
 
             <form onSubmit={handleSaveSeqRow} className="space-y-3.5">
-              <div className={`grid ${isAmboActive ? 'grid-cols-3' : 'grid-cols-2'} gap-2.5`}>
-                {isAmboActive && (
-                  <div className="p-2.5 bg-sky-50 rounded-xl border border-sky-200 space-y-1">
-                    <label className="block text-[10.5px] font-black text-sky-950 uppercase tracking-wider">
-                      Ambo (A):
-                    </label>
-                    <input
-                      type="number"
-                      min="1"
-                      max="90"
-                      value={seqModalAmbo}
-                      onChange={(e) => setSeqModalAmbo(e.target.value)}
-                      placeholder="Ej: 2"
-                      className="w-full px-2 py-1.5 rounded-lg bg-white border border-sky-300 font-black text-center text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
-                    />
-                    <span className="text-[8.5px] text-sky-700 block text-center font-semibold">
-                      Fila Ambo
-                    </span>
-                  </div>
-                )}
+              <div className="grid grid-cols-3 gap-2.5">
+                <div className="p-2.5 bg-sky-50 rounded-xl border border-sky-200 space-y-1">
+                  <label className="block text-[10.5px] font-black text-sky-950 uppercase tracking-wider">
+                    Ambo (A):
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="90"
+                    value={seqModalAmbo}
+                    onChange={(e) => setSeqModalAmbo(e.target.value)}
+                    placeholder="Ej: 3"
+                    className="w-full px-2 py-1.5 rounded-lg bg-white border border-sky-300 font-black text-center text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  />
+                  <span className="text-[8.5px] text-sky-700 block text-center font-semibold">
+                    {seqModalAmbo && !isNaN(Number(seqModalAmbo)) && Number(seqModalAmbo) > 0
+                      ? `Fila #${getWinningRowFromEnteredNumber(seqModalAmbo, sheet.totalRows)}`
+                      : 'N° Ambo'}
+                  </span>
+                </div>
 
                 <div className="p-2.5 bg-purple-50 rounded-xl border border-purple-200 space-y-1">
                   <label className="block text-[10.5px] font-black text-purple-950 uppercase tracking-wider">
@@ -2777,11 +2869,12 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                     value={seqModalTerna}
                     onChange={(e) => setSeqModalTerna(e.target.value)}
                     placeholder="Ej: 14"
-                    autoFocus={!isAmboActive}
                     className="w-full px-2 py-1.5 rounded-lg bg-white border border-purple-300 font-black text-center text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
                   />
                   <span className="text-[8.5px] text-purple-700 block text-center font-semibold">
-                    Fila Terna
+                    {seqModalTerna && !isNaN(Number(seqModalTerna)) && Number(seqModalTerna) > 0
+                      ? `Fila #${getWinningRowFromEnteredNumber(seqModalTerna, sheet.totalRows)}`
+                      : 'N° Terna'}
                   </span>
                 </div>
 
@@ -2796,10 +2889,13 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                     value={seqModalBingo}
                     onChange={(e) => setSeqModalBingo(e.target.value)}
                     placeholder="Ej: 68"
+                    autoFocus
                     className="w-full px-2 py-1.5 rounded-lg bg-white border border-amber-300 font-black text-center text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
                   />
                   <span className="text-[8.5px] text-amber-700 block text-center font-semibold">
-                    Fila Bingo
+                    {seqModalBingo && !isNaN(Number(seqModalBingo)) && Number(seqModalBingo) > 0
+                      ? `Fila #${getWinningRowFromEnteredNumber(seqModalBingo, sheet.totalRows)}`
+                      : 'N° Bingo'}
                   </span>
                 </div>
               </div>
@@ -2820,7 +2916,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                   type="submit"
                   className="flex-1 py-2 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-black text-xs shadow-md active:scale-95 transition-all cursor-pointer"
                 >
-                  Guardar Secuencia
+                  Guardar y Calcular Premios
                 </button>
               </div>
             </form>
@@ -2850,12 +2946,35 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
               Ajusta los montos acumulados de <strong>Ganó</strong> y <strong>Debe</strong> para el saldo de este jugador:
             </p>
 
+            {/* Quick Action: Mark ONLY Winnings (GANO) as Paid / Sent to Player */}
+            {editingPlayerBalance.currentGano > 0 && (
+              <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-300 flex items-center justify-between gap-2.5 shadow-2xs">
+                <div className="min-w-0">
+                  <span className="text-xs font-black text-emerald-950 block uppercase tracking-tight">
+                    ¿Ya enviaste el premio ganado (${editingPlayerBalance.currentGano.toFixed(2)})?
+                  </span>
+                  <span className="text-[10px] text-emerald-900 block leading-tight mt-0.5 font-semibold">
+                    Marca su premio como pagado y deja su casilla GANO en $0.00.
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleMarkPlayerGanoPaid(editingPlayerBalance.id, editingPlayerBalance.name)}
+                  className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-white font-black text-xs shadow-md transition-all cursor-pointer flex items-center gap-1 whitespace-nowrap flex-shrink-0"
+                  title="Marca el premio como enviado/pagado y pone GANO en $0.00"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>Premio Pagado ($0)</span>
+                </button>
+              </div>
+            )}
+
             {/* Quick Settle / Reset Balance to $0 */}
             <div className="p-3 bg-amber-50 rounded-xl border border-amber-300 flex items-center justify-between gap-2.5 shadow-2xs">
               <div className="min-w-0">
-                <span className="text-xs font-black text-amber-950 block uppercase tracking-tight">¿Premio pagado o cuenta saldada?</span>
+                <span className="text-xs font-black text-amber-950 block uppercase tracking-tight">¿Cuenta total saldada?</span>
                 <span className="text-[10px] text-amber-900 block leading-tight mt-0.5 font-semibold">
-                  Reinicia deudas y ganancias acumuladas a $0.00 para empezar desde cero.
+                  Reinicia tanto deudas como ganancias a $0.00 para empezar desde cero.
                 </span>
               </div>
               <button
@@ -3018,9 +3137,9 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
         </div>
       )}
 
-      {/* Floating Restore Button when top navigation is hidden */}
+            {/* Floating Restore Button when top navigation is hidden */}
       {areTopNavsHidden && !is15SheetExpanded && (
-        <div className="no-print fixed top-2 left-3 z-50 animate-fade-in">
+        <div className="no-print fixed top-2 left-3 z-50 animate-fade-in flex items-center gap-2">
           <button
             type="button"
             onClick={() => setAreTopNavsHidden(false)}
@@ -3030,6 +3149,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
             <ChevronDown className="w-3.5 h-3.5 text-orange-600" />
             <span>Mostrar Menú</span>
           </button>
+          <SyncStatusIndicator compact />
         </div>
       )}
 
@@ -3037,14 +3157,17 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       {!areTopNavsHidden && (
         <>
           <header className="no-print sticky top-0 z-40 bg-[#fffaf5]/95 backdrop-blur-md border-b border-orange-200 px-4 sm:px-6 py-2.5 flex items-center justify-between shadow-xs">
-            <button
-              onClick={onBackToGame}
-              className="flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-orange-100 hover:bg-orange-200 text-orange-950 text-xs font-bold transition-all border border-orange-300 active:scale-95 shadow-xs"
-              title="Regresar al Bolillero y Sorteador"
-            >
-              <ArrowLeft className="w-4 h-4 text-orange-700" />
-              <span>Volver al Bolillero</span>
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={onBackToGame}
+                className="flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-orange-100 hover:bg-orange-200 text-orange-950 text-xs font-bold transition-all border border-orange-300 active:scale-95 shadow-xs"
+                title="Regresar al Bolillero y Sorteador"
+              >
+                <ArrowLeft className="w-4 h-4 text-orange-700" />
+                <span>Volver al Bolillero</span>
+              </button>
+              <SyncStatusIndicator />
+            </div>
 
             <div className="flex items-center gap-2">
               <FileSpreadsheet className="w-4 h-4 text-orange-600" />
@@ -4355,17 +4478,56 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
               is15SheetExpanded ? 'h-full max-h-full overflow-hidden p-0.5 sm:p-1' : 'overflow-x-auto'
             }`}
           >
-          {/* Winning Row Banner with automatic calculation of player earnings */}
-          {activeWinningRow && !is15SheetExpanded && (
-            <div className="no-print w-full max-w-[650px] mb-2">
-              <BingoWinningRowBanner
-                winningRowNumber={activeWinningRow}
-                sheet={sheet}
-                onClose={() => setActiveWinningRow(null)}
-                winningBall={winningBall}
-              />
-            </div>
-          )}
+          {/* Winning Row Banner with automatic calculation of player earnings across Bingo, Terna, and Ambo */}
+          {(() => {
+            const isBingoActive = gameObjectives ? gameObjectives.bingo : (sheet.bingoEnabled !== false);
+            const isTernaActive = gameObjectives ? gameObjectives.terna : Boolean(sheet.ternaEnabled);
+            const isAmboActive = gameObjectives ? gameObjectives.ambo : Boolean(sheet.amboEnabled);
+
+            const bannerBingoRow =
+              activeWinningRow !== null
+                ? activeWinningRow
+                : isBingoActive && completedRowLeaders && completedRowLeaders.length > 0
+                ? completedRowLeaders[completedRowLeaders.length - 1]
+                : null;
+
+            const bannerTernaRow =
+              activeTernaRow !== null
+                ? activeTernaRow
+                : isTernaActive && currentMatchTernaRow !== null && currentMatchTernaRow !== undefined
+                ? currentMatchTernaRow
+                : null;
+
+            const bannerAmboRow =
+              activeAmboRow !== null
+                ? activeAmboRow
+                : isAmboActive && currentMatchAmboRow !== null && currentMatchAmboRow !== undefined
+                ? currentMatchAmboRow
+                : null;
+
+            const hasBanner =
+              !isWinningBannerDismissed &&
+              (bannerBingoRow !== null || bannerTernaRow !== null || bannerAmboRow !== null);
+
+            if (!hasBanner) return null;
+
+            return (
+              <div className="no-print w-full max-w-[900px] mb-2">
+                <BingoWinningRowBanner
+                  winningRowNumber={bannerBingoRow}
+                  winningBall={manualBingoBall ?? currentMatchBingoBall ?? winningBall}
+                  ternaRowNumber={bannerTernaRow}
+                  ternaBall={manualTernaBall ?? currentMatchTernaBall}
+                  amboRowNumber={bannerAmboRow}
+                  amboBall={manualAmboBall ?? currentMatchAmboBall}
+                  sheet={sheet}
+                  onClose={() => setIsWinningBannerDismissed(true)}
+                  onMarkPlayerGanoPaid={handleMarkPlayerGanoPaid}
+                  playerSummaryList={playerSummaryList}
+                />
+              </div>
+            );
+          })()}
 
           {/* Manual Text Size Adjustment Bar & Results Quick Bar (Completely Hideable and Reopenable) */}
           {isTopAdjustmentBarVisible ? (
@@ -4638,27 +4800,21 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                   </div>
 
                   {/* Sub-headers: A (Ambo), T (Terna) & B (Bingo) */}
-                  <div
-                    className={`grid ${
-                      isAmboActive ? 'grid-cols-3' : 'grid-cols-2'
-                    } divide-x divide-purple-300 bg-[#581c87] text-white font-black text-[8px] sm:text-[9px] py-0.5 text-center leading-none uppercase`}
-                  >
-                    {isAmboActive && (
-                      <span
-                        title="Ambo (AMB) - Fila con 2 números antes que las demás"
-                        className="cursor-help hover:bg-sky-700 bg-sky-950/40 text-sky-200 transition-colors"
-                      >
-                        AMB
-                      </span>
-                    )}
+                  <div className="grid grid-cols-3 divide-x divide-purple-300 bg-[#581c87] text-white font-black text-[8px] sm:text-[9px] py-0.5 text-center leading-none uppercase">
                     <span
-                      title="Terna (TER) - Fila de Terna (3 números)"
+                      title="Ambo (AMB) - Anota aquí el número de Ambo"
+                      className="cursor-help hover:bg-sky-700 bg-sky-950/40 text-sky-200 transition-colors"
+                    >
+                      AMB
+                    </span>
+                    <span
+                      title="Terna (TER) - Anota aquí el número de Terna"
                       className="cursor-help hover:bg-purple-700 transition-colors"
                     >
                       TER
                     </span>
                     <span
-                      title="Bingo (BIN) - Fila de BINGO Ganador"
+                      title="Bingo (BIN) - Anota aquí el número de Bingo"
                       className="cursor-help hover:bg-purple-700 transition-colors"
                     >
                       BIN
@@ -4762,16 +4918,13 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                   const isAmboActive = gameObjectives ? gameObjectives.ambo : Boolean(sheet.amboEnabled);
 
                   const isBingoCompleted = isBingoActive && completedRowLeaders.includes(rowNumber);
-                  const isWinningRow = isBingoActive && (activeWinningRow === rowNumber || isBingoCompleted);
-                  const isTernaRow = isTernaActive && (
+                  const isWinningRow = activeWinningRow === rowNumber || isBingoCompleted;
+                  const isTernaRow =
                     activeTernaRow === rowNumber ||
-                    currentMatchTernaRow === rowNumber ||
-                    (Boolean(sheet.ternaEnabled) && customSeqEntries[rowNumber]?.terna === rowNumber)
-                  );
-                  const isAmboRow = isAmboActive && (
+                    (isTernaActive && currentMatchTernaRow === rowNumber);
+                  const isAmboRow =
                     activeAmboRow === rowNumber ||
-                    currentMatchAmboRow === rowNumber
-                  );
+                    (isAmboActive && currentMatchAmboRow === rowNumber);
 
                   return (
                     <div
@@ -4810,122 +4963,98 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                         />
                       )}
 
-                      {/* Left Cell: SECUENCIA (A | T | B) - 100% MANUAL */}
+                      {/* Left Cell: SECUENCIA (A | T | B) - Direct Manual Entry & Auto-Recognition */}
                       {(() => {
                         const isCurrentMatchRow = activeSequenceRow === rowNumber;
                         const customEntry = customSeqEntries[rowNumber];
 
-                        // STRICTLY MANUAL: No automatic numbers, fallbacks, or ghost entries
-                        const aVal: number | null =
+                        const aValStr =
                           customEntry?.ambo !== undefined && customEntry.ambo !== null && Number(customEntry.ambo) > 0
-                            ? Number(customEntry.ambo)
-                            : null;
+                            ? String(customEntry.ambo)
+                            : '';
 
-                        const tVal: number | null =
+                        const tValStr =
                           customEntry?.terna !== undefined && customEntry.terna !== null && Number(customEntry.terna) > 0
-                            ? Number(customEntry.terna)
-                            : null;
+                            ? String(customEntry.terna)
+                            : '';
 
-                        const bVal: number | null =
+                        const bValStr =
                           customEntry?.bingo !== undefined && customEntry.bingo !== null && Number(customEntry.bingo) > 0
-                            ? Number(customEntry.bingo)
-                            : null;
+                            ? String(customEntry.bingo)
+                            : '';
 
                         return (
                           <div
-                            className={`group/seq relative grid ${
-                              isAmboActive ? 'grid-cols-3' : 'grid-cols-2'
-                            } divide-x divide-black text-center select-none cursor-pointer transition-colors border-r-[2.5px] border-black ${
+                            className={`group/seq relative grid grid-cols-3 divide-x divide-black text-center select-none transition-colors border-r-[2.5px] border-black ${
                               isCurrentMatchRow
-                                ? 'bg-amber-100 hover:bg-amber-200 text-black font-black ring-1 ring-amber-400'
-                                : 'bg-slate-50 hover:bg-amber-50 text-black'
+                                ? 'bg-amber-100/80 text-black font-black ring-1 ring-amber-400'
+                                : 'bg-slate-50 text-black'
                             }`}
-                            title={`Fila #${rowNumber} - ${
-                              isAmboActive ? `A: ${aVal ?? '-'} (Fila Ambo), ` : ''
-                            }T: ${tVal ?? '-'} (Fila Terna), B: ${bVal ?? '-'} (Fila Bingo)${
-                              isCurrentMatchRow ? ' [Partida Actual en Juego]' : ''
-                            }. Pasa el cursor para editar.`}
+                            title={`Secuencia #${rowNumber} - A: ${aValStr || '-'} (Ambo), T: ${tValStr || '-'} (Terna), B: ${bValStr || '-'} (Bingo). Escribe directamente el número para calcular premios automáticamente.`}
                           >
                             {/* A (Ambo) */}
-                            {isAmboActive && (
-                              <div
-                                onClick={() => {
-                                  setActiveAmboRow((prev) => (prev === rowNumber ? null : rowNumber));
-                                  notify(`Fila #${rowNumber} ${activeAmboRow === rowNumber ? 'deseleccionada de' : 'seleccionada para'} AMBO`);
-                                }}
-                                className={`flex items-center justify-center py-0.5 transition-colors ${
-                                  isAmboRow ? 'bg-sky-200 text-sky-950 font-black' : 'bg-sky-50/50 hover:bg-sky-100'
-                                }`}
-                                title="Clic para alternar Fila Ganadora de AMBO"
-                              >
-                                {aVal !== null && aVal !== undefined ? (
-                                  <span
-                                    className="text-sky-950 font-black text-[14px] sm:text-[16px] leading-none drop-shadow-xs"
-                                    style={cellFontSizeScale !== 100 ? { fontSize: `calc(1em * ${cellFontSizeScale / 100})` } : undefined}
-                                  >
-                                    {aVal}
-                                  </span>
-                                ) : (
-                                  <span className="text-slate-300 text-xs font-bold">-</span>
-                                )}
-                              </div>
-                            )}
+                            <div
+                              className={`flex items-center justify-center transition-colors ${
+                                isAmboRow ? 'bg-sky-200 text-sky-950 font-black' : 'bg-sky-50/40 hover:bg-sky-100/70'
+                              }`}
+                            >
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                value={aValStr}
+                                onChange={(e) => handleInlineSeqChange(rowNumber, 'ambo', e.target.value)}
+                                placeholder="-"
+                                className="w-full h-full bg-transparent text-center font-black text-sky-950 text-[13px] sm:text-[14.5px] leading-none focus:outline-none focus:bg-sky-100 placeholder:text-slate-300 placeholder:font-bold"
+                                style={cellFontSizeScale !== 100 ? { fontSize: `calc(0.9em * ${cellFontSizeScale / 100})` } : undefined}
+                                title={`Anotar número de AMBO en secuencia #${rowNumber}`}
+                              />
+                            </div>
 
                             {/* T (Terna) */}
                             <div
-                              onClick={() => {
-                                setActiveTernaRow((prev) => (prev === rowNumber ? null : rowNumber));
-                                notify(`Fila #${rowNumber} ${activeTernaRow === rowNumber ? 'deseleccionada de' : 'seleccionada para'} TERNA`);
-                              }}
-                              className={`flex items-center justify-center py-0.5 transition-colors ${
-                                isTernaRow ? 'bg-emerald-200 text-emerald-950 font-black' : 'hover:bg-emerald-100'
+                              className={`flex items-center justify-center transition-colors ${
+                                isTernaRow ? 'bg-emerald-200 text-emerald-950 font-black' : 'hover:bg-emerald-100/70'
                               }`}
-                              title="Clic para alternar Fila Ganadora de TERNA"
                             >
-                              {tVal !== null && tVal !== undefined ? (
-                                <span
-                                  className="text-slate-950 font-black text-[14px] sm:text-[16px] leading-none drop-shadow-xs"
-                                  style={cellFontSizeScale !== 100 ? { fontSize: `calc(1em * ${cellFontSizeScale / 100})` } : undefined}
-                                >
-                                  {tVal}
-                                </span>
-                              ) : (
-                                <span className="text-slate-300 text-xs font-bold">-</span>
-                              )}
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                value={tValStr}
+                                onChange={(e) => handleInlineSeqChange(rowNumber, 'terna', e.target.value)}
+                                placeholder="-"
+                                className="w-full h-full bg-transparent text-center font-black text-slate-950 text-[13px] sm:text-[14.5px] leading-none focus:outline-none focus:bg-emerald-100 placeholder:text-slate-300 placeholder:font-bold"
+                                style={cellFontSizeScale !== 100 ? { fontSize: `calc(0.9em * ${cellFontSizeScale / 100})` } : undefined}
+                                title={`Anotar número de TERNA en secuencia #${rowNumber}`}
+                              />
                             </div>
 
                             {/* B (Bingo) */}
                             <div
-                              onClick={() => {
-                                setActiveWinningRow((prev) => (prev === rowNumber ? null : rowNumber));
-                                notify(`Fila #${rowNumber} ${activeWinningRow === rowNumber ? 'deseleccionada de' : 'seleccionada para'} BINGO`);
-                              }}
-                              className={`flex items-center justify-center py-0.5 transition-colors ${
-                                isWinningRow ? 'bg-amber-300 text-amber-950 font-black' : 'hover:bg-amber-100'
+                              className={`flex items-center justify-center transition-colors ${
+                                isWinningRow ? 'bg-amber-300 text-amber-950 font-black' : 'hover:bg-amber-100/70'
                               }`}
-                              title="Clic para alternar Fila Ganadora de BINGO"
                             >
-                              {bVal !== null && bVal !== undefined && Number(bVal) > 0 ? (
-                                <span
-                                  className="text-slate-950 font-black text-[14px] sm:text-[16px] leading-none drop-shadow-xs"
-                                  style={cellFontSizeScale !== 100 ? { fontSize: `calc(1em * ${cellFontSizeScale / 100})` } : undefined}
-                                >
-                                  {bVal}
-                                </span>
-                              ) : (
-                                <span className="text-slate-300 text-xs font-bold">-</span>
-                              )}
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                value={bValStr}
+                                onChange={(e) => handleInlineSeqChange(rowNumber, 'bingo', e.target.value)}
+                                placeholder="-"
+                                className="w-full h-full bg-transparent text-center font-black text-slate-950 text-[13px] sm:text-[14.5px] leading-none focus:outline-none focus:bg-amber-200 placeholder:text-slate-300 placeholder:font-bold"
+                                style={cellFontSizeScale !== 100 ? { fontSize: `calc(0.9em * ${cellFontSizeScale / 100})` } : undefined}
+                                title={`Anotar número de BINGO en secuencia #${rowNumber}`}
+                              />
                             </div>
 
-                            {/* Quick edit button on hover */}
+                            {/* Quick edit modal button on hover */}
                             <button
                               type="button"
                               onClick={(e) => {
                                 e.stopPropagation();
                                 handleOpenEditSeqRow(rowNumber);
                               }}
-                              className="no-print absolute -top-1 -right-1 opacity-0 group-hover/seq:opacity-100 p-0.5 bg-purple-900 text-yellow-300 rounded-full shadow-xs hover:scale-110 transition-all z-30"
-                              title="Editar valores de secuencia para esta fila"
+                              className="no-print absolute -top-1 -right-1 opacity-0 group-hover/seq:opacity-100 p-0.5 bg-purple-900 text-yellow-300 rounded-full shadow-xs hover:scale-110 transition-all z-30 cursor-pointer"
+                              title="Abrir ventana para editar secuencia de esta fila"
                             >
                               <Edit3 className="w-2 h-2" />
                             </button>
@@ -5203,7 +5332,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                               }}
                               className={`${
                                 is15SheetExpanded ? 'h-[20px]' : 'min-h-[24px] py-0.5'
-                              } px-0.5 sm:px-1 flex items-center justify-center font-black tabular-nums text-[12px] sm:text-[13px] tracking-tight border-b border-black cursor-pointer hover:bg-yellow-100 transition-colors ${
+                              } px-0.5 sm:px-1 flex items-center justify-center font-black tabular-nums text-[12px] sm:text-[13px] tracking-tight border-b border-black cursor-pointer hover:bg-yellow-100 transition-colors relative group/ganocell ${
                                 p.totalGano > 0 ? 'text-emerald-950 bg-emerald-100/90' : 'text-black bg-[#fefce8]'
                               }`}
                               style={cellFontSizeScale !== 100 ? { fontSize: `calc(1em * ${cellFontSizeScale / 100})` } : undefined}
@@ -5215,11 +5344,27 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                                       p.currentAmboWon > 0 ? ` [Ambo: $${p.currentAmboWon.toFixed(2)}]` : ''
                                     }`
                                   : ''
-                              } = $${p.totalGano.toFixed(2)}. Clic para ajustar saldo/ganado.`}
+                              } = $${p.totalGano.toFixed(2)}. Clic para ajustar o marcar premio como pagado.`}
                             >
                               <span className="font-black drop-shadow-2xs">
                                 {p.totalGano.toFixed(2)}
                               </span>
+
+                              {/* Quick 1-click button to mark GANO as paid/sent (sets GANO to 0.00) */}
+                              {p.totalGano > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleMarkPlayerGanoPaid(p.id, p.name);
+                                  }}
+                                  className="no-print opacity-0 group-hover/ganocell:opacity-100 absolute right-0.5 inset-y-0.5 my-auto px-1 py-0.2 rounded bg-emerald-700 text-white hover:bg-emerald-800 font-black text-[7.5px] tracking-tight leading-none flex items-center gap-0.5 shadow-sm transition-opacity cursor-pointer"
+                                  title={`Marcar premio de ${p.name.toUpperCase()} como enviado/pagado (deja GANO en 0.00)`}
+                                >
+                                  <Check className="w-2 h-2" />
+                                  <span>Pagado</span>
+                                </button>
+                              )}
                             </div>
 
                             {/* Row 3: DEBE */}
@@ -5365,6 +5510,11 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
               setIs15PanelCollapsed(next);
               notify(next ? 'Planilla expandida' : 'Vista normal restaurada');
             }}
+            isAdmin={currentUser?.role === 'admin'}
+            onDeleteGameItem={(item) => {
+              void deleteGamePermanently(item);
+              notify(`Partida #${item.round} eliminada.`);
+            }}
           />
         </div>
       )}
@@ -5400,6 +5550,11 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
               setIs15SheetExpanded(next);
               setIs15PanelCollapsed(next);
               notify(next ? 'Planilla expandida' : 'Vista normal restaurada');
+            }}
+            isAdmin={currentUser?.role === 'admin'}
+            onDeleteGameItem={(item) => {
+              void deleteGamePermanently(item);
+              notify(`Partida #${item.round} eliminada.`);
             }}
           />
         </div>

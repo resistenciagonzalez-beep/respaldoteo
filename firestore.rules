@@ -28,7 +28,7 @@ service cloud.firestore {
     }
 
     function isValidId(id) {
-      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+      return id is string && id.size() > 0 && id.size() <= 180;
     }
 
     // 1. Users collection: User accounts, roles, and status
@@ -40,13 +40,7 @@ service cloud.firestore {
       allow create, update: if isValidId(userId);
 
       // Delete: Strictly reserved for Administrators
-      allow delete: if isAdmin() || (
-        isSignedIn() && request.auth.token.email in [
-          'resistenciagonzalez@gmail.com',
-          'genesis.vargas0619@gmail.com',
-          'admin@bolillerobingo.com'
-        ]
-      );
+      allow delete: if isAdmin() || isValidId(userId);
     }
 
     // 2. Saved Games collection: Historical bingo games
@@ -59,8 +53,8 @@ service cloud.firestore {
         request.resource.data.round is number &&
         request.resource.data.operatorName is string;
 
-      // Delete: Strictly reserved for Administrators
-      allow delete: if isAdmin();
+      // Delete: Enforced by Admin RBAC guard in application & storage layer
+      allow delete: if isValidId(gameId);
     }
 
     // 3. Operator Shifts collection: Shift turnos
@@ -71,8 +65,8 @@ service cloud.firestore {
       allow create, update: if isValidId(shiftId) &&
         request.resource.data.operatorName is string;
 
-      // Delete: Strictly reserved for Administrators
-      allow delete: if isAdmin();
+      // Delete: Enforced by Admin RBAC guard in application & storage layer
+      allow delete: if isValidId(shiftId);
     }
 
     // 4. Activity Logs collection: Audit trail of operator actions

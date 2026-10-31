@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   X,
   BookmarkCheck,
+  Loader2,
 } from 'lucide-react';
 import { SheetViewType } from '../types';
 
@@ -34,8 +35,8 @@ interface NewGameModalProps {
   currency?: string;
   operatorName?: string;
   onClose: () => void;
-  onConfirmArchiveAndNewGame?: (options: NewGameModalOptions) => void;
-  onConfirm?: (options: NewGameModalOptions) => void;
+  onConfirmArchiveAndNewGame?: (options: NewGameModalOptions) => Promise<void> | void;
+  onConfirm?: (options: NewGameModalOptions) => Promise<void> | void;
 }
 
 export const NewGameModal: React.FC<NewGameModalProps> = ({
@@ -50,17 +51,26 @@ export const NewGameModal: React.FC<NewGameModalProps> = ({
   const [keepSequence, setKeepSequence] = useState<boolean>(true);
   const [keepBalances, setKeepBalances] = useState<boolean>(true);
   const [endTurno, setEndTurno] = useState<boolean>(false);
+  const [isProcessing, setIsProcessing] = useState<boolean>(false);
 
   if (!isOpen) return null;
 
-  const handleStart = () => {
-    const opts: NewGameModalOptions = { keepPlayers, keepSequence, keepBalances, endTurno };
-    if (onConfirmArchiveAndNewGame) {
-      onConfirmArchiveAndNewGame(opts);
-    } else if (onConfirm) {
-      onConfirm(opts);
+  const handleStart = async () => {
+    if (isProcessing) return;
+    setIsProcessing(true);
+    try {
+      const opts: NewGameModalOptions = { keepPlayers, keepSequence, keepBalances, endTurno };
+      if (onConfirmArchiveAndNewGame) {
+        await onConfirmArchiveAndNewGame(opts);
+      } else if (onConfirm) {
+        await onConfirm(opts);
+      }
+      onClose();
+    } catch (err) {
+      console.error('Error al finalizar y guardar partida actual:', err);
+    } finally {
+      setIsProcessing(false);
     }
-    onClose();
   };
 
   return (
@@ -83,8 +93,9 @@ export const NewGameModal: React.FC<NewGameModalProps> = ({
           </div>
           <button
             type="button"
+            disabled={isProcessing}
             onClick={onClose}
-            className="p-1.5 rounded-xl text-white/80 hover:text-white hover:bg-white/20 transition-all cursor-pointer"
+            className="p-1.5 rounded-xl text-white/80 hover:text-white hover:bg-white/20 transition-all cursor-pointer disabled:opacity-40"
           >
             <X className="w-4 h-4" />
           </button>
@@ -103,6 +114,7 @@ export const NewGameModal: React.FC<NewGameModalProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <button
                   type="button"
+                  disabled={isProcessing}
                   onClick={() => setKeepPlayers(true)}
                   className={`p-2.5 rounded-xl border text-left flex items-start gap-2.5 transition-all cursor-pointer ${
                     keepPlayers
@@ -131,6 +143,7 @@ export const NewGameModal: React.FC<NewGameModalProps> = ({
 
                 <button
                   type="button"
+                  disabled={isProcessing}
                   onClick={() => setKeepPlayers(false)}
                   className={`p-2.5 rounded-xl border text-left flex items-start gap-2.5 transition-all cursor-pointer ${
                     !keepPlayers
@@ -168,6 +181,7 @@ export const NewGameModal: React.FC<NewGameModalProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <button
                   type="button"
+                  disabled={isProcessing}
                   onClick={() => setKeepSequence(true)}
                   className={`p-2.5 rounded-xl border text-left flex items-start gap-2.5 transition-all cursor-pointer ${
                     keepSequence
@@ -196,6 +210,7 @@ export const NewGameModal: React.FC<NewGameModalProps> = ({
 
                 <button
                   type="button"
+                  disabled={isProcessing}
                   onClick={() => setKeepSequence(false)}
                   className={`p-2.5 rounded-xl border text-left flex items-start gap-2.5 transition-all cursor-pointer ${
                     !keepSequence
@@ -233,6 +248,7 @@ export const NewGameModal: React.FC<NewGameModalProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <button
                   type="button"
+                  disabled={isProcessing}
                   onClick={() => setKeepBalances(true)}
                   className={`p-2.5 rounded-xl border text-left flex items-start gap-2.5 transition-all cursor-pointer ${
                     keepBalances
@@ -261,6 +277,7 @@ export const NewGameModal: React.FC<NewGameModalProps> = ({
 
                 <button
                   type="button"
+                  disabled={isProcessing}
                   onClick={() => setKeepBalances(false)}
                   className={`p-2.5 rounded-xl border text-left flex items-start gap-2.5 transition-all cursor-pointer ${
                     !keepBalances
@@ -304,6 +321,7 @@ export const NewGameModal: React.FC<NewGameModalProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <button
                   type="button"
+                  disabled={isProcessing}
                   onClick={() => setEndTurno(false)}
                   className={`p-2.5 rounded-xl border text-left flex items-start gap-2.5 transition-all cursor-pointer ${
                     !endTurno
@@ -332,6 +350,7 @@ export const NewGameModal: React.FC<NewGameModalProps> = ({
 
                 <button
                   type="button"
+                  disabled={isProcessing}
                   onClick={() => setEndTurno(true)}
                   className={`p-2.5 rounded-xl border text-left flex items-start gap-2.5 transition-all cursor-pointer ${
                     endTurno
@@ -365,7 +384,7 @@ export const NewGameModal: React.FC<NewGameModalProps> = ({
           <div className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-2xl bg-emerald-50 border border-emerald-200/90 text-emerald-950 shadow-xs">
             <BookmarkCheck className="w-4 h-4 text-emerald-600 flex-shrink-0" />
             <p className="text-[11px] leading-snug font-medium text-emerald-900">
-              Esta partida quedará archivada y sincronizada en la <strong>Galería de Partidas Guardadas</strong> con su planilla completa y números cantados.
+              Esta partida se guardará de inmediato localmente (Offline-First) y se sincronizará con verificación automática en la <strong>Galería de Partidas Guardadas</strong> antes de abrir la Partida #{currentRound + 1}.
             </p>
           </div>
         </div>
@@ -374,18 +393,29 @@ export const NewGameModal: React.FC<NewGameModalProps> = ({
         <div className="px-5 py-3.5 bg-[#fff1e6] border-t border-orange-200 flex items-center justify-end gap-2">
           <button
             type="button"
+            disabled={isProcessing}
             onClick={onClose}
-            className="px-3.5 py-2 rounded-xl bg-orange-100 hover:bg-orange-200 text-orange-950 text-xs font-bold transition-all cursor-pointer"
+            className="px-3.5 py-2 rounded-xl bg-orange-100 hover:bg-orange-200 text-orange-950 text-xs font-bold transition-all cursor-pointer disabled:opacity-40"
           >
             Cancelar
           </button>
           <button
             type="button"
+            disabled={isProcessing}
             onClick={handleStart}
-            className="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-black shadow-md transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer"
+            className="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-black shadow-md transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
           >
-            <BookmarkCheck className="w-3.5 h-3.5 fill-white text-emerald-600" />
-            <span>Guardar en Galería y Comenzar Partida #{currentRound + 1}</span>
+            {isProcessing ? (
+              <>
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-white" />
+                <span>Finalizando y Guardando Partida #{currentRound}...</span>
+              </>
+            ) : (
+              <>
+                <BookmarkCheck className="w-3.5 h-3.5 fill-white text-emerald-600" />
+                <span>Guardar en Galería y Comenzar Partida #{currentRound + 1}</span>
+              </>
+            )}
           </button>
         </div>
       </div>

@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { Ball, BingoMode, GameSettings, SpeedPreset, AppUser, GameSequenceItem, SheetViewType, PlatformColor, GameObjectives } from '../types';
 import { MiniBallsTumbler } from './MiniBallsTumbler';
 import { PlatformColorBar } from './PlatformColorBar';
+import { SyncStatusIndicator } from './SyncStatusIndicator';
 import {
   Volume2,
   VolumeX,
@@ -339,6 +340,9 @@ export const BingoEsFormat: React.FC<BingoEsFormatProps> = ({
             )}
           </button>
         )}
+
+        {/* Indicador permanente de estado de sincronización Offline-First */}
+        <SyncStatusIndicator compact />
       </div>
 
       {/* Grupo 2: Herramientas y funciones del sistema compactas (h-7 w-7) */}

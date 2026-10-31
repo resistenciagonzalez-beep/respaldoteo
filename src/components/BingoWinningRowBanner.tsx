@@ -1,198 +1,394 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { BingoSheetData } from '../types';
-import { Trophy, X, Users, ChevronDown, ChevronUp } from 'lucide-react';
+import { Trophy, Sparkles, DollarSign, X, CheckCircle2 } from 'lucide-react';
 
 interface BingoWinningRowBannerProps {
-  winningRowNumber: number;
-  sheet: BingoSheetData;
-  onClose?: () => void;
+  winningRowNumber: number | null;
   winningBall?: number | null;
+  ternaRowNumber?: number | null;
+  ternaBall?: number | null;
+  amboRowNumber?: number | null;
+  amboBall?: number | null;
+  sheet: BingoSheetData;
+  onClose: () => void;
+  onMarkPlayerGanoPaid?: (playerId: string, playerName: string) => void;
+  playerSummaryList?: Array<{
+    id: string;
+    name: string;
+    totalGano: number;
+    debe: number;
+    total: number;
+  }>;
 }
 
-export interface PlayerRowWinning {
-  playerId?: string;
+interface HitDetail {
+  colTitle: string;
+  multiplier: number;
+  prize: number;
+  row: number;
+}
+
+interface PlayerWinningBreakdown {
+  playerId: string;
   playerName: string;
   color: string;
+  bingoHits: HitDetail[];
+  ternaHits: HitDetail[];
+  amboHits: HitDetail[];
+  bingoTotal: number;
+  ternaTotal: number;
+  amboTotal: number;
   totalPrize: number;
-  columnsWon: {
-    colNumber: number;
-    title: string;
-    multiplier: number;
-    prize: number;
-  }[];
+  categoriesWon: ('AMBO' | 'TERNA' | 'BINGO')[];
 }
 
 export const BingoWinningRowBanner: React.FC<BingoWinningRowBannerProps> = ({
   winningRowNumber,
+  winningBall,
+  ternaRowNumber,
+  ternaBall,
+  amboRowNumber,
+  amboBall,
   sheet,
   onClose,
-  winningBall,
+  onMarkPlayerGanoPaid,
+  playerSummaryList = [],
 }) => {
-  const [isExpanded, setIsExpanded] = React.useState<boolean>(true);
+  const hasAnyActiveRow =
+    (winningRowNumber !== null && winningRowNumber !== undefined) ||
+    (ternaRowNumber !== null && ternaRowNumber !== undefined) ||
+    (amboRowNumber !== null && amboRowNumber !== undefined);
 
-  // Calculate earnings for each player in this specific row
-  const rowAnalysis = React.useMemo(() => {
-    let totalRowPrize = 0;
-    let totalAssignedPrize = 0;
-    const playerMap: Record<string, PlayerRowWinning> = {};
+  // Calculate per-player winnings across Bingo, Terna, and Ambo (1 of 3, 2 of 3, or all 3 of 3)
+  const winners = useMemo(() => {
+    if (!hasAnyActiveRow) return [];
+
+    const winnersMap = new Map<string, PlayerWinningBreakdown>();
+
+    const ensureWinnerEntry = (key: string, playerId: string, playerName: string, color?: string) => {
+      let existing = winnersMap.get(key);
+      if (!existing) {
+        existing = {
+          playerId,
+          playerName,
+          color: color || '#f59e0b',
+          bingoHits: [],
+          ternaHits: [],
+          amboHits: [],
+          bingoTotal: 0,
+          ternaTotal: 0,
+          amboTotal: 0,
+          totalPrize: 0,
+          categoriesWon: [],
+        };
+        winnersMap.set(key, existing);
+      }
+      return existing;
+    };
+
+    const getCanonicalKey = (id?: string, name?: string) => {
+      if (name && name.trim()) return name.trim().toLowerCase();
+      if (id && id.trim()) return id.trim().toLowerCase();
+      return 'anon';
+    };
 
     sheet.columns.forEach((col) => {
       const mult = col.multiplier || 1;
-      const colPrize = col.columnPrize !== undefined ? col.columnPrize : mult * (sheet.basePrize ?? 1.35);
-      totalRowPrize += colPrize;
+      const colTitle = col.title || `X${mult}`;
 
-      const cell = col.cells[winningRowNumber - 1];
-      if (cell && (cell.playerId || cell.playerName)) {
-        const pKey = cell.playerId || cell.playerName || 'anon';
-        const pName = cell.playerName || 'Jugador';
-        const pColor = cell.color || '#fed7aa';
-
-        if (!playerMap[pKey]) {
-          playerMap[pKey] = {
-            playerId: cell.playerId,
-            playerName: pName,
-            color: pColor,
-            totalPrize: 0,
-            columnsWon: [],
-          };
+      // 1. Ambo check
+      if (amboRowNumber !== null && amboRowNumber !== undefined && amboRowNumber >= 1) {
+        const cell = col.cells[amboRowNumber - 1];
+        if (cell && (cell.playerId || cell.playerName)) {
+          const prize =
+            col.columnAmboPrize !== undefined
+              ? col.columnAmboPrize
+              : mult * (sheet.baseAmboPrize ?? 0.25);
+          const key = getCanonicalKey(cell.playerId, cell.playerName);
+          const entry = ensureWinnerEntry(
+            key,
+            cell.playerId || key,
+            cell.playerName || 'Jugador',
+            cell.color
+          );
+          entry.amboHits.push({ colTitle, multiplier: mult, prize, row: amboRowNumber });
+          entry.amboTotal = Math.round((entry.amboTotal + prize) * 100) / 100;
+          entry.totalPrize = Math.round((entry.totalPrize + prize) * 100) / 100;
+          if (!entry.categoriesWon.includes('AMBO')) {
+            entry.categoriesWon.push('AMBO');
+          }
         }
+      }
 
-        playerMap[pKey].totalPrize += colPrize;
-        playerMap[pKey].columnsWon.push({
-          colNumber: col.colNumber,
-          title: col.title,
-          multiplier: mult,
-          prize: colPrize,
-        });
+      // 2. Terna check
+      if (ternaRowNumber !== null && ternaRowNumber !== undefined && ternaRowNumber >= 1) {
+        const cell = col.cells[ternaRowNumber - 1];
+        if (cell && (cell.playerId || cell.playerName)) {
+          const prize =
+            col.columnTernaPrize !== undefined
+              ? col.columnTernaPrize
+              : mult * (sheet.baseTernaPrize ?? 0.50);
+          const key = getCanonicalKey(cell.playerId, cell.playerName);
+          const entry = ensureWinnerEntry(
+            key,
+            cell.playerId || key,
+            cell.playerName || 'Jugador',
+            cell.color
+          );
+          entry.ternaHits.push({ colTitle, multiplier: mult, prize, row: ternaRowNumber });
+          entry.ternaTotal = Math.round((entry.ternaTotal + prize) * 100) / 100;
+          entry.totalPrize = Math.round((entry.totalPrize + prize) * 100) / 100;
+          if (!entry.categoriesWon.includes('TERNA')) {
+            entry.categoriesWon.push('TERNA');
+          }
+        }
+      }
 
-        totalAssignedPrize += colPrize;
+      // 3. Bingo check
+      if (winningRowNumber !== null && winningRowNumber !== undefined && winningRowNumber >= 1) {
+        const cell = col.cells[winningRowNumber - 1];
+        if (cell && (cell.playerId || cell.playerName)) {
+          const prize =
+            col.columnPrize !== undefined
+              ? col.columnPrize
+              : mult * (sheet.basePrize ?? 1.35);
+          const key = getCanonicalKey(cell.playerId, cell.playerName);
+          const entry = ensureWinnerEntry(
+            key,
+            cell.playerId || key,
+            cell.playerName || 'Jugador',
+            cell.color
+          );
+          entry.bingoHits.push({ colTitle, multiplier: mult, prize, row: winningRowNumber });
+          entry.bingoTotal = Math.round((entry.bingoTotal + prize) * 100) / 100;
+          entry.totalPrize = Math.round((entry.totalPrize + prize) * 100) / 100;
+          if (!entry.categoriesWon.includes('BINGO')) {
+            entry.categoriesWon.push('BINGO');
+          }
+        }
       }
     });
 
-    const winnersList = Object.values(playerMap).sort((a, b) => b.totalPrize - a.totalPrize);
-    const unassignedPrize = Math.max(0, totalRowPrize - totalAssignedPrize);
+    return Array.from(winnersMap.values()).sort((a, b) => b.totalPrize - a.totalPrize);
+  }, [
+    hasAnyActiveRow,
+    winningRowNumber,
+    ternaRowNumber,
+    amboRowNumber,
+    sheet.columns,
+    sheet.basePrize,
+    sheet.baseTernaPrize,
+    sheet.baseAmboPrize,
+  ]);
 
-    return {
-      totalRowPrize,
-      totalAssignedPrize,
-      unassignedPrize,
-      winnersList,
-    };
-  }, [winningRowNumber, sheet]);
+  if (!hasAnyActiveRow) return null;
+
+  const grandTotalPrizes = winners.reduce((acc, w) => acc + w.totalPrize, 0);
 
   return (
-    <div className="w-full rounded-2xl border-2 border-red-500 bg-gradient-to-r from-red-500/10 via-rose-500/15 to-red-500/10 shadow-lg p-3 sm:p-4 text-[#431407] animate-fade-in mb-3">
-      <div className="flex items-center justify-between gap-2 border-b border-red-300/80 pb-2.5">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-xl bg-red-600 text-white flex items-center justify-center shadow-md animate-bounce">
-            <Trophy className="w-5 h-5 fill-white" />
-          </div>
-          <div>
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-xs font-black uppercase tracking-wider bg-red-600 text-white px-2 py-0.5 rounded-md shadow-xs">
-                ¡¡ BINGO EN FILA #{winningRowNumber} !!
-              </span>
-              {winningBall && (
-                <span className="text-[11px] font-bold text-red-900 bg-red-100 px-2 py-0.5 rounded border border-red-300">
-                  Bola Cantada: <strong>#{winningBall}</strong>
-                </span>
-              )}
+    <div className="no-print mb-2 rounded-2xl bg-gradient-to-r from-red-700 via-rose-600 to-red-700 p-0.5 shadow-xl animate-fade-in">
+      <div className="bg-red-950/90 backdrop-blur-md rounded-[14px] px-3 py-2.5 text-white flex flex-col gap-2">
+        {/* Top Row: Winning Rows Title & Total Payout */}
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-red-400/25 pb-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="w-8 h-8 rounded-xl bg-amber-400 text-amber-950 flex items-center justify-center font-black shadow-md flex-shrink-0">
+              <Trophy className="w-4 h-4 fill-amber-900" />
             </div>
-            <span className="text-[11px] font-bold text-red-900/80">
-              La fila #{winningRowNumber} está marcada en rojo. Total repartido:{' '}
-              <strong className="text-red-700 text-sm font-black">
-                {rowAnalysis.totalAssignedPrize.toFixed(2)} pts
-              </strong>{' '}
-              de {rowAnalysis.totalRowPrize.toFixed(2)} pts posibles.
-            </span>
-          </div>
-        </div>
+            <div>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-red-500/40 text-amber-200 border border-amber-300/30 flex items-center gap-1">
+                  <Sparkles className="w-2.5 h-2.5" />
+                  Cálculo Automático de Premios
+                </span>
 
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => setIsExpanded((prev) => !prev)}
-            className="p-1.5 rounded-lg bg-red-100 hover:bg-red-200 text-red-900 transition-all cursor-pointer"
-            title={isExpanded ? 'Contraer resumen' : 'Expandir resumen'}
-          >
-            {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-          </button>
-          {onClose && (
+                {amboRowNumber !== null && amboRowNumber !== undefined && (
+                  <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-sky-500/30 text-sky-200 border border-sky-300/40">
+                    AMBO: Fila #{amboRowNumber}
+                    {amboBall !== null && amboBall !== undefined ? ` (N° ${amboBall})` : ''}
+                  </span>
+                )}
+
+                {ternaRowNumber !== null && ternaRowNumber !== undefined && (
+                  <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-emerald-500/30 text-emerald-200 border border-emerald-300/40">
+                    TERNA: Fila #{ternaRowNumber}
+                    {ternaBall !== null && ternaBall !== undefined ? ` (N° ${ternaBall})` : ''}
+                  </span>
+                )}
+
+                {winningRowNumber !== null && winningRowNumber !== undefined && (
+                  <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-amber-400 text-amber-950 border border-amber-200 shadow-2xs">
+                    BINGO: Fila #{winningRowNumber}
+                    {winningBall !== null && winningBall !== undefined ? ` (N° ${winningBall})` : ''}
+                  </span>
+                )}
+              </div>
+              <h3 className="text-xs sm:text-sm font-black tracking-tight text-white mt-0.5">
+                Liquidación Automática por Jugador (Bingo, Terna y Ambo)
+              </h3>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 ml-auto">
+            <div className="px-2.5 py-1 rounded-xl bg-emerald-500/20 border border-emerald-400/40 text-right">
+              <span className="text-[9px] uppercase tracking-wider text-emerald-200 block font-bold">
+                Total Premios Partida
+              </span>
+              <span className="text-xs sm:text-sm font-black text-emerald-300 flex items-center justify-end gap-0.5">
+                <DollarSign className="w-3.5 h-3.5" />
+                {sheet.currency}
+                {grandTotalPrizes.toFixed(2)}
+              </span>
+            </div>
+
             <button
-              type="button"
               onClick={onClose}
-              className="p-1.5 rounded-lg bg-red-100 hover:bg-rose-200 text-red-900 transition-all cursor-pointer"
-              title="Cerrar aviso"
+              className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white/80 hover:text-white transition-colors cursor-pointer"
+              title="Ocultar aviso de premios"
             >
               <X className="w-4 h-4" />
             </button>
-          )}
-        </div>
-      </div>
-
-      {/* Expanded Breakdown of Players that won in this row */}
-      {isExpanded && (
-        <div className="pt-2.5 space-y-2">
-          <div className="flex items-center justify-between text-xs font-bold text-red-950">
-            <span className="flex items-center gap-1">
-              <Users className="w-3.5 h-3.5 text-red-600" />
-              Jugadores ganadores en la Fila #{winningRowNumber}:
-            </span>
-            <span className="text-[11px] font-bold text-red-800">
-              {rowAnalysis.winnersList.length} {rowAnalysis.winnersList.length === 1 ? 'jugador premiado' : 'jugadores premiados'}
-            </span>
           </div>
+        </div>
 
-          {rowAnalysis.winnersList.length === 0 ? (
-            <div className="p-2.5 rounded-xl bg-white/80 border border-red-200 text-center text-xs text-red-900 font-semibold">
-              Ningún jugador tenía casillas asignadas en esta fila. Premio acumulado de la fila:{' '}
-              <strong className="text-red-700">{rowAnalysis.totalRowPrize.toFixed(2)} pts</strong>.
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
-              {rowAnalysis.winnersList.map((winner) => (
+        {/* Bottom Row: Winners Breakdown Cards */}
+        {winners.length === 0 ? (
+          <div className="py-1.5 px-3 rounded-xl bg-white/5 border border-white/10 text-xs text-amber-200/90 flex items-center justify-between">
+            <span>Ningún jugador tiene casillas asignadas en las filas ganadoras indicadas.</span>
+            <span className="font-bold text-white/60">Premios: {sheet.currency}0.00</span>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+            {winners.map((w) => {
+              const summary = playerSummaryList.find(
+                (p) =>
+                  p.id === w.playerId ||
+                  p.name.toLowerCase().trim() === w.playerName.toLowerCase().trim()
+              );
+              const isAlreadyPaidOut = summary ? summary.totalGano <= 0 : false;
+              const countWon = w.categoriesWon.length;
+
+              return (
                 <div
-                  key={winner.playerId || winner.playerName}
-                  className="p-2.5 rounded-xl bg-white border-2 border-red-400 shadow-sm flex flex-col justify-between"
+                  key={w.playerId}
+                  className="p-2.5 rounded-xl bg-white/10 border border-white/20 flex flex-col justify-between gap-2 shadow-sm"
                 >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-1.5">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
                       <span
-                        className="w-3.5 h-3.5 rounded-full border border-black/30 flex-shrink-0"
-                        style={{ backgroundColor: winner.color }}
+                        className="w-3.5 h-3.5 rounded-full flex-shrink-0 border border-white shadow-xs"
+                        style={{ backgroundColor: w.color }}
                       />
-                      <span className="text-sm font-black text-red-950 truncate max-w-[130px]">
-                        {winner.playerName}
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-black text-xs sm:text-sm text-white truncate block">
+                            {w.playerName.toUpperCase()}
+                          </span>
+                          <span
+                            className={`text-[9px] font-black px-1.5 py-0.2 rounded uppercase tracking-tight ${
+                              countWon === 3
+                                ? 'bg-amber-400 text-amber-950 border border-white'
+                                : countWon === 2
+                                ? 'bg-purple-400 text-purple-950 border border-purple-200'
+                                : 'bg-white/20 text-amber-200 border border-white/20'
+                            }`}
+                          >
+                            {countWon === 3
+                              ? '¡Ganó las 3! (3/3)'
+                              : countWon === 2
+                              ? `Ganó 2 de 3 (${w.categoriesWon.join('+')})`
+                              : `Ganó 1 de 3 (${w.categoriesWon[0]})`}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="text-right flex-shrink-0 pl-1">
+                      <span className="text-[9px] uppercase text-amber-200/80 font-bold block leading-none">
+                        Ganó en Partida
+                      </span>
+                      <span className="text-sm sm:text-base font-black text-amber-300 font-mono">
+                        +{sheet.currency}
+                        {w.totalPrize.toFixed(2)}
                       </span>
                     </div>
-                    <span className="text-base font-black text-emerald-700 font-mono">
-                      +{winner.totalPrize.toFixed(2)} pts
-                    </span>
                   </div>
 
-                  {/* Columns list won */}
-                  <div className="mt-1.5 pt-1 border-t border-red-100 flex flex-wrap gap-1 text-[10px] text-red-900">
-                    {winner.columnsWon.map((col, idx) => (
-                      <span
-                        key={idx}
-                        className="px-1.5 py-0.5 rounded bg-red-50 border border-red-200 font-bold"
-                      >
-                        Col {col.title} ({col.prize.toFixed(2)})
+                  {/* Itemized breakdown per prize won (Ambo / Terna / Bingo) */}
+                  <div className="flex flex-wrap gap-1">
+                    {w.amboHits.length > 0 && (
+                      <span className="text-[9.5px] font-black px-1.5 py-0.5 rounded bg-sky-500/30 text-sky-100 border border-sky-300/40">
+                        Ambo (F#{amboRowNumber} • {w.amboHits.map((h) => h.colTitle).join('+')}): +$
+                        {w.amboTotal.toFixed(2)}
                       </span>
-                    ))}
+                    )}
+                    {w.ternaHits.length > 0 && (
+                      <span className="text-[9.5px] font-black px-1.5 py-0.5 rounded bg-emerald-500/30 text-emerald-100 border border-emerald-300/40">
+                        Terna (F#{ternaRowNumber} • {w.ternaHits.map((h) => h.colTitle).join('+')}): +$
+                        {w.ternaTotal.toFixed(2)}
+                      </span>
+                    )}
+                    {w.bingoHits.length > 0 && (
+                      <span className="text-[9.5px] font-black px-1.5 py-0.5 rounded bg-amber-400/30 text-amber-100 border border-amber-300/40">
+                        Bingo (F#{winningRowNumber} • {w.bingoHits.map((h) => h.colTitle).join('+')}): +$
+                        {w.bingoTotal.toFixed(2)}
+                      </span>
+                    )}
                   </div>
-                </div>
-              ))}
-            </div>
-          )}
 
-          {rowAnalysis.unassignedPrize > 0 && rowAnalysis.winnersList.length > 0 && (
-            <div className="text-[11px] text-red-900/70 text-right font-medium">
-              * {rowAnalysis.unassignedPrize.toFixed(2)} pts no asignados por casillas vacías en la fila.
-            </div>
-          )}
-        </div>
-      )}
+                  {/* Player Ledger Summary & Mark GANO as Paid Action */}
+                  {summary && (
+                    <div className="pt-1.5 border-t border-white/15 flex items-center justify-between gap-2 text-[10px]">
+                      <div className="flex items-center gap-2 flex-wrap font-bold">
+                        <span className="text-emerald-200">
+                          GANÓ: <strong className="text-white">${summary.totalGano.toFixed(2)}</strong>
+                        </span>
+                        <span className="text-rose-200">
+                          DEBE: <strong className="text-white">${summary.debe.toFixed(2)}</strong>
+                        </span>
+                        <span
+                          className={`px-1.5 py-0.2 rounded font-black ${
+                            summary.total > 0
+                              ? 'bg-emerald-500/30 text-emerald-200'
+                              : summary.total < 0
+                              ? 'bg-rose-500/40 text-rose-100'
+                              : 'bg-white/15 text-white'
+                          }`}
+                        >
+                          TOTAL:{' '}
+                          {summary.total > 0
+                            ? `+$${summary.total.toFixed(2)}`
+                            : summary.total < 0
+                            ? `-$${Math.abs(summary.total).toFixed(2)}`
+                            : '$0.00'}
+                        </span>
+                      </div>
+
+                      {onMarkPlayerGanoPaid && (
+                        isAlreadyPaidOut ? (
+                          <span className="px-2 py-0.5 rounded-lg bg-emerald-500/30 border border-emerald-300/40 text-emerald-100 font-black text-[9.5px] flex items-center gap-1 whitespace-nowrap">
+                            <CheckCircle2 className="w-3 h-3" />
+                            <span>Pagado ($0)</span>
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => onMarkPlayerGanoPaid(w.playerId, w.playerName)}
+                            className="px-2 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-400 active:scale-95 text-emerald-950 font-black text-[9.5px] shadow-xs transition-all cursor-pointer flex items-center gap-1 whitespace-nowrap"
+                            title={`Marcar premio de ${w.playerName.toUpperCase()} como enviado/pagado (deja GANO en $0.00)`}
+                          >
+                            <CheckCircle2 className="w-3 h-3" />
+                            <span>Marcar Pagado</span>
+                          </button>
+                        )
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 };

@@ -7,6 +7,7 @@ import {
   AppUser,
   PlayerSummarySnapshotItem,
   GameSequenceSnapshot,
+  ActivityLogItem,
 } from '../types';
 import {
   doc,
@@ -17,22 +18,268 @@ import {
   getDocs,
   onSnapshot,
   getDoc,
+  updateDoc,
+  query,
+  orderBy,
+  limit,
   FieldValue,
 } from 'firebase/firestore';
 import { db } from '../firebase';
 import { safeSetItem, sanitizeSequenceForStorage } from './safeStorage';
+import {
+  SyncStatusState,
+  SyncStatusType,
+  QueuedSaveTask,
+  BACKOFF_DELAYS_MS,
+  saveGameToIndexedDB,
+  getAllGamesFromIndexedDB,
+  deleteGameFromIndexedDB,
+  putQueueTaskInIndexedDB,
+  removeQueueTaskFromIndexedDB,
+  getAllQueueTasksFromIndexedDB,
+  recordDiagnosticSaveLog,
+  getDiagnosticSaveLogs,
+} from './offlinePersistenceEngine';
+
+export { getDiagnosticSaveLogs };
+export type { SyncStatusState, SyncStatusType };
 
 export const STORAGE_KEY_SAVED_GAMES_GALLERY = 'bingo_saved_games_gallery';
 export const STORAGE_KEY_SEQUENCE_75 = 'bingo_game_sequence_history';
 export const STORAGE_KEY_SEQUENCE_90 = 'bingo_90_game_sequence_history';
 
 /**
- * Authoritative in-memory store synchronized directly with Firestore `saved_games`.
- * Firestore is the sole persistent source of truth; localStorage is only used as a
- * lightweight temporary bootstrap cache prior to the initial Firestore snapshot.
+ * Authoritative Offline-First + Firestore synchronized in-memory store.
+ * IndexedDB is the primary local persistence engine (never loses a game even offline).
+ * Firestore is the real-time cloud synchronization & backup layer.
  */
 const firestoreGamesMemoryStore = new Map<string, GameSequenceItem>();
 let hasSyncedWithFirestore = false;
+let hasBootstrappedIndexedDB = false;
+
+// ============================================================================
+// SYNC STATUS, CONNECTION MONITOR & SAVE QUEUE STATE
+// ============================================================================
+
+const syncQueueMap = new Map<string, QueuedSaveTask>();
+let isProcessingQueue = false;
+let retryTimerHandle: ReturnType<typeof setTimeout> | null = null;
+
+let currentSyncState: SyncStatusState = {
+  status: 'synced',
+  pendingCount: 0,
+  activeSaveId: null,
+  lastError: null,
+  isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
+  isFirestoreReachable: true,
+  lastSyncedAt: null,
+};
+
+const syncStatusSubscribers = new Set<(state: SyncStatusState) => void>();
+
+function notifySyncStatusSubscribers(): void {
+  const snapshot: SyncStatusState = { ...currentSyncState };
+  syncStatusSubscribers.forEach((cb) => {
+    try {
+      cb(snapshot);
+    } catch (err) {
+      console.warn('Error in syncStatusSubscriber:', err);
+    }
+  });
+}
+
+function updateSyncStatus(partial: Partial<SyncStatusState>): void {
+  currentSyncState = {
+    ...currentSyncState,
+    ...partial,
+    pendingCount: syncQueueMap.size,
+  };
+
+  // Derive visual indicator state automatically unless explicitly overridden
+  if (!partial.status) {
+    if (currentSyncState.activeSaveId) {
+      currentSyncState.status = 'saving';
+    } else if (syncQueueMap.size > 0) {
+      const hasError = Array.from(syncQueueMap.values()).some((t) => t.status === 'error');
+      currentSyncState.status =
+        hasError && (!currentSyncState.isOnline || !currentSyncState.isFirestoreReachable)
+          ? 'error'
+          : 'pending';
+    } else {
+      currentSyncState.status = 'synced';
+    }
+  }
+
+  notifySyncStatusSubscribers();
+}
+
+export function getSyncStatusState(): SyncStatusState {
+  return { ...currentSyncState, pendingCount: syncQueueMap.size };
+}
+
+export function subscribeToSyncStatus(callback: (state: SyncStatusState) => void): () => void {
+  syncStatusSubscribers.add(callback);
+  try {
+    callback(getSyncStatusState());
+  } catch (e) {
+    console.warn('Initial sync status callback error:', e);
+  }
+  return () => {
+    syncStatusSubscribers.delete(callback);
+  };
+}
+
+// Connection Monitor Setup (detects online, offline, reconnection & Firestore reachability)
+let connectionMonitorInitialized = false;
+
+function initConnectionMonitor(): void {
+  if (connectionMonitorInitialized || typeof window === 'undefined') return;
+  connectionMonitorInitialized = true;
+
+  window.addEventListener('online', () => {
+    console.info('[CONNECTION_MONITOR] Conexión a Internet restaurada. Sincronizando cola pendiente...');
+    updateSyncStatus({ isOnline: true, lastError: null });
+    if (retryTimerHandle) {
+      clearTimeout(retryTimerHandle);
+      retryTimerHandle = null;
+    }
+    void processSaveQueue();
+  });
+
+  window.addEventListener('offline', () => {
+    console.warn('[CONNECTION_MONITOR] Sin conexión a Internet. Modo Offline-First activo (IndexedDB).');
+    updateSyncStatus({
+      isOnline: false,
+      status: syncQueueMap.size > 0 ? 'pending' : 'synced',
+    });
+  });
+
+  // Bootstrap persisted IndexedDB games and pending Save Queue on startup
+  void bootstrapOfflineFirstEngine();
+}
+
+const STORAGE_KEY_DELETED_GAME_IDS = 'bingo_deleted_game_ids_v1';
+const ADMIN_EMAILS_LIST = [
+  'admin@bolillerobingo.com',
+  'resistenciagonzalez@gmail.com',
+  'genesis.vargas0619@gmail.com',
+];
+
+const deletedGameIdsSet: Set<string> = (() => {
+  if (typeof window === 'undefined') return new Set<string>();
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_DELETED_GAME_IDS);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return new Set<string>(parsed.filter((id): id is string => typeof id === 'string'));
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return new Set<string>();
+})();
+
+function persistDeletedGameIds(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const arr = Array.from(deletedGameIdsSet).slice(-500);
+    safeSetItem(STORAGE_KEY_DELETED_GAME_IDS, JSON.stringify(arr));
+  } catch {
+    // ignore
+  }
+}
+
+export function isCurrentSessionAdmin(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const saved = localStorage.getItem('bingo_current_user_session');
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (parsed && typeof parsed === 'object') {
+        if (parsed.role === 'admin') return true;
+        if (
+          typeof parsed.email === 'string' &&
+          ADMIN_EMAILS_LIST.includes(parsed.email.trim().toLowerCase())
+        ) {
+          return true;
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
+async function bootstrapOfflineFirstEngine(): Promise<void> {
+  if (hasBootstrappedIndexedDB || typeof window === 'undefined') return;
+  hasBootstrappedIndexedDB = true;
+
+  try {
+    // 1. Load all locally saved games from IndexedDB into memory store immediately
+    const localGames = await getAllGamesFromIndexedDB();
+    for (const g of localGames) {
+      if (g && g.id) {
+        if (deletedGameIdsSet.has(g.id)) {
+          void deleteGameFromIndexedDB(g.id);
+          continue;
+        }
+        const { normalizedGame } = normalizeGameFolderMetadata(g, g.id);
+        if (deletedGameIdsSet.has(normalizedGame.id!)) {
+          void deleteGameFromIndexedDB(normalizedGame.id!);
+          continue;
+        }
+        if (!firestoreGamesMemoryStore.has(normalizedGame.id!)) {
+          firestoreGamesMemoryStore.set(normalizedGame.id!, normalizedGame);
+        }
+      }
+    }
+
+    if (localGames.length > 0) {
+      cachedSortedGames = sortGamesChronologicallyDesc(
+        Array.from(firestoreGamesMemoryStore.values())
+      );
+      savedGamesSubscribers.forEach((sub) => {
+        try {
+          sub(cachedSortedGames);
+        } catch {
+          // ignore
+        }
+      });
+    }
+
+    // 2. Load any pending tasks from IndexedDB Save Queue and resume processing
+    const pendingTasks = await getAllQueueTasksFromIndexedDB();
+    for (const task of pendingTasks) {
+      if (task && task.gameId && task.game) {
+        syncQueueMap.set(task.gameId, {
+          ...task,
+          status: 'pending',
+          nextRetryAt: Date.now(),
+        });
+        const { normalizedGame } = normalizeGameFolderMetadata(task.game, task.gameId);
+        firestoreGamesMemoryStore.set(task.gameId, normalizedGame);
+      }
+    }
+
+    updateSyncStatus({});
+    if (syncQueueMap.size > 0) {
+      void processSaveQueue();
+    }
+  } catch (err) {
+    console.warn('[OFFLINE_ENGINE] Bootstrap warning:', err);
+  }
+}
+
+if (typeof window !== 'undefined') {
+  initConnectionMonitor();
+}
+
+// ============================================================================
+// DATE & FOLDER NORMALIZATION HELPERS
+// ============================================================================
 
 /**
  * Detects the operator's current local date formatted as YYYY-MM-DD (e.g. "2026-10-28").
@@ -141,25 +388,16 @@ export function isGameOfOperator(
 
 /**
  * Parses any date string format into a strict YYYY-MM-DD canonical key.
- * Supports:
- * - YYYY-MM-DD (ISO date key)
- * - ISO timestamps: YYYY-MM-DDTHH:mm:ss...
- * - DD/MM/YYYY or D/M/YYYY
- * - YYYY/MM/DD
- * - DD-MM-YYYY or D-M-YYYY
- * - Spanish date strings: "28 de octubre de 2026", "29 oct 2026", etc.
  */
 export function parseDateStringToDateKey(dateStr?: string | null): string | null {
   if (!dateStr || typeof dateStr !== 'string') return null;
   const trimmed = dateStr.trim();
   if (!trimmed) return null;
 
-  // 1. Direct YYYY-MM-DD format (standard ISO date key)
   if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
     return trimmed;
   }
 
-  // 2. ISO timestamp string: e.g. "2026-10-29T14:32:00.000Z" or "2026-10-29 14:32:00"
   if (/^\d{4}-\d{2}-\d{2}[T\s]/.test(trimmed)) {
     const d = new Date(trimmed);
     if (!isNaN(d.getTime())) {
@@ -171,7 +409,6 @@ export function parseDateStringToDateKey(dateStr?: string | null): string | null
     return trimmed.slice(0, 10);
   }
 
-  // 3. DD/MM/YYYY or YYYY/MM/DD
   const slashParts = trimmed.split('/');
   if (slashParts.length === 3) {
     const p0 = slashParts[0].trim();
@@ -184,7 +421,6 @@ export function parseDateStringToDateKey(dateStr?: string | null): string | null
     }
   }
 
-  // 4. DD-MM-YYYY or YYYY-MM-DD
   const dashParts = trimmed.split('-');
   if (dashParts.length === 3) {
     const p0 = dashParts[0].trim();
@@ -197,7 +433,6 @@ export function parseDateStringToDateKey(dateStr?: string | null): string | null
     }
   }
 
-  // 5. Spanish textual dates: e.g. "29 de octubre de 2026" or "29 oct 2026"
   const months: Record<string, string> = {
     ene: '01', enero: '01',
     feb: '02', febrero: '02',
@@ -227,33 +462,26 @@ export function parseDateStringToDateKey(dateStr?: string | null): string | null
 
 /**
  * Extracts the true authoritative exact date (YYYY-MM-DD) of a game.
- * Evaluates dateFormatted (ticket/display date), shiftDate, dailyDate,
- * and ISO timestamps in strict precision order.
+ * Evaluates dailyDate first (official single source of truth), then dateFormatted, shiftDate, etc.
  */
 export function extractGameExactDate(game: Partial<GameSequenceItem>): string {
   if (!game) return getCurrentLocalDateKey();
 
-  // 1. dateFormatted: Explicit human/ticket date recorded on the sheet
-  const fromFormatted = parseDateStringToDateKey(game.dateFormatted);
-  if (fromFormatted) return fromFormatted;
-
-  // 2. shiftDate: The operator's shift date if specified
-  const fromShift = parseDateStringToDateKey(game.shiftDate);
-  if (fromShift) return fromShift;
-
-  // 3. dailyDate: Primary daily grouping key
   const fromDaily = parseDateStringToDateKey(game.dailyDate);
   if (fromDaily) return fromDaily;
 
-  // 4. ISO timestamps
+  const fromFormatted = parseDateStringToDateKey(game.dateFormatted);
+  if (fromFormatted) return fromFormatted;
+
+  const fromShift = parseDateStringToDateKey(game.shiftDate);
+  if (fromShift) return fromShift;
+
   const fromSavedAt = parseDateStringToDateKey((game as any).savedAtISO || (game as any).createdAtISO);
   if (fromSavedAt) return fromSavedAt;
 
-  // 5. subfolderDay if already valid
   const fromSubfolder = parseDateStringToDateKey(game.subfolderDay);
   if (fromSubfolder) return fromSubfolder;
 
-  // 6. folderPath ending segment
   if (game.folderPath) {
     const parts = game.folderPath.split('/');
     const lastPart = parts[parts.length - 1]?.trim();
@@ -284,15 +512,13 @@ export function extractCurrentSubfolderDate(game: Partial<GameSequenceItem>): st
 
 /**
  * Extracts a normalized YYYY-MM-DD date key from a GameSequenceItem.
- * Uses exact date resolution to ensure 100% strict subfolder isolation per date.
  */
 export function getGameNormalizedDateKey(game: GameSequenceItem): string {
   return extractGameExactDate(game);
 }
 
 /**
- * Deterministic canonical document ID for a game based on operator, dailyDate, mode, and round.
- * Prevents duplicate documents when saving or updating the same round.
+ * Deterministic canonical document ID for a game based on operator, dailyDate, mode, round, and operatorUid.
  */
 export function buildCanonicalGameId(
   operatorFolder: string,
@@ -315,9 +541,6 @@ export function buildCanonicalGameId(
 /**
  * Normalizes a GameSequenceItem so its dailyDate, subfolderDay, operatorFolder, and folderPath
  * are 100% consistent with its exact date (YYYY-MM-DD).
- *
- * Rule: If a game's date differs from the subfolder where it is currently placed,
- * it is detected as misplaced and immediately moved to the subfolder of its exact date.
  */
 export function normalizeGameFolderMetadata(
   data: GameSequenceItem,
@@ -341,7 +564,6 @@ export function normalizeGameFolderMetadata(
     fallbackId ||
     buildCanonicalGameId(operatorFolder, exactDate, mode, validRound, data.operatorUid);
 
-  // Detect subfolder and date mismatches
   const hasSubfolderMismatch = currentSubfolder !== null && currentSubfolder !== exactDate;
   const hasDailyDateMismatch = data.dailyDate !== exactDate;
   const hasSubfolderDayMismatch = data.subfolderDay !== expectedSubfolder;
@@ -368,7 +590,6 @@ export function normalizeGameFolderMetadata(
     reason = `operatorFolder (${data.operatorFolder}) normalizado a ${operatorFolder}`;
   }
 
-  // Ensure formatted human date is consistent (DD/MM/YYYY)
   let dateFormatted = data.dateFormatted;
   if (!dateFormatted || !parseDateStringToDateKey(dateFormatted)) {
     const parts = exactDate.split('-');
@@ -448,34 +669,57 @@ export function getGameLines(game: GameSequenceItem): number {
   return 11;
 }
 
-/**
- * Real-time listener for Firestore `saved_games` collection.
- * Keeps the authoritative in-memory store and all UI views synchronized with Firestore,
- * and automatically heals any game stored in a folder that does not match its dailyDate.
- */
-export function subscribeToSavedGamesFirestore(
-  callback: (games: GameSequenceItem[]) => void
-): () => void {
-  if (typeof window === 'undefined') {
-    return () => {};
-  }
+// ============================================================================
+// REAL-TIME FIRESTORE SUBSCRIPTION (MULTIPLEXED SINGLETON)
+// ============================================================================
+
+const inFlightAutoHealIds = new Set<string>();
+const savedGamesSubscribers = new Set<(games: GameSequenceItem[]) => void>();
+let activeFirestoreUnsubscribe: (() => void) | null = null;
+let cachedSortedGames: GameSequenceItem[] = [];
+
+function ensureSharedSavedGamesListener(): void {
+  if (activeFirestoreUnsubscribe || typeof window === 'undefined') return;
+  initConnectionMonitor();
 
   try {
     const q = collection(db, 'saved_games');
-    const unsubscribe = onSnapshot(
+    activeFirestoreUnsubscribe = onSnapshot(
       q,
       (snapshot) => {
-        firestoreGamesMemoryStore.clear();
+        updateSyncStatus({ isFirestoreReachable: true });
+
+        // Merge Firestore documents with any pending local offline saves so unsynced games are NEVER overwritten or lost
+        const remoteIds = new Set<string>();
 
         snapshot.forEach((docSnap) => {
           const rawData = docSnap.data() as GameSequenceItem;
           const docKey = docSnap.id;
+
+          // If this document was permanently deleted by an Admin, never resurrect it and ensure remote cleanup
+          if (deletedGameIdsSet.has(docKey) || (rawData.id && deletedGameIdsSet.has(rawData.id))) {
+            firestoreGamesMemoryStore.delete(docKey);
+            void deleteGameFromIndexedDB(docKey);
+            deleteDoc(doc(db, 'saved_games', docKey)).catch(() => {});
+            return;
+          }
+
+          remoteIds.add(docKey);
+
+          // If this document is currently queued locally with newer changes, keep the local queued version in memory
+          const pendingTask = syncQueueMap.get(docKey);
+          if (pendingTask && pendingTask.status !== 'synced') {
+            firestoreGamesMemoryStore.set(docKey, pendingTask.game);
+            return;
+          }
+
           const { normalizedGame, isMisplaced, reason } = normalizeGameFolderMetadata(
             { ...rawData, id: docKey },
             docKey
           );
 
-          if (isMisplaced) {
+          if (isMisplaced && !inFlightAutoHealIds.has(docKey)) {
+            inFlightAutoHealIds.add(docKey);
             console.log(
               `[AUTO-CORRECTION] ${reason || 'Reorganización de subcarpeta'}. Partida ID: ${docKey}, Fecha exacta: ${normalizedGame.dailyDate}, Subcarpeta: ${normalizedGame.subfolderDay}, Ruta: ${normalizedGame.folderPath}`
             );
@@ -491,39 +735,85 @@ export function subscribeToSavedGamesFirestore(
                 dateFormatted: normalizedGame.dateFormatted,
               },
               { merge: true }
-            ).catch((err) => {
-              console.warn(`[AUTO-CORRECTION] Error syncing auto-healed game ${docKey}:`, err);
-            });
+            )
+              .catch((err) => {
+                console.warn(`[AUTO-CORRECTION] Error syncing auto-healed game ${docKey}:`, err);
+              })
+              .finally(() => {
+                setTimeout(() => inFlightAutoHealIds.delete(docKey), 3000);
+              });
           }
 
           firestoreGamesMemoryStore.set(docKey, normalizedGame);
+          void saveGameToIndexedDB(normalizedGame);
         });
 
+        // Remove documents that were deleted remotely (unless they are currently in the local save queue)
+        for (const existingKey of Array.from(firestoreGamesMemoryStore.keys())) {
+          if (!remoteIds.has(existingKey) && !syncQueueMap.has(existingKey)) {
+            firestoreGamesMemoryStore.delete(existingKey);
+          }
+        }
+
         hasSyncedWithFirestore = true;
-        const sortedGames = sortGamesChronologicallyDesc(
+        cachedSortedGames = sortGamesChronologicallyDesc(
           Array.from(firestoreGamesMemoryStore.values())
         );
 
-        syncTemporaryLocalCache(sortedGames);
-        callback(sortedGames);
+        syncTemporaryLocalCache(cachedSortedGames);
+        savedGamesSubscribers.forEach((sub) => {
+          try {
+            sub(cachedSortedGames);
+          } catch (cbErr) {
+            console.warn('Error in saved_games subscriber callback:', cbErr);
+          }
+        });
       },
       (error) => {
         console.warn('Firestore saved_games subscription error:', error);
+        updateSyncStatus({ isFirestoreReachable: false });
       }
     );
-
-    return unsubscribe;
   } catch (err) {
-    console.warn('Could not initialize saved_games subscription:', err);
-    return () => {};
+    console.warn('Could not initialize shared saved_games subscription:', err);
   }
 }
+
+export function subscribeToSavedGamesFirestore(
+  callback: (games: GameSequenceItem[]) => void
+): () => void {
+  if (typeof window === 'undefined') {
+    return () => {};
+  }
+
+  savedGamesSubscribers.add(callback);
+  ensureSharedSavedGamesListener();
+
+  if (hasSyncedWithFirestore || firestoreGamesMemoryStore.size > 0) {
+    try {
+      callback(
+        sortGamesChronologicallyDesc(Array.from(firestoreGamesMemoryStore.values()))
+      );
+    } catch (e) {
+      console.warn('Initial subscriber callback error:', e);
+    }
+  }
+
+  return () => {
+    savedGamesSubscribers.delete(callback);
+    if (savedGamesSubscribers.size === 0 && activeFirestoreUnsubscribe) {
+      activeFirestoreUnsubscribe();
+      activeFirestoreUnsubscribe = null;
+    }
+  };
+}
+
+let isReorganizationRunning = false;
 
 /**
  * Scans all saved games in Firestore.
  * If any game has a date different from the subfolder where it is stored,
  * it is automatically moved to its correct subfolder.
- * Ensures this rule holds permanently.
  */
 export async function reorganizeAndHealAllStoredGames(): Promise<{
   totalChecked: number;
@@ -531,15 +821,30 @@ export async function reorganizeAndHealAllStoredGames(): Promise<{
   details: Array<{ id: string; round: number; oldSubfolder: string; newSubfolder: string; reason: string }>;
 }> {
   const details: Array<{ id: string; round: number; oldSubfolder: string; newSubfolder: string; reason: string }> = [];
+  if (isReorganizationRunning) {
+    return {
+      totalChecked: firestoreGamesMemoryStore.size,
+      reorganizedCount: 0,
+      details,
+    };
+  }
+
+  isReorganizationRunning = true;
   let totalChecked = 0;
   let reorganizedCount = 0;
 
   try {
     const snap = await getDocs(collection(db, 'saved_games'));
     for (const docSnap of snap.docs) {
-      totalChecked++;
       const rawData = docSnap.data() as GameSequenceItem;
       const docKey = docSnap.id;
+      if (deletedGameIdsSet.has(docKey) || (rawData.id && deletedGameIdsSet.has(rawData.id))) {
+        firestoreGamesMemoryStore.delete(docKey);
+        void deleteGameFromIndexedDB(docKey);
+        deleteDoc(doc(db, 'saved_games', docKey)).catch(() => {});
+        continue;
+      }
+      totalChecked++;
       const { normalizedGame, isMisplaced, reason } = normalizeGameFolderMetadata(
         { ...rawData, id: docKey },
         docKey
@@ -562,6 +867,7 @@ export async function reorganizeAndHealAllStoredGames(): Promise<{
           `[REORGANIZACION_SUBCARPETAS] Partida #${normalizedGame.round} (${docKey}) movida de subcarpeta "${oldSubfolder}" a "${newSubfolder}" por fecha exacta.`
         );
 
+        inFlightAutoHealIds.add(docKey);
         await setDoc(
           doc(db, 'saved_games', docKey),
           {
@@ -574,9 +880,12 @@ export async function reorganizeAndHealAllStoredGames(): Promise<{
             dateFormatted: normalizedGame.dateFormatted,
           },
           { merge: true }
-        );
+        ).finally(() => {
+          setTimeout(() => inFlightAutoHealIds.delete(docKey), 3000);
+        });
 
         firestoreGamesMemoryStore.set(docKey, normalizedGame);
+        await saveGameToIndexedDB(normalizedGame);
       } else {
         firestoreGamesMemoryStore.set(docKey, normalizedGame);
       }
@@ -585,6 +894,7 @@ export async function reorganizeAndHealAllStoredGames(): Promise<{
     const sortedGames = sortGamesChronologicallyDesc(
       Array.from(firestoreGamesMemoryStore.values())
     );
+    cachedSortedGames = sortedGames;
     syncTemporaryLocalCache(sortedGames);
 
     if (typeof window !== 'undefined') {
@@ -596,14 +906,15 @@ export async function reorganizeAndHealAllStoredGames(): Promise<{
     }
   } catch (err) {
     console.error('Error during reorganizeAndHealAllStoredGames:', err);
+  } finally {
+    isReorganizationRunning = false;
   }
 
   return { totalChecked, reorganizedCount, details };
 }
 
 /**
- * Returns all saved games from the authoritative Firestore-backed memory store.
- * Falls back to the temporary localStorage cache only before the initial Firestore snapshot arrives.
+ * Returns all saved games from the authoritative Offline-First + Firestore memory store.
  */
 export function getSavedGamesGallery(): GameSequenceItem[] {
   if (hasSyncedWithFirestore || firestoreGamesMemoryStore.size > 0) {
@@ -631,8 +942,8 @@ export function getSavedGamesGallery(): GameSequenceItem[] {
 }
 
 /**
- * Resolves the existing Firestore document ID if a game with the same ID or same
- * (operatorFolder, dailyDate, mode, round) already exists, preventing duplicate records.
+ * Resolves the existing document ID if a game with the same ID or same
+ * (operatorFolder, dailyDate, mode, round, operatorUid) already exists, preventing duplicate records.
  */
 function resolveExistingOrCanonicalDocId(
   item: GameSequenceItem,
@@ -642,11 +953,19 @@ function resolveExistingOrCanonicalDocId(
   validRound: number
 ): { docId: string; duplicateIdsToClean: string[] } {
   const existingGames = getSavedGamesGallery();
+  const itemUid = item.operatorUid && item.operatorUid !== 'anon' ? item.operatorUid : null;
+
   const matchingGames = existingGames.filter((g) => {
     if (!g) return false;
     const gDate = getGameNormalizedDateKey(g);
     const gOp = sanitizeOperatorFolderName(g.operatorFolder || g.operatorName);
     const gMode: BingoMode = g.mode || (g.sheetType === 'traditional-90' ? '90' : '75');
+    const gUid = g.operatorUid && g.operatorUid !== 'anon' ? g.operatorUid : null;
+
+    if (itemUid && gUid && itemUid !== gUid) {
+      return false;
+    }
+
     return (
       gDate === dailyDate &&
       gOp === operatorFolder &&
@@ -655,9 +974,14 @@ function resolveExistingOrCanonicalDocId(
     );
   });
 
-  const canonicalId = buildCanonicalGameId(operatorFolder, dailyDate, mode, validRound);
+  const canonicalId = buildCanonicalGameId(
+    operatorFolder,
+    dailyDate,
+    mode,
+    validRound,
+    item.operatorUid
+  );
 
-  // If caller passed a non-ephemeral ID that already exists in Firestore, preserve it
   const hasExplicitExistingId =
     Boolean(item.id) && firestoreGamesMemoryStore.has(item.id!);
 
@@ -679,25 +1003,324 @@ function resolveExistingOrCanonicalDocId(
   return { docId: chosenId, duplicateIdsToClean };
 }
 
+// ============================================================================
+// SEQUENTIAL SAVE QUEUE & FIRESTORE VERIFICATION ENGINE
+// ============================================================================
+
+interface FirestoreGamePayload {
+  id: string;
+  round: number;
+  ballNumber: number;
+  ternaBall?: number | null;
+  ternaLeader?: number | null;
+  amboBall?: number | null;
+  amboLeader?: number | null;
+  letter: string;
+  mode: BingoMode;
+  timestamp: string;
+  dateFormatted: string;
+  dailyDate: string;
+  subfolderDay: string;
+  operatorFolder: string;
+  folderPath: string;
+  operatorUid: string;
+  operatorName: string;
+  operatorEmail: string;
+  durationSeconds: number;
+  durationFormatted: string;
+  totalCollected: number;
+  totalPrizesPaid: number;
+  netProfit: number;
+  currency: string;
+  drawnBallsPlayed: number[];
+  totalBallsDrawnCount: number;
+  rowLeader: number | null;
+  winningPlayerName: string;
+  tableNumber: number | null;
+  sheetType: SheetViewType;
+  totalLinesPlayed: number;
+  shiftId?: string;
+  shiftName?: string;
+  shiftDate?: string;
+  shiftStartTime?: string;
+  shiftEndTime?: string;
+  updatedAt: FieldValue;
+  playerSummarySnapshot?: PlayerSummarySnapshotItem[];
+  sequenceSnapshot?: GameSequenceSnapshot;
+  sheet75Snapshot?: BingoSheetData;
+  sheet90Snapshot?: Traditional90SheetData;
+}
+
+function buildFirestorePayloadFromItem(normalizedItem: GameSequenceItem): FirestoreGamePayload {
+  const mode: BingoMode =
+    normalizedItem.mode || (normalizedItem.sheetType === 'traditional-90' ? '90' : '75');
+  const drawnBalls = normalizedItem.drawnBallsPlayed || [];
+  const exactLines = getGameLines(normalizedItem);
+
+  const firestorePayload: FirestoreGamePayload = {
+    id: normalizedItem.id!,
+    round: normalizedItem.round,
+    ballNumber: normalizedItem.ballNumber || 0,
+    ternaBall: normalizedItem.ternaBall ?? null,
+    ternaLeader: normalizedItem.ternaLeader ?? null,
+    amboBall: normalizedItem.amboBall ?? null,
+    amboLeader: normalizedItem.amboLeader ?? null,
+    letter: normalizedItem.letter || '',
+    mode,
+    timestamp: normalizedItem.timestamp || getCurrentLocalTimeString(),
+    dateFormatted: normalizedItem.dateFormatted || new Date().toLocaleDateString('es-ES'),
+    dailyDate: normalizedItem.dailyDate!,
+    subfolderDay: normalizedItem.subfolderDay || normalizedItem.dailyDate!,
+    operatorFolder: normalizedItem.operatorFolder || sanitizeOperatorFolderName(normalizedItem.operatorName),
+    folderPath:
+      normalizedItem.folderPath ||
+      `${normalizedItem.operatorFolder || sanitizeOperatorFolderName(normalizedItem.operatorName)}/${normalizedItem.dailyDate}`,
+    operatorUid: normalizedItem.operatorUid || 'anon',
+    operatorName: normalizedItem.operatorName || 'Operadora Principal',
+    operatorEmail: normalizedItem.operatorEmail || '',
+    durationSeconds: normalizedItem.durationSeconds || 0,
+    durationFormatted: normalizedItem.durationFormatted || '0s',
+    totalCollected: normalizedItem.totalCollected || 0,
+    totalPrizesPaid: normalizedItem.totalPrizesPaid || 0,
+    netProfit: normalizedItem.netProfit || 0,
+    currency: normalizedItem.currency || '$',
+    drawnBallsPlayed: drawnBalls,
+    totalBallsDrawnCount: drawnBalls.length || normalizedItem.totalBallsDrawnCount || 0,
+    rowLeader: normalizedItem.rowLeader ?? null,
+    winningPlayerName: normalizedItem.winningPlayerName || '',
+    tableNumber: normalizedItem.tableNumber ?? null,
+    sheetType: normalizedItem.sheetType || (mode === '90' ? 'traditional-90' : 'multipliers-15'),
+    totalLinesPlayed: exactLines,
+    shiftId: normalizedItem.shiftId || '',
+    shiftName: normalizedItem.shiftName || '',
+    shiftDate: normalizedItem.shiftDate || normalizedItem.dailyDate,
+    shiftStartTime: normalizedItem.shiftStartTime || '',
+    shiftEndTime: normalizedItem.shiftEndTime || '',
+    updatedAt: serverTimestamp(),
+  };
+
+  if (normalizedItem.playerSummarySnapshot && Array.isArray(normalizedItem.playerSummarySnapshot)) {
+    firestorePayload.playerSummarySnapshot = JSON.parse(JSON.stringify(normalizedItem.playerSummarySnapshot));
+  }
+  if (normalizedItem.sequenceSnapshot) {
+    firestorePayload.sequenceSnapshot = JSON.parse(JSON.stringify(normalizedItem.sequenceSnapshot));
+  }
+  if (normalizedItem.sheet75Snapshot) {
+    const s75Copy: BingoSheetData = JSON.parse(JSON.stringify(normalizedItem.sheet75Snapshot));
+    if (normalizedItem.playerSummarySnapshot && (!s75Copy.playerSummaryList || s75Copy.playerSummaryList.length === 0)) {
+      s75Copy.playerSummaryList = normalizedItem.playerSummarySnapshot;
+    }
+    firestorePayload.sheet75Snapshot = s75Copy;
+  }
+  if (normalizedItem.sheet90Snapshot) {
+    firestorePayload.sheet90Snapshot = JSON.parse(JSON.stringify(normalizedItem.sheet90Snapshot));
+  }
+
+  return sanitizeForFirestore(firestorePayload);
+}
+
 /**
- * Centralized Unified Game Persistence Service.
- * Firestore is the ONLY persistent source of truth. LocalStorage is used only as temporary cache.
+ * Writes a single game to Firestore and immediately reads it back via getDoc
+ * to verify that all critical fields match 100%.
+ */
+async function writeAndVerifyGameInFirestore(
+  game: GameSequenceItem
+): Promise<{ verified: boolean; remoteGame?: GameSequenceItem; errorMsg?: string }> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return { verified: false, errorMsg: 'Sin conexión a Internet' };
+  }
+
+  const docId = game.id!;
+  const docRef = doc(db, 'saved_games', docId);
+  const sanitizedPayload = buildFirestorePayloadFromItem(game);
+
+  try {
+    await setDoc(docRef, sanitizedPayload, { merge: true });
+
+    const snap = await getDoc(docRef);
+    if (!snap.exists()) {
+      return { verified: false, errorMsg: 'El documento no existe en Firestore tras la escritura' };
+    }
+
+    const remoteData = snap.data() as GameSequenceItem;
+    const isIdValid = remoteData.id === docId || snap.id === docId;
+    const isDateValid = remoteData.dailyDate === game.dailyDate;
+    const isSubfolderValid = remoteData.subfolderDay === game.subfolderDay;
+    const isRoundValid = remoteData.round === game.round;
+    const isOperatorValid = remoteData.operatorName === game.operatorName;
+
+    if (isIdValid && isDateValid && isSubfolderValid && isRoundValid && isOperatorValid) {
+      const mergedVerified: GameSequenceItem = {
+        ...game,
+        ...remoteData,
+        id: docId,
+        dailyDate: game.dailyDate,
+        subfolderDay: game.subfolderDay,
+        operatorFolder: game.operatorFolder,
+        folderPath: game.folderPath,
+        timestamp: game.timestamp,
+      };
+      return { verified: true, remoteGame: mergedVerified };
+    }
+
+    return {
+      verified: false,
+      errorMsg: `Verificación fallida: los datos leídos de Firestore no coinciden para ${docId}`,
+    };
+  } catch (err: any) {
+    return {
+      verified: false,
+      errorMsg: err?.message || 'Error de comunicación con Firestore',
+    };
+  }
+}
+
+/**
+ * Processes the Save Queue strictly sequentially (maximum 1 active write at any time).
+ * Uses Exponential Backoff (1s, 2s, 4s, 8s, 15s, 30s, 60s) on failure without ever losing a game.
+ */
+export async function processSaveQueue(): Promise<void> {
+  if (isProcessingQueue) return;
+  if (syncQueueMap.size === 0) {
+    updateSyncStatus({ status: 'synced', activeSaveId: null });
+    return;
+  }
+
+  isProcessingQueue = true;
+
+  try {
+    while (syncQueueMap.size > 0) {
+      const tasks = Array.from(syncQueueMap.values()).sort((a, b) => a.enqueuedAt - b.enqueuedAt);
+      const nextTask = tasks[0];
+      if (!nextTask) break;
+
+      const now = Date.now();
+      if (nextTask.nextRetryAt > now) {
+        const waitMs = nextTask.nextRetryAt - now;
+        if (retryTimerHandle) clearTimeout(retryTimerHandle);
+        retryTimerHandle = setTimeout(() => {
+          retryTimerHandle = null;
+          void processSaveQueue();
+        }, waitMs);
+        break;
+      }
+
+      const startMs = Date.now();
+      const startTimeStr = getCurrentLocalTimeString();
+
+      nextTask.status = 'syncing';
+      syncQueueMap.set(nextTask.gameId, nextTask);
+      updateSyncStatus({
+        status: 'saving',
+        activeSaveId: nextTask.gameId,
+      });
+
+      const { verified, remoteGame, errorMsg } = await writeAndVerifyGameInFirestore(nextTask.game);
+      const durationMs = Date.now() - startMs;
+      const endTimeStr = getCurrentLocalTimeString();
+
+      if (verified && remoteGame) {
+        // Successfully verified in Firestore! Remove from queue and update IndexedDB & memory
+        syncQueueMap.delete(nextTask.gameId);
+        await removeQueueTaskFromIndexedDB(nextTask.gameId);
+        await saveGameToIndexedDB(remoteGame);
+        saveGameToGalleryCache(remoteGame);
+
+        await recordDiagnosticSaveLog({
+          id: `log_${Date.now()}_${nextTask.gameId}`,
+          gameId: nextTask.gameId,
+          round: remoteGame.round,
+          dailyDate: remoteGame.dailyDate || getCurrentLocalDateKey(),
+          startTime: startTimeStr,
+          endTime: endTimeStr,
+          durationMs,
+          retryCount: nextTask.retryCount,
+          result: 'SYNCED_FIRESTORE',
+          errorMessage: null,
+        });
+
+        updateSyncStatus({
+          activeSaveId: null,
+          isFirestoreReachable: true,
+          lastError: null,
+          lastSyncedAt: endTimeStr,
+        });
+      } else {
+        // Failed or offline: Keep in IndexedDB and schedule exponential backoff retry
+        const retryIndex = Math.min(nextTask.retryCount, BACKOFF_DELAYS_MS.length - 1);
+        const delayMs = BACKOFF_DELAYS_MS[retryIndex];
+        const updatedTask: QueuedSaveTask = {
+          ...nextTask,
+          retryCount: nextTask.retryCount + 1,
+          nextRetryAt: Date.now() + delayMs,
+          lastError: errorMsg || 'Error de sincronización',
+          status: 'error',
+        };
+
+        syncQueueMap.set(nextTask.gameId, updatedTask);
+        await putQueueTaskInIndexedDB(updatedTask);
+
+        await recordDiagnosticSaveLog({
+          id: `log_${Date.now()}_${nextTask.gameId}_retry_${updatedTask.retryCount}`,
+          gameId: nextTask.gameId,
+          round: nextTask.game.round,
+          dailyDate: nextTask.game.dailyDate || getCurrentLocalDateKey(),
+          startTime: startTimeStr,
+          endTime: endTimeStr,
+          durationMs,
+          retryCount: updatedTask.retryCount,
+          result: 'RETRY_SCHEDULED',
+          errorMessage: `${errorMsg || 'Fallo Firestore'} (Reintento en ${delayMs / 1000}s)`,
+        });
+
+        updateSyncStatus({
+          activeSaveId: null,
+          isFirestoreReachable: false,
+          lastError: errorMsg || 'Pendiente de sincronizar con servidor',
+          status: typeof navigator !== 'undefined' && !navigator.onLine ? 'pending' : 'error',
+        });
+
+        if (retryTimerHandle) clearTimeout(retryTimerHandle);
+        retryTimerHandle = setTimeout(() => {
+          retryTimerHandle = null;
+          void processSaveQueue();
+        }, delayMs);
+
+        break;
+      }
+    }
+  } finally {
+    isProcessingQueue = false;
+    updateSyncStatus({});
+  }
+}
+
+/**
+ * Centralized Unified Offline-First Game Persistence Service.
  *
- * Rules:
- * 1. Single source of truth for date: dailyDate (YYYY-MM-DD).
- * 2. Stored strictly in subfolder corresponding to dailyDate (${operatorFolder}/${dailyDate}).
- * 3. Strict document ID preservation: Each game keeps the same ID; existing games are updated in-place.
- * 4. Post-save verification: Immediately read back from Firestore and verify all data was saved.
- *    Only confirm success when verification is positive. If it fails, retry automatically up to 3 times.
- * 5. Immediate UI refresh using confirmed Firestore data.
- * 6. Detailed logging: ID, dailyDate, path, result, verified, and auto-corrections.
+ * Flow:
+ * 1. Normalizes exact date & subfolder (${operatorFolder}/${dailyDate}).
+ * 2. Saves immediately to IndexedDB (primary local persistence — 0% risk of data loss).
+ * 3. Updates authoritative in-memory store and confirms local save immediately.
+ * 4. Enqueues the game in the persistent Sequential Save Queue.
+ * 5. Processes the Save Queue sequentially (write to Firestore -> read back -> verify -> mark synced,
+ *    or retry automatically with Exponential Backoff if offline/unreachable).
  */
 export async function saveGameUnified(
   item: GameSequenceItem
-): Promise<{ success: boolean; verified: boolean; game: GameSequenceItem }> {
+): Promise<{
+  success: boolean;
+  verified: boolean;
+  savedLocally: boolean;
+  game: GameSequenceItem;
+}> {
   if (!item) {
     throw new Error('No se puede guardar una partida vacía');
   }
+
+  initConnectionMonitor();
+  const startMs = Date.now();
+  const startTimeStr = getCurrentLocalTimeString();
 
   // 1. Single source of truth for date: dailyDate (YYYY-MM-DD)
   const dailyDate = getGameNormalizedDateKey(item);
@@ -724,7 +1347,6 @@ export async function saveGameUnified(
     const parts = dailyDate.split('-');
     formattedDate = parts.length === 3 ? `${parts[2]}/${parts[1]}/${parts[0]}` : new Date().toLocaleDateString('es-ES');
   }
-  const drawnBalls = item.drawnBallsPlayed || [];
   const exactTimestamp =
     item.timestamp && /^\d{1,2}:\d{2}(:\d{2})?$/.test(item.timestamp.trim())
       ? (item.timestamp.trim().split(':').length === 2 ? `${item.timestamp.trim()}:00` : item.timestamp.trim())
@@ -747,181 +1369,82 @@ export async function saveGameUnified(
     totalLinesPlayed: exactLines,
   };
 
-  interface FirestoreGamePayload {
-    id: string;
-    round: number;
-    ballNumber: number;
-    ternaBall?: number | null;
-    ternaLeader?: number | null;
-    amboBall?: number | null;
-    amboLeader?: number | null;
-    letter: string;
-    mode: BingoMode;
-    timestamp: string;
-    dateFormatted: string;
-    dailyDate: string;
-    subfolderDay: string;
-    operatorFolder: string;
-    folderPath: string;
-    operatorUid: string;
-    operatorName: string;
-    operatorEmail: string;
-    durationSeconds: number;
-    durationFormatted: string;
-    totalCollected: number;
-    totalPrizesPaid: number;
-    netProfit: number;
-    currency: string;
-    drawnBallsPlayed: number[];
-    totalBallsDrawnCount: number;
-    rowLeader: number | null;
-    winningPlayerName: string;
-    tableNumber: number | null;
-    sheetType: SheetViewType;
-    totalLinesPlayed: number;
-    shiftId?: string;
-    shiftName?: string;
-    shiftDate?: string;
-    shiftStartTime?: string;
-    shiftEndTime?: string;
-    updatedAt: FieldValue;
-    playerSummarySnapshot?: PlayerSummarySnapshotItem[];
-    sequenceSnapshot?: GameSequenceSnapshot;
-    sheet75Snapshot?: BingoSheetData;
-    sheet90Snapshot?: Traditional90SheetData;
+  // 3. STEP 1 OF OFFLINE-FIRST: Save immediately to IndexedDB & Memory Store
+  if (deletedGameIdsSet.has(docId)) {
+    deletedGameIdsSet.delete(docId);
+    persistDeletedGameIds();
   }
+  updateSyncStatus({ status: 'saving', activeSaveId: docId });
+  await saveGameToIndexedDB(normalizedItem);
+  saveGameToGalleryCache(normalizedItem);
 
-  const firestorePayload: FirestoreGamePayload = {
-    id: docId,
+  await recordDiagnosticSaveLog({
+    id: `log_local_${Date.now()}_${docId}`,
+    gameId: docId,
     round: validRound,
-    ballNumber: normalizedItem.ballNumber || 0,
-    ternaBall: normalizedItem.ternaBall ?? null,
-    ternaLeader: normalizedItem.ternaLeader ?? null,
-    amboBall: normalizedItem.amboBall ?? null,
-    amboLeader: normalizedItem.amboLeader ?? null,
-    letter: normalizedItem.letter || '',
-    mode,
-    timestamp: exactTimestamp,
-    dateFormatted: formattedDate,
     dailyDate,
-    subfolderDay,
-    operatorFolder,
-    folderPath,
-    operatorUid: normalizedItem.operatorUid || 'anon',
-    operatorName,
-    operatorEmail: normalizedItem.operatorEmail || '',
-    durationSeconds: normalizedItem.durationSeconds || 0,
-    durationFormatted: normalizedItem.durationFormatted || '0s',
-    totalCollected: normalizedItem.totalCollected || 0,
-    totalPrizesPaid: normalizedItem.totalPrizesPaid || 0,
-    netProfit: normalizedItem.netProfit || 0,
-    currency: normalizedItem.currency || '$',
-    drawnBallsPlayed: drawnBalls,
-    totalBallsDrawnCount: drawnBalls.length || normalizedItem.totalBallsDrawnCount || 0,
-    rowLeader: normalizedItem.rowLeader ?? null,
-    winningPlayerName: normalizedItem.winningPlayerName || '',
-    tableNumber: normalizedItem.tableNumber ?? null,
-    sheetType: normalizedItem.sheetType || (mode === '90' ? 'traditional-90' : 'multipliers-15'),
-    totalLinesPlayed: exactLines,
-    shiftId: normalizedItem.shiftId || '',
-    shiftName: normalizedItem.shiftName || '',
-    shiftDate: normalizedItem.shiftDate || dailyDate,
-    shiftStartTime: normalizedItem.shiftStartTime || '',
-    shiftEndTime: normalizedItem.shiftEndTime || '',
-    updatedAt: serverTimestamp(),
+    startTime: startTimeStr,
+    endTime: getCurrentLocalTimeString(),
+    durationMs: Date.now() - startMs,
+    retryCount: 0,
+    result: 'SAVED_LOCAL',
+    errorMessage: null,
+  });
+
+  // 4. STEP 2 OF OFFLINE-FIRST: Add to Persistent Sequential Save Queue
+  const existingTask = syncQueueMap.get(docId);
+  const queueTask: QueuedSaveTask = {
+    gameId: docId,
+    game: normalizedItem,
+    enqueuedAt: existingTask ? existingTask.enqueuedAt : Date.now(),
+    retryCount: 0,
+    nextRetryAt: Date.now(),
+    lastError: null,
+    status: 'pending',
   };
 
-  if (normalizedItem.playerSummarySnapshot && Array.isArray(normalizedItem.playerSummarySnapshot)) {
-    firestorePayload.playerSummarySnapshot = JSON.parse(JSON.stringify(normalizedItem.playerSummarySnapshot));
-  }
-  if (normalizedItem.sequenceSnapshot) {
-    firestorePayload.sequenceSnapshot = JSON.parse(JSON.stringify(normalizedItem.sequenceSnapshot));
-  }
-  if (normalizedItem.sheet75Snapshot) {
-    const s75Copy: BingoSheetData = JSON.parse(JSON.stringify(normalizedItem.sheet75Snapshot));
-    if (normalizedItem.playerSummarySnapshot && (!s75Copy.playerSummaryList || s75Copy.playerSummaryList.length === 0)) {
-      s75Copy.playerSummaryList = normalizedItem.playerSummarySnapshot;
-    }
-    firestorePayload.sheet75Snapshot = s75Copy;
-  }
-  if (normalizedItem.sheet90Snapshot) {
-    firestorePayload.sheet90Snapshot = JSON.parse(JSON.stringify(normalizedItem.sheet90Snapshot));
-  }
+  syncQueueMap.set(docId, queueTask);
+  await putQueueTaskInIndexedDB(queueTask);
+  updateSyncStatus({});
 
-  // 3. Atomic Firestore write with immediate getDoc verification and up to 3 automatic retries
-  const docRef = doc(db, 'saved_games', docId);
-  const maxRetries = 3;
-  let verified = false;
-  let verifiedItem: GameSequenceItem = normalizedItem;
-  const sanitizedPayload = sanitizeForFirestore(firestorePayload);
-
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      await setDoc(docRef, sanitizedPayload, { merge: true });
-
-      const snap = await getDoc(docRef);
-      if (snap.exists()) {
-        const remoteData = snap.data() as GameSequenceItem;
-        if (
-          remoteData &&
-          (remoteData.id === docId || snap.id === docId) &&
-          remoteData.dailyDate === dailyDate &&
-          remoteData.round === validRound
-        ) {
-          verified = true;
-          verifiedItem = {
-            ...normalizedItem,
-            ...remoteData,
-            id: docId,
-            dailyDate,
-            subfolderDay,
-            operatorFolder,
-            folderPath,
-            timestamp: exactTimestamp,
-          };
-          console.log(
-            `[SAVE_GAME] ID: ${docId}, dailyDate: ${dailyDate}, path: ${folderPath}, time: ${exactTimestamp}, result: SUCCESS, verified: TRUE`
-          );
-          break;
-        }
-      }
-      console.warn(`[SAVE_GAME] Readback check failed on attempt ${attempt} for ID: ${docId}`);
-    } catch (err) {
-      console.warn(`[SAVE_GAME] Write attempt ${attempt} failed for ID: ${docId}`, err);
-    }
-
-    if (attempt < maxRetries) {
-      await new Promise((resolve) => setTimeout(resolve, attempt * 250));
-    }
-  }
-
-  if (!verified) {
-    console.error(
-      `[SAVE_GAME] ID: ${docId}, dailyDate: ${dailyDate}, path: ${folderPath}, time: ${exactTimestamp}, result: FAILED, verified: FALSE`
-    );
-    throw new Error(`Error: No se pudo verificar la persistencia de la partida ${docId} en Firestore tras 3 intentos.`);
-  }
-
-  // Clean up any legacy duplicate IDs for the same round/date/operator
+  // Clean up any legacy duplicate IDs
   if (duplicateIdsToClean.length > 0) {
     for (const dupId of duplicateIdsToClean) {
       firestoreGamesMemoryStore.delete(dupId);
+      void deleteGameFromIndexedDB(dupId);
       deleteDoc(doc(db, 'saved_games', dupId)).catch(() => {});
     }
   }
 
-  // 4. Update authoritative memory store, temporary cache, and notify UI with confirmed Firestore data
-  saveGameToGalleryCache(verifiedItem);
+  // 5. STEP 3 OF OFFLINE-FIRST: Process the Sequential Save Queue
+  // If online, wait up to 4.5s for immediate Firestore verification; if slow or offline,
+  // continue seamlessly since the game is already safely persisted in IndexedDB and queued.
+  const queuePromise = processSaveQueue();
+  const timeoutPromise = new Promise<void>((resolve) => setTimeout(resolve, 4500));
+  await Promise.race([queuePromise, timeoutPromise]);
 
-  return { success: true, verified: true, game: verifiedItem };
+  const isAlreadySynced = !syncQueueMap.has(docId);
+  const latestGame = firestoreGamesMemoryStore.get(docId) || normalizedItem;
+
+  return {
+    success: true,
+    verified: isAlreadySynced,
+    savedLocally: true,
+    game: latestGame,
+  };
 }
 
 /**
- * Centralized game update method (updates an existing game in Firestore and verifies persistence).
+ * Centralized game update method.
  */
 export async function updateGameUnified(
   item: GameSequenceItem
-): Promise<{ success: boolean; verified: boolean; game: GameSequenceItem }> {
+): Promise<{
+  success: boolean;
+  verified: boolean;
+  savedLocally: boolean;
+  game: GameSequenceItem;
+}> {
   return saveGameUnified(item);
 }
 
@@ -936,7 +1459,16 @@ export function saveGameToGalleryCache(normalizedItem: GameSequenceItem): void {
   const allGames = sortGamesChronologicallyDesc(
     Array.from(firestoreGamesMemoryStore.values())
   );
+  cachedSortedGames = allGames;
   syncTemporaryLocalCache(allGames);
+
+  savedGamesSubscribers.forEach((sub) => {
+    try {
+      sub(allGames);
+    } catch {
+      // ignore
+    }
+  });
 
   if (typeof window !== 'undefined') {
     window.dispatchEvent(
@@ -955,10 +1487,126 @@ export async function saveGameToFirestoreAndGallery(item: GameSequenceItem): Pro
 }
 
 /**
- * Permanently deletes a game from Firestore (authoritative source) and updates memory/cache.
+ * Cleans deleted games from localStorage sequence bars so deleted games immediately disappear from right sequence bar.
+ */
+function purgeDeletedGamesFromLocalSequenceBars(
+  idsToDelete: Set<string>,
+  deletedItems: GameSequenceItem[]
+): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const keysToClean: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (
+        k &&
+        (k.startsWith(STORAGE_KEY_SEQUENCE_75) || k.startsWith(STORAGE_KEY_SEQUENCE_90))
+      ) {
+        keysToClean.push(k);
+      }
+    }
+
+    for (const key of keysToClean) {
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) continue;
+
+      const filtered = parsed.filter((seqItem: GameSequenceItem) => {
+        if (!seqItem) return false;
+        if (seqItem.id && idsToDelete.has(seqItem.id)) return false;
+        const matchDeleted = deletedItems.some(
+          (del) =>
+            del.round === seqItem.round &&
+            getGameNormalizedDateKey(del) === getGameNormalizedDateKey(seqItem) &&
+            (del.timestamp === seqItem.timestamp || del.ballNumber === seqItem.ballNumber)
+        );
+        return !matchDeleted;
+      });
+
+      if (filtered.length !== parsed.length) {
+        safeSetItem(key, JSON.stringify(filtered));
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Core atomic batch deletion across Memory, IndexedDB, Save Queue, Local Sequence Cache, and Firestore.
+ * Strictly reserved for Administrators.
+ */
+async function executeBatchGameDeletion(
+  idsToDelete: Set<string>,
+  matchingItems: GameSequenceItem[] = []
+): Promise<number> {
+  if (!isCurrentSessionAdmin()) {
+    console.warn('[RBAC] Acción denegada: solo los administradores pueden borrar partidas o carpetas.');
+    return 0;
+  }
+
+  if (idsToDelete.size === 0) return 0;
+
+  // 1. Register tombstones immediately so onSnapshot / auto-heal can NEVER resurrect these games
+  for (const docId of idsToDelete) {
+    deletedGameIdsSet.add(docId);
+    syncQueueMap.delete(docId);
+    firestoreGamesMemoryStore.delete(docId);
+  }
+  persistDeletedGameIds();
+
+  // 2. Purge from local sequence bars and notify all UI subscribers in 0ms
+  purgeDeletedGamesFromLocalSequenceBars(idsToDelete, matchingItems);
+
+  updateSyncStatus({});
+  const remaining = sortGamesChronologicallyDesc(
+    Array.from(firestoreGamesMemoryStore.values())
+  );
+  cachedSortedGames = remaining;
+  syncTemporaryLocalCache(remaining);
+
+  savedGamesSubscribers.forEach((sub) => {
+    try {
+      sub(remaining);
+    } catch {
+      // ignore
+    }
+  });
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent('bingo_saved_games_updated', {
+        detail: {
+          total: remaining.length,
+          deletedCount: idsToDelete.size,
+          deletedIds: Array.from(idsToDelete),
+        },
+      })
+    );
+  }
+
+  // 3. Remove from IndexedDB stores (games_store & save_queue_store) and Firestore in parallel
+  await Promise.allSettled(
+    Array.from(idsToDelete).map(async (docId) => {
+      await removeQueueTaskFromIndexedDB(docId);
+      await deleteGameFromIndexedDB(docId);
+      try {
+        await deleteDoc(doc(db, 'saved_games', docId));
+      } catch (err) {
+        console.warn(`Firestore delete warning for ${docId} (tombstoned locally):`, err);
+      }
+    })
+  );
+
+  return idsToDelete.size;
+}
+
+/**
+ * Permanently deletes a game from IndexedDB, Save Queue, and Firestore (Admin only).
  */
 export async function deleteGamePermanently(idOrItem: string | GameSequenceItem): Promise<boolean> {
-  if (!idOrItem) return false;
+  if (!idOrItem || !isCurrentSessionAdmin()) return false;
 
   const targetId = typeof idOrItem === 'string' ? idOrItem : idOrItem.id;
   const targetRound = typeof idOrItem === 'object' ? idOrItem.round : undefined;
@@ -971,7 +1619,10 @@ export async function deleteGamePermanently(idOrItem: string | GameSequenceItem)
 
   try {
     const current = getSavedGamesGallery();
-    const matchingItems = current.filter((g) => {
+    const localIdbGames = await getAllGamesFromIndexedDB();
+    const combined = [...current, ...localIdbGames];
+
+    const matchingItems = combined.filter((g) => {
       if (!g) return false;
       if (targetId && g.id === targetId) return true;
       if (
@@ -1001,183 +1652,283 @@ export async function deleteGamePermanently(idOrItem: string | GameSequenceItem)
       if (g.id) idsToDelete.add(g.id);
     });
 
-    for (const docId of idsToDelete) {
-      await deleteDoc(doc(db, 'saved_games', docId));
-      firestoreGamesMemoryStore.delete(docId);
+    if (typeof idOrItem === 'object') {
+      matchingItems.push(idOrItem);
     }
 
-    const remaining = sortGamesChronologicallyDesc(
-      Array.from(firestoreGamesMemoryStore.values())
-    );
-    syncTemporaryLocalCache(remaining);
-
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(
-        new CustomEvent('bingo_saved_games_updated', {
-          detail: { total: remaining.length, deletedId: targetId },
-        })
-      );
-    }
-
+    await executeBatchGameDeletion(idsToDelete, matchingItems);
     return true;
   } catch (e) {
-    console.error('Error deleting game from Firestore:', e);
+    console.error('Error deleting game:', e);
     return false;
   }
 }
 
 /**
- * Permanently deletes all games of a specific operator on a specific dailyDate (YYYY-MM-DD)
- * directly from Firestore without affecting any other day's or other operator's games.
+ * Permanently deletes all games of a specific operator on a specific dailyDate (YYYY-MM-DD) (Admin only).
  */
 export async function deleteGamesOfDay(
   operatorName: string,
   dateKey: string
 ): Promise<number> {
+  if (!isCurrentSessionAdmin()) return 0;
+
   try {
     const safeOp = sanitizeOperatorFolderName(operatorName);
     const opTrimmed = operatorName.trim().toLowerCase();
     const idsToDelete = new Set<string>();
+    const matchingItems: GameSequenceItem[] = [];
 
-    // 1. Collect matching IDs from memory store
+    const checkAndCollect = (docId: string | undefined, g: GameSequenceItem) => {
+      if (!g) return;
+      const gOp = (g.operatorName || 'Operadora Principal').trim().toLowerCase();
+      const gFolder = sanitizeOperatorFolderName(g.operatorFolder || gOp);
+      const gDate = getGameNormalizedDateKey(g);
+      const matchesOp =
+        !operatorName ||
+        operatorName === 'all' ||
+        gOp === opTrimmed ||
+        gFolder === safeOp;
+      const matchesDate =
+        gDate === dateKey || g.dailyDate === dateKey || g.subfolderDay === dateKey;
+
+      if (matchesOp && matchesDate) {
+        const resolvedId = docId || g.id;
+        if (resolvedId) idsToDelete.add(resolvedId);
+        matchingItems.push(g);
+      }
+    };
+
     for (const [docId, g] of firestoreGamesMemoryStore.entries()) {
-      const gOp = (g.operatorName || 'Operadora Principal').trim().toLowerCase();
-      const gFolder = sanitizeOperatorFolderName(g.operatorFolder || gOp);
-      const gDate = getGameNormalizedDateKey(g);
-      if ((gOp === opTrimmed || gFolder === safeOp) && gDate === dateKey) {
-        idsToDelete.add(docId);
-      }
+      checkAndCollect(docId, g);
     }
 
-    // 2. Also check Firestore directly to guarantee zero orphaned documents
-    const snap = await getDocs(collection(db, 'saved_games'));
-    snap.forEach((docSnap) => {
-      const g = docSnap.data() as GameSequenceItem;
-      const gOp = (g.operatorName || 'Operadora Principal').trim().toLowerCase();
-      const gFolder = sanitizeOperatorFolderName(g.operatorFolder || gOp);
-      const gDate = getGameNormalizedDateKey(g);
-      if ((gOp === opTrimmed || gFolder === safeOp) && gDate === dateKey) {
-        idsToDelete.add(docSnap.id);
-      }
-    });
-
-    for (const docId of idsToDelete) {
-      await deleteDoc(doc(db, 'saved_games', docId));
-      firestoreGamesMemoryStore.delete(docId);
+    const localIdbGames = await getAllGamesFromIndexedDB();
+    for (const g of localIdbGames) {
+      checkAndCollect(g.id, g);
     }
 
-    const remaining = sortGamesChronologicallyDesc(
-      Array.from(firestoreGamesMemoryStore.values())
-    );
-    syncTemporaryLocalCache(remaining);
-
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(
-        new CustomEvent('bingo_saved_games_updated', {
-          detail: { total: remaining.length, deletedCount: idsToDelete.size },
-        })
-      );
+    try {
+      const snap = await getDocs(collection(db, 'saved_games'));
+      snap.forEach((docSnap) => {
+        checkAndCollect(docSnap.id, docSnap.data() as GameSequenceItem);
+      });
+    } catch {
+      // Offline fallback: already collected from memory and IndexedDB
     }
 
-    return idsToDelete.size;
+    return await executeBatchGameDeletion(idsToDelete, matchingItems);
   } catch (e) {
-    console.error('Error deleting games of day from Firestore:', e);
+    console.error('Error deleting games of day:', e);
     return 0;
   }
 }
 
 /**
- * Permanently deletes all games belonging to an operator's folder directly from Firestore.
+ * Permanently deletes all games belonging to an operator's folder (Admin only).
  */
 export async function deleteGamesOfOperatorFolder(operatorName: string): Promise<number> {
+  if (!isCurrentSessionAdmin()) return 0;
+
   try {
     const safeOp = sanitizeOperatorFolderName(operatorName);
     const opTrimmed = operatorName.trim().toLowerCase();
     const idsToDelete = new Set<string>();
+    const matchingItems: GameSequenceItem[] = [];
+
+    const checkAndCollect = (docId: string | undefined, g: GameSequenceItem) => {
+      if (!g) return;
+      const gOp = (g.operatorName || 'Operadora Principal').trim().toLowerCase();
+      const gFolder = sanitizeOperatorFolderName(g.operatorFolder || gOp);
+      if (gOp === opTrimmed || gFolder === safeOp) {
+        const resolvedId = docId || g.id;
+        if (resolvedId) idsToDelete.add(resolvedId);
+        matchingItems.push(g);
+      }
+    };
 
     for (const [docId, g] of firestoreGamesMemoryStore.entries()) {
-      const gOp = (g.operatorName || 'Operadora Principal').trim().toLowerCase();
-      const gFolder = sanitizeOperatorFolderName(g.operatorFolder || gOp);
-      if (gOp === opTrimmed || gFolder === safeOp) {
-        idsToDelete.add(docId);
-      }
+      checkAndCollect(docId, g);
     }
 
-    const snap = await getDocs(collection(db, 'saved_games'));
-    snap.forEach((docSnap) => {
-      const g = docSnap.data() as GameSequenceItem;
-      const gOp = (g.operatorName || 'Operadora Principal').trim().toLowerCase();
-      const gFolder = sanitizeOperatorFolderName(g.operatorFolder || gOp);
-      if (gOp === opTrimmed || gFolder === safeOp) {
-        idsToDelete.add(docSnap.id);
-      }
-    });
-
-    for (const docId of idsToDelete) {
-      await deleteDoc(doc(db, 'saved_games', docId));
-      firestoreGamesMemoryStore.delete(docId);
+    const localIdbGames = await getAllGamesFromIndexedDB();
+    for (const g of localIdbGames) {
+      checkAndCollect(g.id, g);
     }
 
-    const remaining = sortGamesChronologicallyDesc(
-      Array.from(firestoreGamesMemoryStore.values())
-    );
-    syncTemporaryLocalCache(remaining);
-
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(
-        new CustomEvent('bingo_saved_games_updated', {
-          detail: { total: remaining.length, deletedCount: idsToDelete.size },
-        })
-      );
+    try {
+      const snap = await getDocs(collection(db, 'saved_games'));
+      snap.forEach((docSnap) => {
+        checkAndCollect(docSnap.id, docSnap.data() as GameSequenceItem);
+      });
+    } catch {
+      // ignore if offline
     }
 
-    return idsToDelete.size;
+    return await executeBatchGameDeletion(idsToDelete, matchingItems);
   } catch (e) {
-    console.error('Error deleting operator folder games from Firestore:', e);
+    console.error('Error deleting operator folder games:', e);
     return 0;
   }
 }
 
 /**
- * Clears saved games in Firestore (all or filtered by mode) and synchronizes memory/cache.
+ * Clears saved games in IndexedDB, Save Queue, and Firestore (all or filtered by mode) (Admin only).
  */
 export async function clearAllSavedGamesGallery(
   filterMode?: 'all' | '75' | '90'
 ): Promise<void> {
+  if (!isCurrentSessionAdmin()) return;
+
   try {
-    const snap = await getDocs(collection(db, 'saved_games'));
-    const idsToDelete: string[] = [];
+    const idsToDelete = new Set<string>();
+    const matchingItems: GameSequenceItem[] = [];
 
-    snap.forEach((docSnap) => {
-      const g = docSnap.data() as GameSequenceItem;
+    const checkAndCollect = (docId: string | undefined, g: GameSequenceItem) => {
+      if (!g) return;
       const is90 = g.mode === '90' || g.sheetType === 'traditional-90';
-      if (!filterMode || filterMode === 'all') {
-        idsToDelete.push(docSnap.id);
-      } else if (filterMode === '75' && !is90) {
-        idsToDelete.push(docSnap.id);
-      } else if (filterMode === '90' && is90) {
-        idsToDelete.push(docSnap.id);
+      const matches =
+        !filterMode ||
+        filterMode === 'all' ||
+        (filterMode === '75' && !is90) ||
+        (filterMode === '90' && is90);
+      if (matches) {
+        const resolvedId = docId || g.id;
+        if (resolvedId) idsToDelete.add(resolvedId);
+        matchingItems.push(g);
       }
-    });
+    };
 
-    for (const docId of idsToDelete) {
-      await deleteDoc(doc(db, 'saved_games', docId));
-      firestoreGamesMemoryStore.delete(docId);
+    for (const [docId, g] of firestoreGamesMemoryStore.entries()) {
+      checkAndCollect(docId, g);
     }
 
-    const remaining = sortGamesChronologicallyDesc(
-      Array.from(firestoreGamesMemoryStore.values())
-    );
-    syncTemporaryLocalCache(remaining);
-
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(
-        new CustomEvent('bingo_saved_games_updated', {
-          detail: { total: remaining.length },
-        })
-      );
+    const localIdbGames = await getAllGamesFromIndexedDB();
+    for (const g of localIdbGames) {
+      checkAndCollect(g.id, g);
     }
+
+    try {
+      const snap = await getDocs(collection(db, 'saved_games'));
+      snap.forEach((docSnap) => {
+        checkAndCollect(docSnap.id, docSnap.data() as GameSequenceItem);
+      });
+    } catch {
+      // ignore if offline
+    }
+
+    await executeBatchGameDeletion(idsToDelete, matchingItems);
   } catch (e) {
-    console.error('Error clearing saved games from Firestore:', e);
+    console.error('Error clearing saved games:', e);
   }
+}
+
+// ============================================================================
+// CENTRALIZED USERS & ACTIVITY LOGS SERVICES (NO DIRECT FIRESTORE IN COMPONENTS)
+// ============================================================================
+
+export function subscribeToUsersCentralized(
+  onData: (users: AppUser[]) => void,
+  onError?: (err: unknown) => void
+): () => void {
+  if (typeof window === 'undefined') return () => {};
+  try {
+    const usersRef = collection(db, 'users');
+    return onSnapshot(
+      usersRef,
+      (snapshot) => {
+        const users: AppUser[] = [];
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data();
+          users.push({
+            id: docSnap.id,
+            uid: docSnap.id,
+            name: data.name || 'Operador',
+            email: data.email || '',
+            role: data.role === 'admin' ? 'admin' : 'operator',
+            status: data.status === 'suspended' ? 'suspended' : 'active',
+            joinedDate: data.joinedDate || '',
+            createdAt: data.createdAt,
+            lastActive: data.lastActive || 'Reciente',
+            gamesPlayed: data.gamesPlayed || 0,
+            notes: data.notes || '',
+            avatarColor: data.avatarColor || (data.role === 'admin' ? '#f59e0b' : '#10b981'),
+            assignedMode: data.assignedMode || (data.role === 'admin' ? 'all' : '75'),
+          });
+        });
+        onData(users);
+      },
+      (err) => {
+        onError?.(err);
+      }
+    );
+  } catch (err) {
+    onError?.(err);
+    return () => {};
+  }
+}
+
+export function subscribeToActivityLogsCentralized(
+  onData: (logs: ActivityLogItem[], addedChanges: ActivityLogItem[]) => void,
+  onError?: (err: unknown) => void
+): () => void {
+  if (typeof window === 'undefined') return () => {};
+  try {
+    const activityRef = collection(db, 'activity_logs');
+    const q = query(activityRef, orderBy('createdAt', 'desc'), limit(120));
+    return onSnapshot(
+      q,
+      (snapshot) => {
+        const addedChanges: ActivityLogItem[] = [];
+        snapshot.docChanges().forEach((change) => {
+          if (change.type === 'added') {
+            const data = change.doc.data();
+            addedChanges.push({
+              id: change.doc.id,
+              operatorUid: data.operatorUid || '',
+              operatorName: data.operatorName || 'Operador',
+              operatorEmail: data.operatorEmail || '',
+              action: data.action || '',
+              actionType: data.actionType || 'draw_ball',
+              details: data.details || '',
+              timestamp: data.timestamp || new Date().toISOString(),
+              mode: data.mode || '75',
+            });
+          }
+        });
+
+        const logs: ActivityLogItem[] = [];
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data();
+          logs.push({
+            id: docSnap.id,
+            operatorUid: data.operatorUid || '',
+            operatorName: data.operatorName || 'Operador',
+            operatorEmail: data.operatorEmail || '',
+            action: data.action || '',
+            actionType: data.actionType || 'draw_ball',
+            details: data.details || '',
+            timestamp: data.timestamp || new Date().toISOString(),
+            mode: data.mode || '75',
+          });
+        });
+
+        onData(logs, addedChanges);
+      },
+      (err) => {
+        onError?.(err);
+      }
+    );
+  } catch (err) {
+    onError?.(err);
+    return () => {};
+  }
+}
+
+export async function updateUserFieldsCentralized(
+  userId: string,
+  fields: Partial<Pick<AppUser, 'role' | 'status' | 'assignedMode' | 'name' | 'notes'>>
+): Promise<void> {
+  const userRef = doc(db, 'users', userId);
+  await updateDoc(userRef, sanitizeForFirestore(fields));
 }

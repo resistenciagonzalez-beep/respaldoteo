@@ -33,25 +33,19 @@ import {
   Camera,
   Sparkles,
 } from 'lucide-react';
-import {
-  collection,
-  onSnapshot,
-  doc,
-  updateDoc,
-  query,
-  orderBy,
-  limit,
-} from 'firebase/firestore';
-import { db } from '../firebase';
 import { AppUser, ActivityLogItem, GameSequenceItem, Traditional90Table, Traditional90Row } from '../types';
 import { useAuth } from '../hooks/useAuth';
 import {
   getSavedGamesGallery,
   deleteGamePermanently,
+  deleteGamesOfDay,
   updateGameUnified,
   subscribeToSavedGamesFirestore,
   getCurrentLocalDateKey,
   getGameNormalizedDateKey,
+  subscribeToUsersCentralized,
+  subscribeToActivityLogsCentralized,
+  updateUserFieldsCentralized,
 } from '../utils/savedGamesStorage';
 import { downloadGameDirectJpg, downloadGameDirectPdf } from '../utils/exportGameReport';
 import { GameSheetSnapshotModal } from './GameSheetSnapshotModal';
@@ -76,6 +70,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
   // Deletion confirmation modals state
   const [gameToDelete, setGameToDelete] = useState<GameSequenceItem | null>(null);
+  const [dayFolderToDelete, setDayFolderToDelete] = useState<string | null>(null);
   const [showConfirmClearFiltered, setShowConfirmClearFiltered] = useState<boolean>(false);
   const deletedGameIdsRef = useRef<Set<string>>(new Set());
 
@@ -162,34 +157,13 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     toastTimeoutsRef.current.add(timer);
   }, []);
 
-  // 1. Real-time listener for Firestore `users` collection
+  // 1. Real-time listener for Firestore `users` collection via centralized service
   useEffect(() => {
     if (!isOpen) return;
 
-    const usersRef = collection(db, 'users');
-    const unsubscribeUsers = onSnapshot(
-      usersRef,
-      (snapshot) => {
+    const unsubscribeUsers = subscribeToUsersCentralized(
+      (users) => {
         setIsFirestoreConnected(true);
-        const users: AppUser[] = [];
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data();
-          users.push({
-            id: docSnap.id,
-            uid: docSnap.id,
-            name: data.name || 'Operador',
-            email: data.email || '',
-            role: data.role === 'admin' ? 'admin' : 'operator',
-            status: data.status === 'suspended' ? 'suspended' : 'active',
-            joinedDate: data.joinedDate || '',
-            createdAt: data.createdAt,
-            lastActive: data.lastActive || 'Reciente',
-            gamesPlayed: data.gamesPlayed || 0,
-            notes: data.notes || '',
-            avatarColor: data.avatarColor || (data.role === 'admin' ? '#f59e0b' : '#10b981'),
-            assignedMode: data.assignedMode || (data.role === 'admin' ? 'all' : '75'),
-          });
-        });
         setUsersList(users);
       },
       (err) => {
@@ -201,44 +175,23 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     return () => unsubscribeUsers();
   }, [isOpen]);
 
-  // 2. Real-time listener for Firestore `activity_logs` collection
+  // 2. Real-time listener for Firestore `activity_logs` collection via centralized service
   useEffect(() => {
     if (!isOpen) return;
 
-    const activityRef = collection(db, 'activity_logs');
-    const q = query(activityRef, orderBy('createdAt', 'desc'), limit(120));
-
-    const unsubscribeActivity = onSnapshot(
-      q,
-      (snapshot) => {
+    const unsubscribeActivity = subscribeToActivityLogsCentralized(
+      (logs, addedChanges) => {
         setIsFirestoreConnected(true);
-        const logs: ActivityLogItem[] = [];
 
-        snapshot.docChanges().forEach((change) => {
-          if (change.type === 'added' && !isFirstLoadRef.current) {
-            const data = change.doc.data();
+        if (!isFirstLoadRef.current) {
+          addedChanges.forEach((data) => {
             addToast(
               `Actividad: ${data.action || 'Acción de Operador'}`,
               `${data.operatorName || 'Operador'}: ${data.details || ''}`,
               data.actionType === 'draw_ball' ? 'ball' : data.actionType === 'register' ? 'register' : 'activity'
             );
-          }
-        });
-
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data();
-          logs.push({
-            id: docSnap.id,
-            operatorUid: data.operatorUid || '',
-            operatorName: data.operatorName || 'Operador',
-            operatorEmail: data.operatorEmail || '',
-            action: data.action || '',
-            actionType: data.actionType || 'draw_ball',
-            details: data.details || '',
-            timestamp: data.timestamp || new Date().toISOString(),
-            mode: data.mode || '75',
           });
-        });
+        }
 
         setActivitiesList(logs);
         isFirstLoadRef.current = false;
@@ -275,8 +228,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   const handleToggleRole = async (user: AppUser) => {
     const newRole = user.role === 'admin' ? 'operator' : 'admin';
     try {
-      const userRef = doc(db, 'users', user.id);
-      await updateDoc(userRef, { role: newRole });
+      await updateUserFieldsCentralized(user.id, { role: newRole });
 
       await logActivity(
         'Cambio de Rango de Usuario',
@@ -295,8 +247,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   const handleToggleStatus = async (user: AppUser) => {
     const newStatus = user.status === 'active' ? 'suspended' : 'active';
     try {
-      const userRef = doc(db, 'users', user.id);
-      await updateDoc(userRef, { status: newStatus });
+      await updateUserFieldsCentralized(user.id, { status: newStatus });
 
       await logActivity(
         'Cambio de Estado de Cuenta',
@@ -315,8 +266,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   const handleToggleAssignedMode = async (user: AppUser) => {
     const newMode: '75' | '90' = user.assignedMode === '90' ? '75' : '90';
     try {
-      const userRef = doc(db, 'users', user.id);
-      await updateDoc(userRef, { assignedMode: newMode });
+      await updateUserFieldsCentralized(user.id, { assignedMode: newMode });
 
       await logActivity(
         'Reasignación de Modalidad',
@@ -2073,6 +2023,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                         <th className="py-2.5 px-3">Operadoras de Turno</th>
                         <th className="py-2.5 px-3 text-right">Recaudado</th>
                         <th className="py-2.5 px-3 text-right">Premios</th>
+                        <th className="py-2.5 px-3 text-right">Acción</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-purple-50">
@@ -2121,6 +2072,19 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                             </td>
                             <td className="py-2.5 px-3 text-right text-rose-700 font-mono font-bold">
                               ${item.prizes.toFixed(2)}
+                            </td>
+                            <td className="py-2.5 px-3 text-right">
+                              {isAdmin && (
+                                <button
+                                  type="button"
+                                  onClick={() => setDayFolderToDelete(item.date)}
+                                  className="px-2.5 py-1 rounded-lg bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white border border-rose-200 hover:border-rose-600 text-[10px] font-black transition-all cursor-pointer inline-flex items-center gap-1 active:scale-95"
+                                  title={`Eliminar todas las partidas de la fecha ${item.date}`}
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                  <span>Borrar fecha</span>
+                                </button>
+                              )}
                             </td>
                           </tr>
                         );
@@ -2919,6 +2883,56 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation Modal to Delete Entire Date Folder from Admin Panel */}
+      {isAdmin && dayFolderToDelete && (
+        <div className="fixed inset-0 z-[100000] flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-fade-in">
+          <div className="w-full max-w-md bg-white border-2 border-rose-300 rounded-3xl shadow-2xl p-5 sm:p-6 space-y-4">
+            <div className="flex items-start gap-3.5">
+              <div className="w-12 h-12 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center flex-shrink-0 shadow-xs">
+                <Trash2 className="w-6 h-6" />
+              </div>
+              <div className="flex-1">
+                <h4 className="text-base sm:text-lg font-black text-slate-900 leading-tight">
+                  ¿Eliminar todas las partidas de la fecha {dayFolderToDelete}?
+                </h4>
+                <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                  Se borrarán permanentemente todas las partidas y subcarpetas correspondientes a la fecha <strong className="text-slate-900">{dayFolderToDelete}</strong> de la plataforma y de Firestore.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setDayFolderToDelete(null)}
+                className="px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition-all cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const targetDate = dayFolderToDelete;
+                  setDayFolderToDelete(null);
+                  await deleteGamesOfDay('all', targetDate);
+                  setSavedGamesList(getSavedGamesGallery());
+                  await logActivity(
+                    'Eliminación de Subcarpeta por Fecha',
+                    'reset_game',
+                    `Eliminó todas las partidas de la fecha ${targetDate}`
+                  );
+                  showBanner(`Subcarpeta de la fecha ${targetDate} eliminada permanentemente.`);
+                }}
+                className="px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-black transition-all shadow-md cursor-pointer flex items-center gap-1.5 active:scale-95"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>Sí, Eliminar Fecha</span>
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -41,6 +41,8 @@ interface Bolillero90SidebarProps {
   isSheetExpanded?: boolean;
   onToggleCollapse?: () => void;
   hideSequence?: boolean;
+  isAdmin?: boolean;
+  onDeleteGameItem?: (item: GameSequenceItem) => void;
 }
 
 export const Bolillero90Sidebar: React.FC<Bolillero90SidebarProps> = memo(({
@@ -62,6 +64,8 @@ export const Bolillero90Sidebar: React.FC<Bolillero90SidebarProps> = memo(({
   compact = false,
   onToggleCollapse,
   hideSequence = false,
+  isAdmin = false,
+  onDeleteGameItem,
 }) => {
   const [showMasterBoard, setShowMasterBoard] = useState<boolean>(false);
   const [showResetConfirm, setShowResetConfirm] = useState<boolean>(false);
@@ -500,11 +504,11 @@ export const Bolillero90Sidebar: React.FC<Bolillero90SidebarProps> = memo(({
                   <span>+ Nueva</span>
                 </button>
               )}
-              {gameSequence90.length > 0 && onClearSequence90 && (
+              {isAdmin && gameSequence90.length > 0 && onClearSequence90 && (
                 <button
                   onClick={() => setShowClearSeqConfirm(true)}
                   className="text-[10px] text-rose-600 hover:text-rose-700 flex items-center gap-0.5 cursor-pointer"
-                  title="Limpiar historial de partidas 90"
+                  title="Limpiar historial de partidas 90 (Solo Admin)"
                 >
                   <Trash2 className="w-3 h-3" />
                   Limpiar
@@ -513,7 +517,7 @@ export const Bolillero90Sidebar: React.FC<Bolillero90SidebarProps> = memo(({
             </div>
           </div>
 
-          {showClearSeqConfirm && (
+          {isAdmin && showClearSeqConfirm && (
             <div className="p-2 bg-rose-50 border-b border-rose-200 text-rose-950 text-xs space-y-1.5">
               <p className="font-bold text-[11px]">¿Borrar historial de partidas 90?</p>
               <div className="flex justify-end gap-1.5">
@@ -571,6 +575,19 @@ export const Bolillero90Sidebar: React.FC<Bolillero90SidebarProps> = memo(({
                     <span className="text-[9px] text-orange-700 font-semibold">
                       {item.timestamp || item.durationFormatted}
                     </span>
+                    {isAdmin && onDeleteGameItem && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDeleteGameItem(item);
+                        }}
+                        className="p-1 rounded bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white border border-rose-200 transition-colors cursor-pointer"
+                        title={`Borrar Partida #${item.round} (Solo Admin)`}
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    )}
                     <Eye className="w-3.5 h-3.5 text-orange-400 group-hover:text-orange-600" />
                   </div>
                 </div>
