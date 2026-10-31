@@ -504,22 +504,22 @@ export const Bolillero90Sidebar: React.FC<Bolillero90SidebarProps> = memo(({
                   <span>+ Nueva</span>
                 </button>
               )}
-              {isAdmin && gameSequence90.length > 0 && onClearSequence90 && (
+              {gameSequence90.length > 0 && onClearSequence90 && (
                 <button
                   onClick={() => setShowClearSeqConfirm(true)}
                   className="text-[10px] text-rose-600 hover:text-rose-700 flex items-center gap-0.5 cursor-pointer"
-                  title="Limpiar historial de partidas 90 (Solo Admin)"
+                  title="Vaciar barra de secuencia de partidas 90"
                 >
                   <Trash2 className="w-3 h-3" />
-                  Limpiar
+                  Vaciar
                 </button>
               )}
             </div>
           </div>
 
-          {isAdmin && showClearSeqConfirm && (
+          {showClearSeqConfirm && (
             <div className="p-2 bg-rose-50 border-b border-rose-200 text-rose-950 text-xs space-y-1.5">
-              <p className="font-bold text-[11px]">¿Borrar historial de partidas 90?</p>
+              <p className="font-bold text-[11px]">¿Vaciar barra de partidas 90 de hoy?</p>
               <div className="flex justify-end gap-1.5">
                 <button
                   onClick={() => setShowClearSeqConfirm(false)}
@@ -534,7 +534,7 @@ export const Bolillero90Sidebar: React.FC<Bolillero90SidebarProps> = memo(({
                   }}
                   className="px-2 py-0.5 rounded bg-rose-600 text-white font-bold text-[10px]"
                 >
-                  Sí, borrar
+                  Sí, vaciar
                 </button>
               </div>
             </div>

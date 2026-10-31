@@ -2,10 +2,12 @@ import React, { useState, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { GameSequenceItem, BingoMode } from '../types';
 import { getBingo75Letter, getBallBadgeColor } from '../utils/ballColors';
-import { getCurrentLocalDateKey, getGameNormalizedDateKey } from '../utils/savedGamesStorage';
+import {
+  getCurrentLocalDateKey,
+  isRealSavedGameInTodaySubfolder,
+} from '../utils/savedGamesStorage';
 import {
   Trophy,
-  Plus,
   Trash2,
   Sparkles,
   X,
@@ -68,45 +70,24 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
   isAdmin = false,
   onDeleteGameItem,
 }) => {
-  // Combine ONLY today's saved games and current sequence so that ONLY games
-  // made/saved on the current day (without games from the previous day) appear in this right sequence bar.
+  // Strict Rule: ONLY real games manually saved in today's subfolder (subfolderDay === todayKey)
+  // are allowed in the right-hand sequence bar. Never show invented or unsaved sequence items.
   const displayedShortcuts = useMemo(() => {
     const todayKey = getCurrentLocalDateKey();
     const map = new Map<string | number, GameSequenceItem & { isSavedToday?: boolean }>();
 
-    // 1. Add games saved today as prominent shortcuts (STRICTLY matching todayKey)
     (todaySavedGames || []).forEach((saved) => {
-      if (!saved) return;
-      if (getGameNormalizedDateKey(saved) !== todayKey) return;
-      const key = saved.round || saved.id;
+      if (!saved || !isRealSavedGameInTodaySubfolder(saved, todayKey)) return;
+      const key = saved.id || saved.round;
       if (key !== undefined) {
         map.set(key, { ...saved, isSavedToday: true });
-      }
-    });
-
-    // 2. Add sequence entries (STRICTLY matching todayKey, NEVER from previous days)
-    (sequence || []).forEach((item) => {
-      if (!item) return;
-      const hasBall = typeof item.ballNumber === 'number' && item.ballNumber > 0;
-      const hasSheet = Boolean(item.sheet75Snapshot || item.sheet90Snapshot || item.id);
-      if (!hasBall && !hasSheet) return;
-
-      // Filter out any game not matching todayKey (CRITICAL: exclude games from yesterday or previous days!)
-      if (getGameNormalizedDateKey(item) !== todayKey) return;
-
-      const key = item.round || item.id || `seq_${item.ballNumber}`;
-      if (!map.has(key)) {
-        map.set(key, {
-          ...item,
-          isSavedToday: Boolean(item.sheet75Snapshot || item.sheet90Snapshot || item.id),
-        });
       }
     });
 
     const list = Array.from(map.values());
     list.sort((a, b) => (b.round || 0) - (a.round || 0));
     return list;
-  }, [todaySavedGames, sequence]);
+  }, [todaySavedGames]);
 
   const [showAddModal, setShowAddModal] = useState<boolean>(false);
   const [inputTernaStr, setInputTernaStr] = useState<string>('');
@@ -222,16 +203,16 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
           </div>
         )}
 
-        {/* Modal to confirm clear sequence (Admin Only) */}
-        {isAdmin && showClearModal && (
+        {/* Modal to confirm emptying the right-hand sequence bar */}
+        {showClearModal && (
           <div className="fixed inset-0 z-[99999] bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
             <div className="bg-[#fffaf5] border-2 border-orange-300 rounded-2xl p-4 max-w-xs w-full shadow-2xl space-y-3 animate-scale-up text-[#431407]">
               <h4 className="text-xs font-black text-rose-700 flex items-center gap-1.5">
                 <Trash2 className="w-3.5 h-3.5 text-rose-600" />
-                ¿Limpiar Secuencia de Hoy?
+                ¿Vaciar Barra de Secuencia?
               </h4>
               <p className="text-[11px] text-orange-950 leading-normal">
-                Se borrará el historial de las {displayedShortcuts.length} partidas registradas hoy.
+                Se vaciará la barra de secuencia derecha ({displayedShortcuts.length} {displayedShortcuts.length === 1 ? 'partida' : 'partidas'} del día actual).
               </p>
               <div className="flex gap-2 pt-1 border-t border-orange-200">
                 <button
@@ -249,7 +230,7 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
                   }}
                   className="flex-1 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-black shadow-sm cursor-pointer"
                 >
-                  Limpiar
+                  Sí, Vaciar
                 </button>
               </div>
             </div>
@@ -370,26 +351,15 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
               </button>
             )}
 
-            {onAddSequenceItem && (
-              <button
-                type="button"
-                onClick={() => setShowAddModal(true)}
-                className="py-1 px-1.5 rounded-lg bg-orange-500 hover:bg-orange-600 text-white text-[10px] font-black transition-all shadow-2xs flex items-center justify-center gap-0.5 active:scale-95 cursor-pointer"
-                title="Registrar número que hizo Bingo manualmente"
-              >
-                <Plus className="w-3 h-3" />
-                <span>Bingo</span>
-              </button>
-            )}
-
-            {isAdmin && displayedShortcuts.length > 0 && onClearSequence && (
+            {displayedShortcuts.length > 0 && onClearSequence && (
               <button
                 type="button"
                 onClick={() => setShowClearModal(true)}
-                className="p-1 rounded-lg bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white transition-all border border-rose-200 active:scale-95 cursor-pointer"
-                title="Limpiar historial de secuencia (Solo Admin)"
+                className="py-1 px-1.5 rounded-lg bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white text-[10px] font-black transition-all border border-rose-200 flex items-center justify-center gap-0.5 active:scale-95 cursor-pointer"
+                title="Vaciar barra de secuencia del día"
               >
                 <Trash2 className="w-3 h-3" />
+                <span>Vaciar</span>
               </button>
             )}
           </div>
@@ -742,26 +712,15 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
             </button>
           )}
 
-          {onAddSequenceItem && (
-            <button
-              type="button"
-              onClick={() => setShowAddModal(true)}
-              className="p-1 sm:px-1.5 sm:py-0.5 rounded-lg bg-orange-500 hover:bg-orange-600 text-white text-[10px] font-black transition-all shadow-2xs flex items-center gap-0.5 active:scale-95 cursor-pointer"
-              title="Registrar número que hizo Bingo"
-            >
-              <Plus className="w-3 h-3" />
-              <span className="hidden sm:inline">Bingo</span>
-            </button>
-          )}
-
-          {isAdmin && displayedShortcuts.length > 0 && onClearSequence && (
+          {displayedShortcuts.length > 0 && onClearSequence && (
             <button
               type="button"
               onClick={() => setShowClearModal(true)}
-              className="p-1 rounded-lg bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white transition-all border border-rose-200 active:scale-95 cursor-pointer"
-              title="Limpiar secuencia de juego (Solo Admin)"
+              className="px-2 py-0.5 rounded-lg bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white text-[10px] font-black transition-all border border-rose-200 flex items-center gap-1 active:scale-95 cursor-pointer"
+              title="Vaciar barra de secuencia del día"
             >
               <Trash2 className="w-3 h-3" />
+              <span className="hidden sm:inline">Vaciar</span>
             </button>
           )}
         </div>

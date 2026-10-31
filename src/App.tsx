@@ -50,6 +50,8 @@ import {
   getCurrentLocalDateKey,
   getCurrentLocalTimeString,
   getGameNormalizedDateKey,
+  isRealSavedGameInTodaySubfolder,
+  clearRightSequenceBarToday,
 } from './utils/savedGamesStorage';
 import {
   buildCompleteGameSequenceItem,
@@ -246,176 +248,78 @@ export default function App() {
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [activeTabMobile, setActiveTabMobile] = useState<'cage' | 'board'>('cage');
 
-  // Game Sequence History (Secuencia de juego acumulada de bingos en partidas 75 del día actual)
-  const [gameSequence, setGameSequence] = useState<GameSequenceItem[]>(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        const todayKey = getCurrentLocalDateKey();
-        const saved = localStorage.getItem('bingo_game_sequence_history');
-        if (saved) {
-          const parsed = JSON.parse(saved);
-          if (Array.isArray(parsed)) {
-            return parsed.filter(
-              (item) =>
-                item &&
-                typeof item.ballNumber === 'number' &&
-                item.ballNumber > 0 &&
-                getGameNormalizedDateKey(item) === todayKey
-            );
-          }
-        }
-      } catch (e) {
-        console.error(e);
-      }
-    }
-    return [];
-  });
+  // Game Sequence History (ONLY real games saved in today's subfolder, never invented items)
+  const [gameSequence, setGameSequence] = useState<GameSequenceItem[]>([]);
 
   // One-time startup cleanup to prevent QuotaExceededError from previous large base64 dumps
   useEffect(() => {
     cleanupLocalStorageForQuota();
   }, []);
 
-  useEffect(() => {
-    const cleanSeq = gameSequence.filter((item) => item && typeof item.ballNumber === 'number' && item.ballNumber > 0);
-    const key = getOperatorStorageKey(STORAGE_KEY_SEQUENCE_75, currentUser);
-    safeSetItem(key, JSON.stringify(sanitizeSequenceForStorage(cleanSeq)));
-    safeSetItem(STORAGE_KEY_SEQUENCE_75, JSON.stringify(sanitizeSequenceForStorage(cleanSeq)));
-  }, [gameSequence, currentUser]);
+  // Game Sequence History for Bingo 90 (ONLY real games saved in today's subfolder)
+  const [gameSequence90, setGameSequence90] = useState<GameSequenceItem[]>([]);
 
-  // Game Sequence History for Bingo 90 (Secuencia exclusiva para Bingo 90 del día actual)
-  const [gameSequence90, setGameSequence90] = useState<GameSequenceItem[]>(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        const todayKey = getCurrentLocalDateKey();
-        const saved = localStorage.getItem('bingo_90_game_sequence_history');
-        if (saved) {
-          const parsed = JSON.parse(saved);
-          if (Array.isArray(parsed)) {
-            return parsed.filter(
-              (item) =>
-                item &&
-                typeof item.ballNumber === 'number' &&
-                item.ballNumber > 0 &&
-                getGameNormalizedDateKey(item) === todayKey
-            );
-          }
-        }
-      } catch (e) {
-        console.error(e);
-      }
-    }
-    return [];
-  });
-
-  useEffect(() => {
-    const cleanSeq90 = gameSequence90.filter((item) => item && typeof item.ballNumber === 'number' && item.ballNumber > 0);
-    const key90 = getOperatorStorageKey(STORAGE_KEY_SEQUENCE_90, currentUser);
-    safeSetItem(key90, JSON.stringify(sanitizeSequenceForStorage(cleanSeq90)));
-    safeSetItem(STORAGE_KEY_SEQUENCE_90, JSON.stringify(sanitizeSequenceForStorage(cleanSeq90)));
-  }, [gameSequence90, currentUser]);
-
-  // Isolate sequence strictly per operator and current day (SIN partidas de días anteriores)
+  // Isolate sequence strictly per operator and current day's subfolder (SIN partidas inventadas ni del día anterior)
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const todayKey = getCurrentLocalDateKey();
-    const key75 = getOperatorStorageKey(STORAGE_KEY_SEQUENCE_75, currentUser);
-    const key90 = getOperatorStorageKey(STORAGE_KEY_SEQUENCE_90, currentUser);
 
-    let mySeq75: GameSequenceItem[] = [];
-    let mySeq90: GameSequenceItem[] = [];
+    const myTodayGallery = getSavedGamesGallery().filter(
+      (g) =>
+        g &&
+        isRealSavedGameInTodaySubfolder(g, todayKey) &&
+        (isAdmin || !currentUser || isGameOfOperator(g, currentUser))
+    );
 
-    try {
-      const saved75 = localStorage.getItem(key75);
-      if (saved75) {
-        const parsed = JSON.parse(saved75);
-        if (Array.isArray(parsed)) {
-          mySeq75 = parsed.filter(
-            (i) =>
-              i &&
-              typeof i.ballNumber === 'number' &&
-              i.ballNumber > 0 &&
-              isGameOfOperator(i, currentUser) &&
-              getGameNormalizedDateKey(i) === todayKey
-          );
-        }
-      }
-    } catch (err) {
-      console.warn('Error loading sequence 75 for operator:', err);
-    }
+    const mySeq75 = myTodayGallery
+      .filter((g) => g.mode !== '90' && g.sheetType !== 'traditional-90')
+      .sort((a, b) => (a.round || 0) - (b.round || 0));
 
-    try {
-      const saved90 = localStorage.getItem(key90);
-      if (saved90) {
-        const parsed = JSON.parse(saved90);
-        if (Array.isArray(parsed)) {
-          mySeq90 = parsed.filter(
-            (i) =>
-              i &&
-              typeof i.ballNumber === 'number' &&
-              i.ballNumber > 0 &&
-              isGameOfOperator(i, currentUser) &&
-              getGameNormalizedDateKey(i) === todayKey
-          );
-        }
-      }
-    } catch (err) {
-      console.warn('Error loading sequence 90 for operator:', err);
-    }
+    const mySeq90 = myTodayGallery
+      .filter((g) => g.mode === '90' || g.sheetType === 'traditional-90')
+      .sort((a, b) => (a.round || 0) - (b.round || 0));
 
     setGameSequence(mySeq75);
     setGameSequence90(mySeq90);
 
-    // Calculate current round number from today's saved matches in Firestore-backed gallery
-    const myTodayGallery = getSavedGamesGallery().filter(
-      (g) =>
-        g &&
-        typeof g.round === 'number' &&
-        g.round >= 1 &&
-        isGameOfOperator(g, currentUser) &&
-        getGameNormalizedDateKey(g) === todayKey
-    );
     const maxR = myTodayGallery.length > 0 ? Math.max(0, ...myTodayGallery.map((g) => g.round || 0)) : 0;
     setCurrentMatchRound(maxR > 0 ? maxR + 1 : 1);
-  }, [currentUser]);
+  }, [currentUser, isAdmin]);
 
   const handleClearSequence = useCallback(() => {
-    if (!isAdmin) return;
-    setGameSequence([]);
-    try {
-      localStorage.removeItem(STORAGE_KEY_SEQUENCE_75);
-      localStorage.removeItem(getOperatorStorageKey(STORAGE_KEY_SEQUENCE_75, currentUser));
-      localStorage.removeItem('bingo_sheet_custom_sequence');
-      localStorage.removeItem(getOperatorStorageKey('bingo_sheet_custom_sequence', currentUser));
-    } catch (err) {
-      console.warn('Error clearing sequence 75 from storage:', err);
-    }
     const todayKey = getCurrentLocalDateKey();
     const today75Games = getSavedGamesGallery().filter(
-      (g) => g && g.mode !== '90' && g.sheetType !== 'traditional-90' && getGameNormalizedDateKey(g) === todayKey
+      (g) =>
+        g &&
+        g.mode !== '90' &&
+        g.sheetType !== 'traditional-90' &&
+        getGameNormalizedDateKey(g) === todayKey
     );
-    today75Games.forEach((g) => {
-      void deleteGamePermanently(g);
+    setGameSequence([]);
+    setCurrentMatchRound(1);
+    void clearRightSequenceBarToday(today75Games, '75').then(() => {
+      setSavedGamesList(
+        getSavedGamesGallery().filter((g) => g && typeof g.round === 'number' && g.round >= 1)
+      );
     });
-  }, [currentUser, isAdmin]);
+  }, []);
 
   const handleClearSequence90 = useCallback(() => {
-    if (!isAdmin) return;
-    setGameSequence90([]);
-    try {
-      localStorage.removeItem(STORAGE_KEY_SEQUENCE_90);
-      localStorage.removeItem(getOperatorStorageKey(STORAGE_KEY_SEQUENCE_90, currentUser));
-    } catch (err) {
-      console.warn('Error clearing sequence 90 from storage:', err);
-    }
     const todayKey = getCurrentLocalDateKey();
     const today90Games = getSavedGamesGallery().filter(
-      (g) => g && (g.mode === '90' || g.sheetType === 'traditional-90') && getGameNormalizedDateKey(g) === todayKey
+      (g) =>
+        g &&
+        (g.mode === '90' || g.sheetType === 'traditional-90') &&
+        getGameNormalizedDateKey(g) === todayKey
     );
-    today90Games.forEach((g) => {
-      void deleteGamePermanently(g);
+    setGameSequence90([]);
+    setCurrentMatchRound(1);
+    void clearRightSequenceBarToday(today90Games, '90').then(() => {
+      setSavedGamesList(
+        getSavedGamesGallery().filter((g) => g && typeof g.round === 'number' && g.round >= 1)
+      );
     });
-  }, [currentUser, isAdmin]);
+  }, []);
 
   const [lastWinningBall, setLastWinningBall] = useState<number | null>(null);
   const lastWinnerInfoRef = useRef<{
@@ -520,17 +424,18 @@ export default function App() {
   }, []);
 
   // Filter games saved today by operator to create direct shortcuts in the right sequence bar
+  // Strictly requires real saved games in today's subfolder (no invented games)
   const todaySavedGames = useMemo(() => {
     const todayKey = getCurrentLocalDateKey();
     const isBingo90 = activeSheetType === 'traditional-90' || settings.mode === '90';
 
     return savedGamesList
       .filter((g) => {
-        if (!g || !g.round) return false;
+        if (!g || !isRealSavedGameInTodaySubfolder(g, todayKey)) return false;
         if (!isAdmin && currentUser && !isGameOfOperator(g, currentUser)) return false;
         const gameIs90 = g.mode === '90' || g.sheetType === 'traditional-90';
         if (isBingo90 !== gameIs90) return false;
-        return getGameNormalizedDateKey(g) === todayKey;
+        return true;
       })
       .sort((a, b) => (b.round || 0) - (a.round || 0));
   }, [savedGamesList, currentUser, isAdmin, activeSheetType, settings.mode]);
@@ -568,37 +473,33 @@ export default function App() {
     const unsubscribeFirestore = subscribeToSavedGamesFirestore((remoteGames) => {
       setSavedGamesList(remoteGames);
 
-      if (currentUser) {
-        const todayKey = getCurrentLocalDateKey();
-        const myTodayGames = remoteGames.filter(
-          (g) =>
-            g &&
-            typeof g.round === 'number' &&
-            g.round >= 1 &&
-            isGameOfOperator(g, currentUser) &&
-            getGameNormalizedDateKey(g) === todayKey
-        );
+      const todayKey = getCurrentLocalDateKey();
+      const myTodayGames = remoteGames.filter(
+        (g) =>
+          g &&
+          isRealSavedGameInTodaySubfolder(g, todayKey) &&
+          (isAdmin || !currentUser || isGameOfOperator(g, currentUser))
+      );
 
-        if (myTodayGames.length > 0) {
-          const maxTodayRound = Math.max(0, ...myTodayGames.map((g) => g.round || 0));
-          if (drawnBallsRef.current.length === 0) {
-            setCurrentMatchRound((prev) => Math.max(prev, maxTodayRound + 1));
-          }
-
-          const myToday75 = myTodayGames
-            .filter((g) => g.mode !== '90' && g.sheetType !== 'traditional-90' && g.ballNumber > 0)
-            .sort((a, b) => (a.round || 0) - (b.round || 0));
-          setGameSequence(myToday75);
-
-          const myToday90 = myTodayGames
-            .filter((g) => (g.mode === '90' || g.sheetType === 'traditional-90') && g.ballNumber > 0)
-            .sort((a, b) => (a.round || 0) - (b.round || 0));
-          setGameSequence90(myToday90);
-        } else {
-          // If no games saved today yet (or all deleted), clear sequence
-          setGameSequence([]);
-          setGameSequence90([]);
+      if (myTodayGames.length > 0) {
+        const maxTodayRound = Math.max(0, ...myTodayGames.map((g) => g.round || 0));
+        if (drawnBallsRef.current.length === 0) {
+          setCurrentMatchRound((prev) => Math.max(prev, maxTodayRound + 1));
         }
+
+        const myToday75 = myTodayGames
+          .filter((g) => g.mode !== '90' && g.sheetType !== 'traditional-90')
+          .sort((a, b) => (a.round || 0) - (b.round || 0));
+        setGameSequence(myToday75);
+
+        const myToday90 = myTodayGames
+          .filter((g) => g.mode === '90' || g.sheetType === 'traditional-90')
+          .sort((a, b) => (a.round || 0) - (b.round || 0));
+        setGameSequence90(myToday90);
+      } else {
+        // If no games saved today yet (or all cleared/deleted), keep sequence empty
+        setGameSequence([]);
+        setGameSequence90([]);
       }
     });
 
@@ -607,7 +508,7 @@ export default function App() {
       window.removeEventListener('storage', handleSavedGamesUpdated);
       unsubscribeFirestore();
     };
-  }, [refreshSavedGamesList, currentUser]);
+  }, [refreshSavedGamesList, currentUser, isAdmin]);
 
   // Real-time calculation of current sheet financials for the active game
   const currentGameFinancials = useMemo(() => {
@@ -622,7 +523,7 @@ export default function App() {
 
   const handleAddSequenceItem = useCallback(
     (ballNumber: number, rowLeader?: number, ternaBallOrPlayer?: number | string) => {
-      // Discard invalid ball numbers or 0 to prevent ghost 0s in sequence
+      // Discard invalid ball numbers or 0 to prevent ghost 0s
       if (!ballNumber || ballNumber <= 0) return;
 
       const isBingo90 = activeSheetType === 'traditional-90' || settings.mode === '90';
@@ -633,8 +534,6 @@ export default function App() {
           ? ((ballNumber - 1) % 30) + 1
           : ((ballNumber - 1) % 15) + 1;
 
-      const letter = !isBingo90 ? getBingo75Letter(ballNumber) : undefined;
-      const ternaBall = typeof ternaBallOrPlayer === 'number' ? ternaBallOrPlayer : undefined;
       const winningPlayerName = typeof ternaBallOrPlayer === 'string' ? ternaBallOrPlayer : undefined;
 
       setLastWinningBall(ballNumber);
@@ -646,60 +545,10 @@ export default function App() {
       setCompletedRowLeaders((prev) =>
         prev.includes(calcLeader) ? prev : [...prev, calcLeader]
       );
-
-      const drawnNumbersPlayed = drawnBallsRef.current.map((b) => b.number);
-      if (!drawnNumbersPlayed.includes(ballNumber)) {
-        drawnNumbersPlayed.push(ballNumber);
-      }
-
-      const elapsedSec = getMatchElapsedSeconds();
-      const newItem = buildCompleteGameSequenceItem({
-        round: currentMatchRound,
-        ballNumber,
-        letter,
-        rowLeader: calcLeader,
-        winningPlayerName,
-        mode: isBingo90 ? '90' : '75',
-        sheetType: activeSheetType,
-        durationSeconds: elapsedSec > 0 ? elapsedSec : 180,
-        drawnBallsPlayed: drawnNumbersPlayed,
-        operatorUid: currentUser?.id,
-        operatorName: currentUser?.name || 'Operadora',
-        operatorEmail: currentUser?.email || '',
-      });
-
-      if (ternaBall !== undefined) {
-        newItem.ternaBall = ternaBall;
-      }
-
-      // ONLY update manual game sequence state - NEVER create ghost saved games!
-      if (isBingo90) {
-        setGameSequence90((prev) => {
-          const updated = [...prev.filter((i) => i.ballNumber > 0), newItem];
-          try {
-            const opKey = getOperatorStorageKey(STORAGE_KEY_SEQUENCE_90, currentUser);
-            localStorage.setItem(opKey, JSON.stringify(updated));
-            localStorage.setItem(STORAGE_KEY_SEQUENCE_90, JSON.stringify(updated));
-          } catch (err) {
-            console.warn('Error saving sequence 90 item:', err);
-          }
-          return updated;
-        });
-      } else {
-        setGameSequence((prev) => {
-          const updated = [...prev.filter((i) => i.ballNumber > 0), newItem];
-          try {
-            const opKey = getOperatorStorageKey(STORAGE_KEY_SEQUENCE_75, currentUser);
-            localStorage.setItem(opKey, JSON.stringify(updated));
-            localStorage.setItem(STORAGE_KEY_SEQUENCE_75, JSON.stringify(updated));
-          } catch (err) {
-            console.warn('Error saving sequence 75 item:', err);
-          }
-          return updated;
-        });
-      }
+      // Do NOT add unsaved/invented items to gameSequence or gameSequence90;
+      // games ONLY appear in the right sequence bar when manually saved into today's subfolder.
     },
-    [settings.mode, activeSheetType, getMatchElapsedSeconds, currentMatchRound, currentUser]
+    [settings.mode, activeSheetType]
   );
 
   const isArchivingNewGameRef = useRef<boolean>(false);

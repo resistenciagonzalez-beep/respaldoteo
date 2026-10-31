@@ -159,6 +159,7 @@ function initConnectionMonitor(): void {
 }
 
 const STORAGE_KEY_DELETED_GAME_IDS = 'bingo_deleted_game_ids_v1';
+const STORAGE_KEY_CLEARED_SEQUENCE_BAR_IDS = 'bingo_cleared_sequence_bar_ids_v1';
 const ADMIN_EMAILS_LIST = [
   'admin@bolillerobingo.com',
   'resistenciagonzalez@gmail.com',
@@ -181,11 +182,37 @@ const deletedGameIdsSet: Set<string> = (() => {
   return new Set<string>();
 })();
 
+const clearedSequenceBarIdsSet: Set<string> = (() => {
+  if (typeof window === 'undefined') return new Set<string>();
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_CLEARED_SEQUENCE_BAR_IDS);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return new Set<string>(parsed.filter((id): id is string => typeof id === 'string'));
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return new Set<string>();
+})();
+
 function persistDeletedGameIds(): void {
   if (typeof window === 'undefined') return;
   try {
     const arr = Array.from(deletedGameIdsSet).slice(-500);
     safeSetItem(STORAGE_KEY_DELETED_GAME_IDS, JSON.stringify(arr));
+  } catch {
+    // ignore
+  }
+}
+
+function persistClearedSequenceBarIds(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const arr = Array.from(clearedSequenceBarIdsSet).slice(-500);
+    safeSetItem(STORAGE_KEY_CLEARED_SEQUENCE_BAR_IDS, JSON.stringify(arr));
   } catch {
     // ignore
   }
@@ -515,6 +542,76 @@ export function extractCurrentSubfolderDate(game: Partial<GameSequenceItem>): st
  */
 export function getGameNormalizedDateKey(game: GameSequenceItem): string {
   return extractGameExactDate(game);
+}
+
+/**
+ * Extracts an explicit YYYY-MM-DD date from a game WITHOUT falling back to today's date.
+ * Returns null if the game object lacks any explicit date metadata.
+ */
+export function hasExplicitGameDateKey(
+  game: Partial<GameSequenceItem> | null | undefined
+): string | null {
+  if (!game) return null;
+
+  const fromDaily = parseDateStringToDateKey(game.dailyDate);
+  if (fromDaily) return fromDaily;
+
+  const fromSubfolder = parseDateStringToDateKey(game.subfolderDay);
+  if (fromSubfolder) return fromSubfolder;
+
+  if (game.folderPath && typeof game.folderPath === 'string') {
+    const parts = game.folderPath.split('/');
+    const lastSegment = parts[parts.length - 1];
+    const fromFolderPath = parseDateStringToDateKey(lastSegment);
+    if (fromFolderPath) return fromFolderPath;
+  }
+
+  const fromFormatted = parseDateStringToDateKey(game.dateFormatted);
+  if (fromFormatted) return fromFormatted;
+
+  const fromShiftDate = parseDateStringToDateKey(game.shiftDate);
+  if (fromShiftDate) return fromShiftDate;
+
+  if (game.id && typeof game.id === 'string') {
+    const idDateMatch = game.id.match(/(\d{4}-\d{2}-\d{2})/);
+    if (idDateMatch && idDateMatch[1]) {
+      return idDateMatch[1];
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Strictly validates that a game is a real saved game stored in today's subfolder (not an invented or dateless item,
+ * and not deleted or cleared from the right sequence bar).
+ */
+export function isRealSavedGameInTodaySubfolder(
+  game: Partial<GameSequenceItem> | null | undefined,
+  todayKey = getCurrentLocalDateKey()
+): boolean {
+  if (!game || !game.id || typeof game.id !== 'string') return false;
+  if (typeof game.round !== 'number' || game.round < 1) return false;
+  if (deletedGameIdsSet.has(game.id) || clearedSequenceBarIdsSet.has(game.id)) return false;
+
+  const explicitDate = hasExplicitGameDateKey(game);
+  if (!explicitDate || explicitDate !== todayKey) return false;
+
+  const inTodaySubfolder =
+    game.subfolderDay === todayKey ||
+    (typeof game.folderPath === 'string' && game.folderPath.endsWith(`/${todayKey}`));
+  if (!inTodaySubfolder) return false;
+
+  // Must be a genuinely saved game record in the subfolder (with a saved sheet snapshot or subfolder record), never a fake sequence-only item
+  const hasSavedSnapshot = Boolean(
+    game.sheet75Snapshot ||
+      game.sheet90Snapshot ||
+      (game.playerSummarySnapshot && Array.isArray(game.playerSummarySnapshot)) ||
+      (game.sequenceSnapshot && typeof game.sequenceSnapshot === 'object')
+  );
+  if (!hasSavedSnapshot) return false;
+
+  return true;
 }
 
 /**
@@ -918,7 +1015,11 @@ export async function reorganizeAndHealAllStoredGames(): Promise<{
  */
 export function getSavedGamesGallery(): GameSequenceItem[] {
   if (hasSyncedWithFirestore || firestoreGamesMemoryStore.size > 0) {
-    return sortGamesChronologicallyDesc(Array.from(firestoreGamesMemoryStore.values()));
+    return sortGamesChronologicallyDesc(
+      Array.from(firestoreGamesMemoryStore.values()).filter(
+        (g) => g && g.id && !deletedGameIdsSet.has(g.id) && hasExplicitGameDateKey(g) !== null
+      )
+    );
   }
 
   if (typeof window === 'undefined') return [];
@@ -929,7 +1030,14 @@ export function getSavedGamesGallery(): GameSequenceItem[] {
       const parsed: GameSequenceItem[] = JSON.parse(raw);
       if (Array.isArray(parsed)) {
         const valid = parsed
-          .filter((item) => item && typeof item.round === 'number' && item.round >= 1)
+          .filter(
+            (item) =>
+              item &&
+              typeof item.round === 'number' &&
+              item.round >= 1 &&
+              (!item.id || !deletedGameIdsSet.has(item.id)) &&
+              hasExplicitGameDateKey(item) !== null
+          )
           .map((item) => normalizeGameFolderMetadata(item, item.id).normalizedGame);
         return sortGamesChronologicallyDesc(valid);
       }
@@ -1374,6 +1482,10 @@ export async function saveGameUnified(
     deletedGameIdsSet.delete(docId);
     persistDeletedGameIds();
   }
+  if (clearedSequenceBarIdsSet.has(docId)) {
+    clearedSequenceBarIdsSet.delete(docId);
+    persistClearedSequenceBarIds();
+  }
   updateSyncStatus({ status: 'saving', activeSaveId: docId });
   await saveGameToIndexedDB(normalizedItem);
   saveGameToGalleryCache(normalizedItem);
@@ -1661,6 +1773,89 @@ export async function deleteGamePermanently(idOrItem: string | GameSequenceItem)
   } catch (e) {
     console.error('Error deleting game:', e);
     return false;
+  }
+}
+
+/**
+ * Empties the right-hand sequence bar for today's games (works for both Operators and Admins).
+ * Marks all current today games as cleared from the right sequence bar, purges local sequence keys,
+ * and if the user is an Admin, also deletes them from today's subfolder.
+ */
+export async function clearRightSequenceBarToday(
+  gamesToClear: GameSequenceItem[] = [],
+  modeFilter?: '75' | '90'
+): Promise<void> {
+  const todayKey = getCurrentLocalDateKey();
+  const idsToClear = new Set<string>();
+  const itemsToClear: GameSequenceItem[] = [];
+
+  for (const g of gamesToClear) {
+    if (g && g.id) {
+      idsToClear.add(g.id);
+      itemsToClear.push(g);
+    }
+  }
+
+  for (const [docId, g] of firestoreGamesMemoryStore.entries()) {
+    if (!g) continue;
+    const is90 = g.mode === '90' || g.sheetType === 'traditional-90';
+    const matchesMode =
+      !modeFilter || (modeFilter === '90' ? is90 : !is90);
+    if (matchesMode && getGameNormalizedDateKey(g) === todayKey) {
+      idsToClear.add(docId);
+      if (g.id) idsToClear.add(g.id);
+      itemsToClear.push(g);
+    }
+  }
+
+  for (const id of idsToClear) {
+    clearedSequenceBarIdsSet.add(id);
+  }
+  persistClearedSequenceBarIds();
+  purgeDeletedGamesFromLocalSequenceBars(idsToClear, itemsToClear);
+
+  if (typeof window !== 'undefined') {
+    try {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const k = localStorage.key(i);
+        if (
+          k &&
+          (k.startsWith(STORAGE_KEY_SEQUENCE_75) ||
+            k.startsWith(STORAGE_KEY_SEQUENCE_90) ||
+            k.startsWith('bingo_sheet_custom_sequence'))
+        ) {
+          localStorage.removeItem(k);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (isCurrentSessionAdmin() && idsToClear.size > 0) {
+    await executeBatchGameDeletion(idsToClear, itemsToClear);
+  } else {
+    const allGames = sortGamesChronologicallyDesc(
+      Array.from(firestoreGamesMemoryStore.values())
+    );
+    cachedSortedGames = allGames;
+    savedGamesSubscribers.forEach((sub) => {
+      try {
+        sub(allGames);
+      } catch {
+        // ignore
+      }
+    });
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('bingo_saved_games_updated', {
+          detail: {
+            total: allGames.length,
+            deletedIds: Array.from(idsToClear),
+          },
+        })
+      );
+    }
   }
 }
 
