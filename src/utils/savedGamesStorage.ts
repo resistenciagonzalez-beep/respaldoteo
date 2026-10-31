@@ -82,6 +82,11 @@ import {
   recordDiagnosticSaveLog,
   getDiagnosticSaveLogs,
 } from './offlinePersistenceEngine';
+import {
+  STORAGE_KEY_CLEARED_SEQUENCE_BAR_IDS,
+  STORAGE_KEY_DELETED_GAME_IDS,
+  storageState,
+} from './storageState';
 
 export { getDiagnosticSaveLogs };
 export type { SyncStatusState, SyncStatusType, QueueTaskDiagnosticItem };
@@ -95,44 +100,20 @@ export const STORAGE_KEY_SEQUENCE_90 = 'bingo_90_game_sequence_history';
  * IndexedDB is the primary local persistence engine (never loses a game even offline).
  * Firestore is the real-time cloud synchronization & backup layer.
  */
-const firestoreGamesMemoryStore = new Map<string, GameSequenceItem>();
-let hasSyncedWithFirestore = false;
-let hasBootstrappedIndexedDB = false;
 
 // ============================================================================
 // SYNC STATUS, CONNECTION MONITOR & SAVE QUEUE STATE
 // ============================================================================
 
-const syncQueueMap = new Map<string, QueuedSaveTask>();
-let isProcessingQueue = false;
-let queueLockAcquiredAt = 0;
-let reprocessRequested = false;
-let retryTimerHandle: ReturnType<typeof setTimeout> | null = null;
 const QUEUE_WATCHDOG_TIMEOUT_MS = 20000;
 
-let currentSyncState: SyncStatusState = {
-  status: 'synced',
-  pendingCount: 0,
-  syncingCount: 0,
-  syncedCount: 0,
-  errorCount: 0,
-  activeSaveId: null,
-  lastError: null,
-  lastErrorAt: null,
-  isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
-  isFirestoreReachable: true,
-  lastSyncedAt: null,
-  queueItems: [],
-};
-
-const syncStatusSubscribers = new Set<(state: SyncStatusState) => void>();
 
 function notifySyncStatusSubscribers(): void {
   const snapshot: SyncStatusState = {
-    ...currentSyncState,
-    queueItems: [...currentSyncState.queueItems],
+    ...storageState.currentSyncState,
+    queueItems: [...storageState.currentSyncState.queueItems],
   };
-  syncStatusSubscribers.forEach((cb) => {
+  storageState.syncStatusSubscribers.forEach((cb) => {
     try {
       cb(snapshot);
     } catch (err) {
@@ -149,14 +130,14 @@ function computeQueueDiagnostics(): {
   queueItems: QueueTaskDiagnosticItem[];
   derivedStatus: SyncStatusType;
 } {
-  const tasks = Array.from(syncQueueMap.values()).sort((a, b) => a.enqueuedAt - b.enqueuedAt);
+  const tasks = Array.from(storageState.syncQueueMap.values()).sort((a, b) => a.enqueuedAt - b.enqueuedAt);
   let pendingCount = 0;
   let syncingCount = 0;
   let errorCount = 0;
 
   const queueItems: QueueTaskDiagnosticItem[] = tasks.map((t) => {
     const effectiveStatus =
-      t.status === 'syncing' && (!isProcessingQueue || currentSyncState.activeSaveId !== t.gameId)
+      t.status === 'syncing' && (!storageState.isProcessingQueue || storageState.currentSyncState.activeSaveId !== t.gameId)
         ? t.lastError
           ? 'error'
           : 'pending'
@@ -180,14 +161,14 @@ function computeQueueDiagnostics(): {
   });
 
   let syncedCount = 0;
-  firestoreGamesMemoryStore.forEach((g, id) => {
-    if (g && !deletedGameIdsSet.has(id) && !syncQueueMap.has(id)) {
+  storageState.firestoreGamesMemoryStore.forEach((g, id) => {
+    if (g && !storageState.deletedGameIdsSet.has(id) && !storageState.syncQueueMap.has(id)) {
       syncedCount++;
     }
   });
 
   let derivedStatus: SyncStatusType = 'synced';
-  if (isProcessingQueue && currentSyncState.activeSaveId && syncingCount > 0) {
+  if (storageState.isProcessingQueue && storageState.currentSyncState.activeSaveId && syncingCount > 0) {
     derivedStatus = 'saving';
   } else if (errorCount > 0) {
     derivedStatus = 'error';
@@ -209,28 +190,28 @@ function computeQueueDiagnostics(): {
 
 function updateSyncStatus(partial: Partial<SyncStatusState>): void {
   if ('activeSaveId' in partial) {
-    currentSyncState.activeSaveId = partial.activeSaveId ?? null;
+    storageState.currentSyncState.activeSaveId = partial.activeSaveId ?? null;
   }
   if ('lastError' in partial) {
-    currentSyncState.lastError = partial.lastError ?? null;
+    storageState.currentSyncState.lastError = partial.lastError ?? null;
   }
   if ('lastErrorAt' in partial) {
-    currentSyncState.lastErrorAt = partial.lastErrorAt ?? null;
+    storageState.currentSyncState.lastErrorAt = partial.lastErrorAt ?? null;
   }
   if ('isOnline' in partial && typeof partial.isOnline === 'boolean') {
-    currentSyncState.isOnline = partial.isOnline;
+    storageState.currentSyncState.isOnline = partial.isOnline;
   }
   if ('isFirestoreReachable' in partial && typeof partial.isFirestoreReachable === 'boolean') {
-    currentSyncState.isFirestoreReachable = partial.isFirestoreReachable;
+    storageState.currentSyncState.isFirestoreReachable = partial.isFirestoreReachable;
   }
   if ('lastSyncedAt' in partial) {
-    currentSyncState.lastSyncedAt = partial.lastSyncedAt ?? null;
+    storageState.currentSyncState.lastSyncedAt = partial.lastSyncedAt ?? null;
   }
 
   const diag = computeQueueDiagnostics();
 
-  currentSyncState = {
-    ...currentSyncState,
+  storageState.currentSyncState = {
+    ...storageState.currentSyncState,
     pendingCount: diag.pendingCount,
     syncingCount: diag.syncingCount,
     syncedCount: diag.syncedCount,
@@ -240,8 +221,8 @@ function updateSyncStatus(partial: Partial<SyncStatusState>): void {
   };
 
   // Safety guarantee: never stay in 'saving' if queue is not actively processing a task
-  if (currentSyncState.status === 'saving' && (!isProcessingQueue || !currentSyncState.activeSaveId)) {
-    currentSyncState.status = diag.errorCount > 0 ? 'error' : diag.pendingCount > 0 ? 'pending' : 'synced';
+  if (storageState.currentSyncState.status === 'saving' && (!storageState.isProcessingQueue || !storageState.currentSyncState.activeSaveId)) {
+    storageState.currentSyncState.status = diag.errorCount > 0 ? 'error' : diag.pendingCount > 0 ? 'pending' : 'synced';
   }
 
   notifySyncStatusSubscribers();
@@ -250,7 +231,7 @@ function updateSyncStatus(partial: Partial<SyncStatusState>): void {
 export function getSyncStatusState(): SyncStatusState {
   const diag = computeQueueDiagnostics();
   return {
-    ...currentSyncState,
+    ...storageState.currentSyncState,
     pendingCount: diag.pendingCount,
     syncingCount: diag.syncingCount,
     syncedCount: diag.syncedCount,
@@ -260,14 +241,14 @@ export function getSyncStatusState(): SyncStatusState {
 }
 
 export function subscribeToSyncStatus(callback: (state: SyncStatusState) => void): () => void {
-  syncStatusSubscribers.add(callback);
+  storageState.syncStatusSubscribers.add(callback);
   try {
     callback(getSyncStatusState());
   } catch (e) {
     console.warn('Initial sync status callback error:', e);
   }
   return () => {
-    syncStatusSubscribers.delete(callback);
+    storageState.syncStatusSubscribers.delete(callback);
   };
 }
 
@@ -276,22 +257,22 @@ export function subscribeToSyncStatus(callback: (state: SyncStatusState) => void
  * releases any stale lock, and immediately processes all pending games.
  */
 export async function retryAllFailedAndPendingGamesNow(): Promise<void> {
-  if (retryTimerHandle) {
-    clearTimeout(retryTimerHandle);
-    retryTimerHandle = null;
+  if (storageState.retryTimerHandle) {
+    clearTimeout(storageState.retryTimerHandle);
+    storageState.retryTimerHandle = null;
   }
-  if (isProcessingQueue && Date.now() - queueLockAcquiredAt > 8000) {
-    isProcessingQueue = false;
-    queueLockAcquiredAt = 0;
+  if (storageState.isProcessingQueue && Date.now() - storageState.queueLockAcquiredAt > 8000) {
+    storageState.isProcessingQueue = false;
+    storageState.queueLockAcquiredAt = 0;
   }
   const now = Date.now();
-  for (const [gameId, task] of Array.from(syncQueueMap.entries())) {
+  for (const [gameId, task] of Array.from(storageState.syncQueueMap.entries())) {
     const updated: QueuedSaveTask = {
       ...task,
-      status: task.status === 'syncing' && isProcessingQueue ? 'syncing' : 'pending',
+      status: task.status === 'syncing' && storageState.isProcessingQueue ? 'syncing' : 'pending',
       nextRetryAt: now,
     };
-    syncQueueMap.set(gameId, updated);
+    storageState.syncQueueMap.set(gameId, updated);
     void putQueueTaskInIndexedDB(updated);
   }
   updateSyncStatus({});
@@ -299,11 +280,10 @@ export async function retryAllFailedAndPendingGamesNow(): Promise<void> {
 }
 
 // Connection Monitor Setup (detects online, offline, reconnection & Watchdog)
-let connectionMonitorInitialized = false;
 
 function initConnectionMonitor(): void {
-  if (connectionMonitorInitialized || typeof window === 'undefined') return;
-  connectionMonitorInitialized = true;
+  if (storageState.connectionMonitorInitialized || typeof window === 'undefined') return;
+  storageState.connectionMonitorInitialized = true;
 
   window.addEventListener('online', () => {
     console.info('[CONNECTION_MONITOR] Conexión a Internet restaurada. Sincronizando cola pendiente...');
@@ -321,13 +301,13 @@ function initConnectionMonitor(): void {
   // Periodic Watchdog every 5 seconds: releases any stuck lock and triggers due retries
   setInterval(() => {
     const now = Date.now();
-    if (isProcessingQueue && queueLockAcquiredAt > 0 && now - queueLockAcquiredAt > QUEUE_WATCHDOG_TIMEOUT_MS) {
+    if (storageState.isProcessingQueue && storageState.queueLockAcquiredAt > 0 && now - storageState.queueLockAcquiredAt > QUEUE_WATCHDOG_TIMEOUT_MS) {
       console.warn('[SYNC_WATCHDOG] Liberando bloqueo de cola por exceso de tiempo (>20s).');
-      isProcessingQueue = false;
-      queueLockAcquiredAt = 0;
-      for (const [id, t] of Array.from(syncQueueMap.entries())) {
+      storageState.isProcessingQueue = false;
+      storageState.queueLockAcquiredAt = 0;
+      for (const [id, t] of Array.from(storageState.syncQueueMap.entries())) {
         if (t.status === 'syncing') {
-          syncQueueMap.set(id, {
+          storageState.syncQueueMap.set(id, {
             ...t,
             status: 'error',
             lastError: t.lastError || 'Tiempo de espera agotado (Watchdog)',
@@ -338,8 +318,8 @@ function initConnectionMonitor(): void {
       updateSyncStatus({ activeSaveId: null });
     }
 
-    if (!isProcessingQueue && syncQueueMap.size > 0) {
-      const hasReadyTask = Array.from(syncQueueMap.values()).some((t) => t.nextRetryAt <= now);
+    if (!storageState.isProcessingQueue && storageState.syncQueueMap.size > 0) {
+      const hasReadyTask = Array.from(storageState.syncQueueMap.values()).some((t) => t.nextRetryAt <= now);
       if (hasReadyTask && (typeof navigator === 'undefined' || navigator.onLine)) {
         void processSaveQueue();
       }
@@ -350,50 +330,17 @@ function initConnectionMonitor(): void {
   void bootstrapOfflineFirstEngine();
 }
 
-const STORAGE_KEY_DELETED_GAME_IDS = 'bingo_deleted_game_ids_v1';
-const STORAGE_KEY_CLEARED_SEQUENCE_BAR_IDS = 'bingo_cleared_sequence_bar_ids_v1';
 const ADMIN_EMAILS_LIST = [
   'admin@bolillerobingo.com',
   'resistenciagonzalez@gmail.com',
   'genesis.vargas0619@gmail.com',
 ];
 
-const deletedGameIdsSet: Set<string> = (() => {
-  if (typeof window === 'undefined') return new Set<string>();
-  try {
-    const raw = safeGetItem(STORAGE_KEY_DELETED_GAME_IDS);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        return new Set<string>(parsed.filter((id): id is string => typeof id === 'string'));
-      }
-    }
-  } catch {
-    // ignore
-  }
-  return new Set<string>();
-})();
-
-const clearedSequenceBarIdsSet: Set<string> = (() => {
-  if (typeof window === 'undefined') return new Set<string>();
-  try {
-    const raw = safeGetItem(STORAGE_KEY_CLEARED_SEQUENCE_BAR_IDS);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        return new Set<string>(parsed.filter((id): id is string => typeof id === 'string'));
-      }
-    }
-  } catch {
-    // ignore
-  }
-  return new Set<string>();
-})();
 
 function persistDeletedGameIds(): void {
   if (typeof window === 'undefined') return;
   try {
-    const arr = Array.from(deletedGameIdsSet).slice(-500);
+    const arr = Array.from(storageState.deletedGameIdsSet).slice(-500);
     safeSetItem(STORAGE_KEY_DELETED_GAME_IDS, JSON.stringify(arr));
   } catch {
     // ignore
@@ -403,7 +350,7 @@ function persistDeletedGameIds(): void {
 function persistClearedSequenceBarIds(): void {
   if (typeof window === 'undefined') return;
   try {
-    const arr = Array.from(clearedSequenceBarIdsSet).slice(-500);
+    const arr = Array.from(storageState.clearedSequenceBarIdsSet).slice(-500);
     safeSetItem(STORAGE_KEY_CLEARED_SEQUENCE_BAR_IDS, JSON.stringify(arr));
   } catch {
     // ignore
@@ -433,8 +380,8 @@ export function isCurrentSessionAdmin(): boolean {
 }
 
 async function bootstrapOfflineFirstEngine(): Promise<void> {
-  if (hasBootstrappedIndexedDB || typeof window === 'undefined') return;
-  hasBootstrappedIndexedDB = true;
+  if (storageState.hasBootstrappedIndexedDB || typeof window === 'undefined') return;
+  storageState.hasBootstrappedIndexedDB = true;
 
   try {
     // 0. Ensure automatic migration from localStorage to IndexedDB and KV hydration finishes first
@@ -447,7 +394,7 @@ async function bootstrapOfflineFirstEngine(): Promise<void> {
         const parsed = JSON.parse(delRaw);
         if (Array.isArray(parsed)) {
           parsed.forEach((id) => {
-            if (typeof id === 'string') deletedGameIdsSet.add(id);
+            if (typeof id === 'string') storageState.deletedGameIdsSet.add(id);
           });
         }
       }
@@ -456,7 +403,7 @@ async function bootstrapOfflineFirstEngine(): Promise<void> {
         const parsed = JSON.parse(clrRaw);
         if (Array.isArray(parsed)) {
           parsed.forEach((id) => {
-            if (typeof id === 'string') clearedSequenceBarIdsSet.add(id);
+            if (typeof id === 'string') storageState.clearedSequenceBarIdsSet.add(id);
           });
         }
       }
@@ -468,28 +415,28 @@ async function bootstrapOfflineFirstEngine(): Promise<void> {
     const localGames = await getAllGamesFromIndexedDB();
     for (const g of localGames) {
       if (g && g.id) {
-        if (deletedGameIdsSet.has(g.id)) {
+        if (storageState.deletedGameIdsSet.has(g.id)) {
           void deleteGameFromIndexedDB(g.id);
           continue;
         }
         const { normalizedGame } = normalizeGameFolderMetadata(g, g.id);
-        if (deletedGameIdsSet.has(normalizedGame.id!)) {
+        if (storageState.deletedGameIdsSet.has(normalizedGame.id!)) {
           void deleteGameFromIndexedDB(normalizedGame.id!);
           continue;
         }
-        if (!firestoreGamesMemoryStore.has(normalizedGame.id!)) {
-          firestoreGamesMemoryStore.set(normalizedGame.id!, normalizedGame);
+        if (!storageState.firestoreGamesMemoryStore.has(normalizedGame.id!)) {
+          storageState.firestoreGamesMemoryStore.set(normalizedGame.id!, normalizedGame);
         }
       }
     }
 
     if (localGames.length > 0) {
-      cachedSortedGames = sortGamesChronologicallyDesc(
-        Array.from(firestoreGamesMemoryStore.values())
+      storageState.cachedSortedGames = sortGamesChronologicallyDesc(
+        Array.from(storageState.firestoreGamesMemoryStore.values())
       );
-      savedGamesSubscribers.forEach((sub) => {
+      storageState.savedGamesSubscribers.forEach((sub) => {
         try {
-          sub(cachedSortedGames);
+          sub(storageState.cachedSortedGames);
         } catch {
           // ignore
         }
@@ -500,18 +447,18 @@ async function bootstrapOfflineFirstEngine(): Promise<void> {
     const pendingTasks = await getAllQueueTasksFromIndexedDB();
     for (const task of pendingTasks) {
       if (task && task.gameId && task.game) {
-        syncQueueMap.set(task.gameId, {
+        storageState.syncQueueMap.set(task.gameId, {
           ...task,
           status: 'pending',
           nextRetryAt: Date.now(),
         });
         const { normalizedGame } = normalizeGameFolderMetadata(task.game, task.gameId);
-        firestoreGamesMemoryStore.set(task.gameId, normalizedGame);
+        storageState.firestoreGamesMemoryStore.set(task.gameId, normalizedGame);
       }
     }
 
     updateSyncStatus({});
-    if (syncQueueMap.size > 0) {
+    if (storageState.syncQueueMap.size > 0) {
       void processSaveQueue();
     }
   } catch (err) {
@@ -561,7 +508,7 @@ export function isRealSavedGameInTodaySubfolder(
 ): boolean {
   if (!game || !game.id || typeof game.id !== 'string') return false;
   if (typeof game.round !== 'number' || game.round < 1) return false;
-  if (deletedGameIdsSet.has(game.id) || clearedSequenceBarIdsSet.has(game.id)) return false;
+  if (storageState.deletedGameIdsSet.has(game.id) || storageState.clearedSequenceBarIdsSet.has(game.id)) return false;
 
   const explicitDate = hasExplicitGameDateKey(game);
   if (!explicitDate || explicitDate !== todayKey) return false;
@@ -601,18 +548,14 @@ function syncTemporaryLocalCache(games: GameSequenceItem[]): void {
 // REAL-TIME FIRESTORE SUBSCRIPTION (MULTIPLEXED SINGLETON)
 // ============================================================================
 
-const inFlightAutoHealIds = new Set<string>();
-const savedGamesSubscribers = new Set<(games: GameSequenceItem[]) => void>();
-let activeFirestoreUnsubscribe: (() => void) | null = null;
-let cachedSortedGames: GameSequenceItem[] = [];
 
 function ensureSharedSavedGamesListener(): void {
-  if (activeFirestoreUnsubscribe || typeof window === 'undefined') return;
+  if (storageState.activeFirestoreUnsubscribe || typeof window === 'undefined') return;
   initConnectionMonitor();
 
   try {
     const q = collection(db, 'saved_games');
-    activeFirestoreUnsubscribe = onSnapshot(
+    storageState.activeFirestoreUnsubscribe = onSnapshot(
       q,
       (snapshot) => {
         updateSyncStatus({ isFirestoreReachable: true });
@@ -625,8 +568,8 @@ function ensureSharedSavedGamesListener(): void {
           const docKey = docSnap.id;
 
           // If this document was permanently deleted by an Admin, never resurrect it and ensure remote cleanup
-          if (deletedGameIdsSet.has(docKey) || (rawData.id && deletedGameIdsSet.has(rawData.id))) {
-            firestoreGamesMemoryStore.delete(docKey);
+          if (storageState.deletedGameIdsSet.has(docKey) || (rawData.id && storageState.deletedGameIdsSet.has(rawData.id))) {
+            storageState.firestoreGamesMemoryStore.delete(docKey);
             void deleteGameFromIndexedDB(docKey);
             deleteDoc(doc(db, 'saved_games', docKey)).catch(() => {});
             return;
@@ -635,9 +578,9 @@ function ensureSharedSavedGamesListener(): void {
           remoteIds.add(docKey);
 
           // If this document is currently queued locally with newer changes, keep the local queued version in memory
-          const pendingTask = syncQueueMap.get(docKey);
+          const pendingTask = storageState.syncQueueMap.get(docKey);
           if (pendingTask && pendingTask.status !== 'synced') {
-            firestoreGamesMemoryStore.set(docKey, pendingTask.game);
+            storageState.firestoreGamesMemoryStore.set(docKey, pendingTask.game);
             return;
           }
 
@@ -646,8 +589,8 @@ function ensureSharedSavedGamesListener(): void {
             docKey
           );
 
-          if (isMisplaced && !inFlightAutoHealIds.has(docKey)) {
-            inFlightAutoHealIds.add(docKey);
+          if (isMisplaced && !storageState.inFlightAutoHealIds.has(docKey)) {
+            storageState.inFlightAutoHealIds.add(docKey);
             console.log(
               `[AUTO-CORRECTION] ${reason || 'Reorganización de subcarpeta'}. Partida ID: ${docKey}, Fecha exacta: ${normalizedGame.dailyDate}, Subcarpeta: ${normalizedGame.subfolderDay}, Ruta: ${normalizedGame.folderPath}`
             );
@@ -668,30 +611,30 @@ function ensureSharedSavedGamesListener(): void {
                 console.warn(`[AUTO-CORRECTION] Error syncing auto-healed game ${docKey}:`, err);
               })
               .finally(() => {
-                setTimeout(() => inFlightAutoHealIds.delete(docKey), 3000);
+                setTimeout(() => storageState.inFlightAutoHealIds.delete(docKey), 3000);
               });
           }
 
-          firestoreGamesMemoryStore.set(docKey, normalizedGame);
+          storageState.firestoreGamesMemoryStore.set(docKey, normalizedGame);
           void saveGameToIndexedDB(normalizedGame);
         });
 
         // Remove documents that were deleted remotely (unless they are currently in the local save queue)
-        for (const existingKey of Array.from(firestoreGamesMemoryStore.keys())) {
-          if (!remoteIds.has(existingKey) && !syncQueueMap.has(existingKey)) {
-            firestoreGamesMemoryStore.delete(existingKey);
+        for (const existingKey of Array.from(storageState.firestoreGamesMemoryStore.keys())) {
+          if (!remoteIds.has(existingKey) && !storageState.syncQueueMap.has(existingKey)) {
+            storageState.firestoreGamesMemoryStore.delete(existingKey);
           }
         }
 
-        hasSyncedWithFirestore = true;
-        cachedSortedGames = sortGamesChronologicallyDesc(
-          Array.from(firestoreGamesMemoryStore.values())
+        storageState.hasSyncedWithFirestore = true;
+        storageState.cachedSortedGames = sortGamesChronologicallyDesc(
+          Array.from(storageState.firestoreGamesMemoryStore.values())
         );
 
-        syncTemporaryLocalCache(cachedSortedGames);
-        savedGamesSubscribers.forEach((sub) => {
+        syncTemporaryLocalCache(storageState.cachedSortedGames);
+        storageState.savedGamesSubscribers.forEach((sub) => {
           try {
-            sub(cachedSortedGames);
+            sub(storageState.cachedSortedGames);
           } catch (cbErr) {
             console.warn('Error in saved_games subscriber callback:', cbErr);
           }
@@ -714,13 +657,13 @@ export function subscribeToSavedGamesFirestore(
     return () => {};
   }
 
-  savedGamesSubscribers.add(callback);
+  storageState.savedGamesSubscribers.add(callback);
   ensureSharedSavedGamesListener();
 
-  if (hasSyncedWithFirestore || firestoreGamesMemoryStore.size > 0) {
+  if (storageState.hasSyncedWithFirestore || storageState.firestoreGamesMemoryStore.size > 0) {
     try {
       callback(
-        sortGamesChronologicallyDesc(Array.from(firestoreGamesMemoryStore.values()))
+        sortGamesChronologicallyDesc(Array.from(storageState.firestoreGamesMemoryStore.values()))
       );
     } catch (e) {
       console.warn('Initial subscriber callback error:', e);
@@ -728,15 +671,14 @@ export function subscribeToSavedGamesFirestore(
   }
 
   return () => {
-    savedGamesSubscribers.delete(callback);
-    if (savedGamesSubscribers.size === 0 && activeFirestoreUnsubscribe) {
-      activeFirestoreUnsubscribe();
-      activeFirestoreUnsubscribe = null;
+    storageState.savedGamesSubscribers.delete(callback);
+    if (storageState.savedGamesSubscribers.size === 0 && storageState.activeFirestoreUnsubscribe) {
+      storageState.activeFirestoreUnsubscribe();
+      storageState.activeFirestoreUnsubscribe = null;
     }
   };
 }
 
-let isReorganizationRunning = false;
 
 /**
  * Scans all saved games in Firestore.
@@ -749,15 +691,15 @@ export async function reorganizeAndHealAllStoredGames(): Promise<{
   details: Array<{ id: string; round: number; oldSubfolder: string; newSubfolder: string; reason: string }>;
 }> {
   const details: Array<{ id: string; round: number; oldSubfolder: string; newSubfolder: string; reason: string }> = [];
-  if (isReorganizationRunning) {
+  if (storageState.isReorganizationRunning) {
     return {
-      totalChecked: firestoreGamesMemoryStore.size,
+      totalChecked: storageState.firestoreGamesMemoryStore.size,
       reorganizedCount: 0,
       details,
     };
   }
 
-  isReorganizationRunning = true;
+  storageState.isReorganizationRunning = true;
   let totalChecked = 0;
   let reorganizedCount = 0;
 
@@ -766,8 +708,8 @@ export async function reorganizeAndHealAllStoredGames(): Promise<{
     for (const docSnap of snap.docs) {
       const rawData = docSnap.data() as GameSequenceItem;
       const docKey = docSnap.id;
-      if (deletedGameIdsSet.has(docKey) || (rawData.id && deletedGameIdsSet.has(rawData.id))) {
-        firestoreGamesMemoryStore.delete(docKey);
+      if (storageState.deletedGameIdsSet.has(docKey) || (rawData.id && storageState.deletedGameIdsSet.has(rawData.id))) {
+        storageState.firestoreGamesMemoryStore.delete(docKey);
         void deleteGameFromIndexedDB(docKey);
         deleteDoc(doc(db, 'saved_games', docKey)).catch(() => {});
         continue;
@@ -795,7 +737,7 @@ export async function reorganizeAndHealAllStoredGames(): Promise<{
           `[REORGANIZACION_SUBCARPETAS] Partida #${normalizedGame.round} (${docKey}) movida de subcarpeta "${oldSubfolder}" a "${newSubfolder}" por fecha exacta.`
         );
 
-        inFlightAutoHealIds.add(docKey);
+        storageState.inFlightAutoHealIds.add(docKey);
         await setDoc(
           doc(db, 'saved_games', docKey),
           {
@@ -809,20 +751,20 @@ export async function reorganizeAndHealAllStoredGames(): Promise<{
           },
           { merge: true }
         ).finally(() => {
-          setTimeout(() => inFlightAutoHealIds.delete(docKey), 3000);
+          setTimeout(() => storageState.inFlightAutoHealIds.delete(docKey), 3000);
         });
 
-        firestoreGamesMemoryStore.set(docKey, normalizedGame);
+        storageState.firestoreGamesMemoryStore.set(docKey, normalizedGame);
         await saveGameToIndexedDB(normalizedGame);
       } else {
-        firestoreGamesMemoryStore.set(docKey, normalizedGame);
+        storageState.firestoreGamesMemoryStore.set(docKey, normalizedGame);
       }
     }
 
     const sortedGames = sortGamesChronologicallyDesc(
-      Array.from(firestoreGamesMemoryStore.values())
+      Array.from(storageState.firestoreGamesMemoryStore.values())
     );
-    cachedSortedGames = sortedGames;
+    storageState.cachedSortedGames = sortedGames;
     syncTemporaryLocalCache(sortedGames);
 
     if (typeof window !== 'undefined') {
@@ -835,7 +777,7 @@ export async function reorganizeAndHealAllStoredGames(): Promise<{
   } catch (err) {
     console.error('Error during reorganizeAndHealAllStoredGames:', err);
   } finally {
-    isReorganizationRunning = false;
+    storageState.isReorganizationRunning = false;
   }
 
   return { totalChecked, reorganizedCount, details };
@@ -845,10 +787,10 @@ export async function reorganizeAndHealAllStoredGames(): Promise<{
  * Returns all saved games from the authoritative Offline-First + Firestore memory store.
  */
 export function getSavedGamesGallery(): GameSequenceItem[] {
-  if (hasSyncedWithFirestore || firestoreGamesMemoryStore.size > 0) {
+  if (storageState.hasSyncedWithFirestore || storageState.firestoreGamesMemoryStore.size > 0) {
     return sortGamesChronologicallyDesc(
-      Array.from(firestoreGamesMemoryStore.values()).filter(
-        (g) => g && g.id && !deletedGameIdsSet.has(g.id) && hasExplicitGameDateKey(g) !== null
+      Array.from(storageState.firestoreGamesMemoryStore.values()).filter(
+        (g) => g && g.id && !storageState.deletedGameIdsSet.has(g.id) && hasExplicitGameDateKey(g) !== null
       )
     );
   }
@@ -866,7 +808,7 @@ export function getSavedGamesGallery(): GameSequenceItem[] {
               item &&
               typeof item.round === 'number' &&
               item.round >= 1 &&
-              (!item.id || !deletedGameIdsSet.has(item.id)) &&
+              (!item.id || !storageState.deletedGameIdsSet.has(item.id)) &&
               hasExplicitGameDateKey(item) !== null
           )
           .map((item) => normalizeGameFolderMetadata(item, item.id).normalizedGame);
@@ -922,7 +864,7 @@ function resolveExistingOrCanonicalDocId(
   );
 
   const hasExplicitExistingId =
-    Boolean(item.id) && firestoreGamesMemoryStore.has(item.id!);
+    Boolean(item.id) && storageState.firestoreGamesMemoryStore.has(item.id!);
 
   let chosenId: string;
   if (hasExplicitExistingId) {
@@ -1166,38 +1108,38 @@ async function writeAndVerifyGameInFirestore(
  * - Locks and activeSaveId are unconditionally released in the finally block.
  */
 export async function processSaveQueue(): Promise<void> {
-  if (isProcessingQueue) {
+  if (storageState.isProcessingQueue) {
     // Watchdog check: if lock has been held longer than QUEUE_WATCHDOG_TIMEOUT_MS, force-release it
-    if (queueLockAcquiredAt > 0 && Date.now() - queueLockAcquiredAt > QUEUE_WATCHDOG_TIMEOUT_MS) {
+    if (storageState.queueLockAcquiredAt > 0 && Date.now() - storageState.queueLockAcquiredAt > QUEUE_WATCHDOG_TIMEOUT_MS) {
       console.warn('[SAVE_QUEUE] Liberando bloqueo estancado antes de procesar la cola.');
-      isProcessingQueue = false;
-      queueLockAcquiredAt = 0;
+      storageState.isProcessingQueue = false;
+      storageState.queueLockAcquiredAt = 0;
     } else {
-      reprocessRequested = true;
+      storageState.reprocessRequested = true;
       return;
     }
   }
 
-  if (syncQueueMap.size === 0) {
+  if (storageState.syncQueueMap.size === 0) {
     updateSyncStatus({ status: 'synced', activeSaveId: null });
     return;
   }
 
-  isProcessingQueue = true;
-  queueLockAcquiredAt = Date.now();
-  reprocessRequested = false;
+  storageState.isProcessingQueue = true;
+  storageState.queueLockAcquiredAt = Date.now();
+  storageState.reprocessRequested = false;
 
   try {
     // Prevent infinite loops within a single queue pass by tracking attempted gameIds in this pass
     const attemptedInCurrentPass = new Set<string>();
 
-    while (syncQueueMap.size > 0) {
+    while (storageState.syncQueueMap.size > 0) {
       // Refresh lock heartbeat at the start of each item
-      queueLockAcquiredAt = Date.now();
+      storageState.queueLockAcquiredAt = Date.now();
       const now = Date.now();
 
       // Select all tasks whose retry timer is due (nextRetryAt <= now) and haven't failed in this exact pass
-      const readyTasks = Array.from(syncQueueMap.values())
+      const readyTasks = Array.from(storageState.syncQueueMap.values())
         .filter((t) => t.nextRetryAt <= now && !attemptedInCurrentPass.has(t.gameId))
         .sort((a, b) => {
           // Prioritize newly created games (retryCount === 0) so an old failing game NEVER delays a new game
@@ -1232,7 +1174,7 @@ export async function processSaveQueue(): Promise<void> {
       const startTimeStr = getCurrentLocalTimeString();
 
       nextTask.status = 'syncing';
-      syncQueueMap.set(nextTask.gameId, nextTask);
+      storageState.syncQueueMap.set(nextTask.gameId, nextTask);
       updateSyncStatus({
         status: 'saving',
         activeSaveId: nextTask.gameId,
@@ -1257,7 +1199,7 @@ export async function processSaveQueue(): Promise<void> {
 
       if (verified && remoteGame) {
         // Successfully verified in Firestore! Remove from queue and update IndexedDB & memory
-        syncQueueMap.delete(nextTask.gameId);
+        storageState.syncQueueMap.delete(nextTask.gameId);
         await removeQueueTaskFromIndexedDB(nextTask.gameId);
         await saveGameToIndexedDB(remoteGame);
         saveGameToGalleryCache(remoteGame);
@@ -1294,7 +1236,7 @@ export async function processSaveQueue(): Promise<void> {
           status: 'error',
         };
 
-        syncQueueMap.set(nextTask.gameId, updatedTask);
+        storageState.syncQueueMap.set(nextTask.gameId, updatedTask);
         await putQueueTaskInIndexedDB(updatedTask);
 
         await recordDiagnosticSaveLog({
@@ -1328,13 +1270,13 @@ export async function processSaveQueue(): Promise<void> {
     });
   } finally {
     // Unconditionally release queue lock and reset activeSaveId
-    isProcessingQueue = false;
-    queueLockAcquiredAt = 0;
+    storageState.isProcessingQueue = false;
+    storageState.queueLockAcquiredAt = 0;
 
     // Ensure no task remains stuck in 'syncing' state after loop finishes
-    for (const [id, task] of Array.from(syncQueueMap.entries())) {
+    for (const [id, task] of Array.from(storageState.syncQueueMap.entries())) {
       if (task.status === 'syncing') {
-        syncQueueMap.set(id, {
+        storageState.syncQueueMap.set(id, {
           ...task,
           status: task.lastError ? 'error' : 'pending',
         });
@@ -1345,24 +1287,24 @@ export async function processSaveQueue(): Promise<void> {
     updateSyncStatus({ activeSaveId: null });
 
     // Schedule next automatic retry for the earliest remaining task in the queue
-    if (syncQueueMap.size > 0) {
+    if (storageState.syncQueueMap.size > 0) {
       const now = Date.now();
       const earliestRetryAt = Math.min(
-        ...Array.from(syncQueueMap.values()).map((t) => t.nextRetryAt || now + 1000)
+        ...Array.from(storageState.syncQueueMap.values()).map((t) => t.nextRetryAt || now + 1000)
       );
       const waitMs = Math.max(500, earliestRetryAt - now);
 
-      if (retryTimerHandle) clearTimeout(retryTimerHandle);
-      retryTimerHandle = setTimeout(() => {
-        retryTimerHandle = null;
+      if (storageState.retryTimerHandle) clearTimeout(storageState.retryTimerHandle);
+      storageState.retryTimerHandle = setTimeout(() => {
+        storageState.retryTimerHandle = null;
         void processSaveQueue();
       }, waitMs);
     }
 
     // If a new game was enqueued while the queue was finishing up, process it immediately
-    if (reprocessRequested) {
-      reprocessRequested = false;
-      const hasImmediate = Array.from(syncQueueMap.values()).some((t) => t.nextRetryAt <= Date.now());
+    if (storageState.reprocessRequested) {
+      storageState.reprocessRequested = false;
+      const hasImmediate = Array.from(storageState.syncQueueMap.values()).some((t) => t.nextRetryAt <= Date.now());
       if (hasImmediate) {
         setTimeout(() => {
           void processSaveQueue();
@@ -1457,12 +1399,12 @@ export async function saveGameUnified(
   };
 
   // 3. STEP 1 OF OFFLINE-FIRST: Save immediately to IndexedDB & Memory Store
-  if (deletedGameIdsSet.has(docId)) {
-    deletedGameIdsSet.delete(docId);
+  if (storageState.deletedGameIdsSet.has(docId)) {
+    storageState.deletedGameIdsSet.delete(docId);
     persistDeletedGameIds();
   }
-  if (clearedSequenceBarIdsSet.has(docId)) {
-    clearedSequenceBarIdsSet.delete(docId);
+  if (storageState.clearedSequenceBarIdsSet.has(docId)) {
+    storageState.clearedSequenceBarIdsSet.delete(docId);
     persistClearedSequenceBarIds();
   }
   await saveGameToIndexedDB(normalizedItem);
@@ -1482,7 +1424,7 @@ export async function saveGameUnified(
   });
 
   // 4. STEP 2 OF OFFLINE-FIRST: Add to Persistent Sequential Save Queue
-  const existingTask = syncQueueMap.get(docId);
+  const existingTask = storageState.syncQueueMap.get(docId);
   const queueTask: QueuedSaveTask = {
     gameId: docId,
     game: normalizedItem,
@@ -1493,14 +1435,14 @@ export async function saveGameUnified(
     status: 'pending',
   };
 
-  syncQueueMap.set(docId, queueTask);
+  storageState.syncQueueMap.set(docId, queueTask);
   await putQueueTaskInIndexedDB(queueTask);
   updateSyncStatus({});
 
   // Clean up any legacy duplicate IDs
   if (duplicateIdsToClean.length > 0) {
     for (const dupId of duplicateIdsToClean) {
-      firestoreGamesMemoryStore.delete(dupId);
+      storageState.firestoreGamesMemoryStore.delete(dupId);
       void deleteGameFromIndexedDB(dupId);
       deleteDoc(doc(db, 'saved_games', dupId)).catch(() => {});
     }
@@ -1518,8 +1460,8 @@ export async function saveGameUnified(
     if (raceTimer !== null) clearTimeout(raceTimer);
   });
 
-  const isAlreadySynced = !syncQueueMap.has(docId);
-  const latestGame = firestoreGamesMemoryStore.get(docId) || normalizedItem;
+  const isAlreadySynced = !storageState.syncQueueMap.has(docId);
+  const latestGame = storageState.firestoreGamesMemoryStore.get(docId) || normalizedItem;
 
   return {
     success: true,
@@ -1549,15 +1491,15 @@ export async function updateGameUnified(
 export function saveGameToGalleryCache(normalizedItem: GameSequenceItem): void {
   if (!normalizedItem) return;
   const { normalizedGame } = normalizeGameFolderMetadata(normalizedItem, normalizedItem.id);
-  firestoreGamesMemoryStore.set(normalizedGame.id!, normalizedGame);
+  storageState.firestoreGamesMemoryStore.set(normalizedGame.id!, normalizedGame);
 
   const allGames = sortGamesChronologicallyDesc(
-    Array.from(firestoreGamesMemoryStore.values())
+    Array.from(storageState.firestoreGamesMemoryStore.values())
   );
-  cachedSortedGames = allGames;
+  storageState.cachedSortedGames = allGames;
   syncTemporaryLocalCache(allGames);
 
-  savedGamesSubscribers.forEach((sub) => {
+  storageState.savedGamesSubscribers.forEach((sub) => {
     try {
       sub(allGames);
     } catch {
@@ -1636,9 +1578,9 @@ async function executeBatchGameDeletion(
 
   // 1. Register tombstones immediately so onSnapshot / auto-heal can NEVER resurrect these games
   for (const docId of idsToDelete) {
-    deletedGameIdsSet.add(docId);
-    syncQueueMap.delete(docId);
-    firestoreGamesMemoryStore.delete(docId);
+    storageState.deletedGameIdsSet.add(docId);
+    storageState.syncQueueMap.delete(docId);
+    storageState.firestoreGamesMemoryStore.delete(docId);
   }
   persistDeletedGameIds();
 
@@ -1647,12 +1589,12 @@ async function executeBatchGameDeletion(
 
   updateSyncStatus({});
   const remaining = sortGamesChronologicallyDesc(
-    Array.from(firestoreGamesMemoryStore.values())
+    Array.from(storageState.firestoreGamesMemoryStore.values())
   );
-  cachedSortedGames = remaining;
+  storageState.cachedSortedGames = remaining;
   syncTemporaryLocalCache(remaining);
 
-  savedGamesSubscribers.forEach((sub) => {
+  storageState.savedGamesSubscribers.forEach((sub) => {
     try {
       sub(remaining);
     } catch {
@@ -1770,7 +1712,7 @@ export async function clearRightSequenceBarToday(
     }
   }
 
-  for (const [docId, g] of firestoreGamesMemoryStore.entries()) {
+  for (const [docId, g] of storageState.firestoreGamesMemoryStore.entries()) {
     if (!g) continue;
     const is90 = g.mode === '90' || g.sheetType === 'traditional-90';
     const matchesMode =
@@ -1783,7 +1725,7 @@ export async function clearRightSequenceBarToday(
   }
 
   for (const id of idsToClear) {
-    clearedSequenceBarIdsSet.add(id);
+    storageState.clearedSequenceBarIdsSet.add(id);
   }
   persistClearedSequenceBarIds();
   purgeDeletedGamesFromLocalSequenceBars(idsToClear, itemsToClear);
@@ -1807,10 +1749,10 @@ export async function clearRightSequenceBarToday(
     await executeBatchGameDeletion(idsToClear, itemsToClear);
   } else {
     const allGames = sortGamesChronologicallyDesc(
-      Array.from(firestoreGamesMemoryStore.values())
+      Array.from(storageState.firestoreGamesMemoryStore.values())
     );
-    cachedSortedGames = allGames;
-    savedGamesSubscribers.forEach((sub) => {
+    storageState.cachedSortedGames = allGames;
+    storageState.savedGamesSubscribers.forEach((sub) => {
       try {
         sub(allGames);
       } catch {
@@ -1865,7 +1807,7 @@ export async function deleteGamesOfDay(
       }
     };
 
-    for (const [docId, g] of firestoreGamesMemoryStore.entries()) {
+    for (const [docId, g] of storageState.firestoreGamesMemoryStore.entries()) {
       checkAndCollect(docId, g);
     }
 
@@ -1913,7 +1855,7 @@ export async function deleteGamesOfOperatorFolder(operatorName: string): Promise
       }
     };
 
-    for (const [docId, g] of firestoreGamesMemoryStore.entries()) {
+    for (const [docId, g] of storageState.firestoreGamesMemoryStore.entries()) {
       checkAndCollect(docId, g);
     }
 
@@ -1965,7 +1907,7 @@ export async function clearAllSavedGamesGallery(
       }
     };
 
-    for (const [docId, g] of firestoreGamesMemoryStore.entries()) {
+    for (const [docId, g] of storageState.firestoreGamesMemoryStore.entries()) {
       checkAndCollect(docId, g);
     }
 
