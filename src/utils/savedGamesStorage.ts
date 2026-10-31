@@ -91,6 +91,7 @@ import { createDeletionService } from './deletionService';
 import { createGameRepository } from './gameRepository';
 import { createSyncStatus } from './syncStatus';
 import { createQueueProcessor } from './queueProcessor';
+import { createOfflineFirstEngine } from './offlineFirstEngine';
 
 export { getDiagnosticSaveLogs };
 export { subscribeToActivityLogsCentralized, subscribeToUsersCentralized };
@@ -257,91 +258,41 @@ export function isCurrentSessionAdmin(): boolean {
   return false;
 }
 
+const offlineFirstEngine = createOfflineFirstEngine({
+  state: storageState,
+  storage: {
+    migrateAndHydrateStorageFromIndexedDB,
+    safeGetItem,
+    getAllGamesFromIndexedDB,
+    deleteGameFromIndexedDB,
+    getAllQueueTasksFromIndexedDB,
+  },
+  normalization: {
+    normalizeGameFolderMetadata,
+    sortGamesChronologicallyDesc,
+  },
+  syncStatus: {
+    updateSyncStatus,
+  },
+  queue: {
+    processSaveQueue,
+  },
+  firestore: {
+    db,
+    doc,
+    setDoc,
+    getDoc,
+    withTimeout,
+    buildFirestorePayloadFromItem,
+  },
+  storageKeys: {
+    deletedGameIds: STORAGE_KEY_DELETED_GAME_IDS,
+    clearedSequenceBarIds: STORAGE_KEY_CLEARED_SEQUENCE_BAR_IDS,
+  },
+});
+
 async function bootstrapOfflineFirstEngine(): Promise<void> {
-  if (storageState.hasBootstrappedIndexedDB || typeof window === 'undefined') return;
-  storageState.hasBootstrappedIndexedDB = true;
-
-  try {
-    // 0. Ensure automatic migration from localStorage to IndexedDB and KV hydration finishes first
-    await migrateAndHydrateStorageFromIndexedDB();
-
-    // Hydrate deleted/cleared sets from IndexedDB KV store if present
-    try {
-      const delRaw = safeGetItem(STORAGE_KEY_DELETED_GAME_IDS);
-      if (delRaw) {
-        const parsed = JSON.parse(delRaw);
-        if (Array.isArray(parsed)) {
-          parsed.forEach((id) => {
-            if (typeof id === 'string') storageState.deletedGameIdsSet.add(id);
-          });
-        }
-      }
-      const clrRaw = safeGetItem(STORAGE_KEY_CLEARED_SEQUENCE_BAR_IDS);
-      if (clrRaw) {
-        const parsed = JSON.parse(clrRaw);
-        if (Array.isArray(parsed)) {
-          parsed.forEach((id) => {
-            if (typeof id === 'string') storageState.clearedSequenceBarIdsSet.add(id);
-          });
-        }
-      }
-    } catch {
-      // ignore
-    }
-
-    // 1. Load all locally saved games from IndexedDB into memory store immediately
-    const localGames = await getAllGamesFromIndexedDB();
-    for (const g of localGames) {
-      if (g && g.id) {
-        if (storageState.deletedGameIdsSet.has(g.id)) {
-          void deleteGameFromIndexedDB(g.id);
-          continue;
-        }
-        const { normalizedGame } = normalizeGameFolderMetadata(g, g.id);
-        if (storageState.deletedGameIdsSet.has(normalizedGame.id!)) {
-          void deleteGameFromIndexedDB(normalizedGame.id!);
-          continue;
-        }
-        if (!storageState.firestoreGamesMemoryStore.has(normalizedGame.id!)) {
-          storageState.firestoreGamesMemoryStore.set(normalizedGame.id!, normalizedGame);
-        }
-      }
-    }
-
-    if (localGames.length > 0) {
-      storageState.cachedSortedGames = sortGamesChronologicallyDesc(
-        Array.from(storageState.firestoreGamesMemoryStore.values())
-      );
-      storageState.savedGamesSubscribers.forEach((sub) => {
-        try {
-          sub(storageState.cachedSortedGames);
-        } catch {
-          // ignore
-        }
-      });
-    }
-
-    // 2. Load any pending tasks from IndexedDB Save Queue and resume processing
-    const pendingTasks = await getAllQueueTasksFromIndexedDB();
-    for (const task of pendingTasks) {
-      if (task && task.gameId && task.game) {
-        storageState.syncQueueMap.set(task.gameId, {
-          ...task,
-          status: 'pending',
-          nextRetryAt: Date.now(),
-        });
-        const { normalizedGame } = normalizeGameFolderMetadata(task.game, task.gameId);
-        storageState.firestoreGamesMemoryStore.set(task.gameId, normalizedGame);
-      }
-    }
-
-    updateSyncStatus({});
-    if (storageState.syncQueueMap.size > 0) {
-      void processSaveQueue();
-    }
-  } catch (err) {
-    console.warn('[OFFLINE_ENGINE] Bootstrap warning:', err);
-  }
+  return offlineFirstEngine.bootstrapOfflineFirstEngine();
 }
 
 if (typeof window !== 'undefined') {
@@ -696,79 +647,7 @@ function buildFirestorePayloadFromItem(normalizedItem: GameSequenceItem): Firest
   return sanitized;
 }
 
-/**
- * Writes a single game to Firestore with a strict 8s timeout and immediately reads it back via getDoc
- * (with a strict 6s timeout) to verify that all critical fields match 100%.
- */
-async function writeAndVerifyGameInFirestore(
-  game: GameSequenceItem
-): Promise<{ verified: boolean; remoteGame?: GameSequenceItem; errorMsg?: string }> {
-  if (typeof navigator !== 'undefined' && !navigator.onLine) {
-    return { verified: false, errorMsg: 'Sin conexión a Internet' };
-  }
-
-  const docId = game.id!;
-  const docRef = doc(db, 'saved_games', docId);
-
-  let sanitizedPayload: FirestoreGamePayload;
-  try {
-    sanitizedPayload = buildFirestorePayloadFromItem(game);
-  } catch (serializeErr: any) {
-    return {
-      verified: false,
-      errorMsg: `Error preparando datos de partida: ${serializeErr?.message || 'Payload inválido'}`,
-    };
-  }
-
-  try {
-    await withTimeout(
-      setDoc(docRef, sanitizedPayload, { merge: true }),
-      8000,
-      `Firestore setDoc (${docId})`
-    );
-
-    const snap = await withTimeout(
-      getDoc(docRef),
-      6000,
-      `Firestore getDoc (${docId})`
-    );
-
-    if (!snap.exists()) {
-      return { verified: false, errorMsg: 'El documento no existe en Firestore tras la escritura' };
-    }
-
-    const remoteData = snap.data() as GameSequenceItem;
-    const isIdValid = remoteData.id === docId || snap.id === docId;
-    const isDateValid = remoteData.dailyDate === game.dailyDate;
-    const isSubfolderValid = remoteData.subfolderDay === game.subfolderDay;
-    const isRoundValid = remoteData.round === game.round;
-    const isOperatorValid = remoteData.operatorName === game.operatorName;
-
-    if (isIdValid && isDateValid && isSubfolderValid && isRoundValid && isOperatorValid) {
-      const mergedVerified: GameSequenceItem = {
-        ...game,
-        ...remoteData,
-        id: docId,
-        dailyDate: game.dailyDate,
-        subfolderDay: game.subfolderDay,
-        operatorFolder: game.operatorFolder,
-        folderPath: game.folderPath,
-        timestamp: game.timestamp,
-      };
-      return { verified: true, remoteGame: mergedVerified };
-    }
-
-    return {
-      verified: false,
-      errorMsg: `Verificación fallida: los datos leídos de Firestore no coinciden para ${docId}`,
-    };
-  } catch (err: any) {
-    return {
-      verified: false,
-      errorMsg: err?.message || 'Error de comunicación con Firestore',
-    };
-  }
-}
+const writeAndVerifyGameInFirestore = offlineFirstEngine.writeAndVerifyGameInFirestore;
 
 const queueProcessor = createQueueProcessor({
   state: storageState,
