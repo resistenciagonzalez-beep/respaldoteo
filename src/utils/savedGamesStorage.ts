@@ -47,7 +47,6 @@ import {
   deleteDoc,
   collection,
   getDocs,
-  onSnapshot,
   getDoc,
   FieldValue,
 } from 'firebase/firestore';
@@ -87,6 +86,7 @@ import {
   subscribeToUsersCentralized,
   updateUserFieldsCentralized as updateUserFieldsCentralizedService,
 } from './usersService';
+import { createGalleryService } from './galleryService';
 
 export { getDiagnosticSaveLogs };
 export { subscribeToActivityLogsCentralized, subscribeToUsersCentralized };
@@ -545,140 +545,33 @@ function syncTemporaryLocalCache(games: GameSequenceItem[]): void {
   }
 }
 
-// ============================================================================
-// REAL-TIME FIRESTORE SUBSCRIPTION (MULTIPLEXED SINGLETON)
-// ============================================================================
-
-
-function ensureSharedSavedGamesListener(): void {
-  if (storageState.activeFirestoreUnsubscribe || typeof window === 'undefined') return;
-  initConnectionMonitor();
-
-  try {
-    const q = collection(db, 'saved_games');
-    storageState.activeFirestoreUnsubscribe = onSnapshot(
-      q,
-      (snapshot) => {
-        updateSyncStatus({ isFirestoreReachable: true });
-
-        // Merge Firestore documents with any pending local offline saves so unsynced games are NEVER overwritten or lost
-        const remoteIds = new Set<string>();
-
-        snapshot.forEach((docSnap) => {
-          const rawData = docSnap.data() as GameSequenceItem;
-          const docKey = docSnap.id;
-
-          // If this document was permanently deleted by an Admin, never resurrect it and ensure remote cleanup
-          if (storageState.deletedGameIdsSet.has(docKey) || (rawData.id && storageState.deletedGameIdsSet.has(rawData.id))) {
-            storageState.firestoreGamesMemoryStore.delete(docKey);
-            void deleteGameFromIndexedDB(docKey);
-            deleteDoc(doc(db, 'saved_games', docKey)).catch(() => {});
-            return;
-          }
-
-          remoteIds.add(docKey);
-
-          // If this document is currently queued locally with newer changes, keep the local queued version in memory
-          const pendingTask = storageState.syncQueueMap.get(docKey);
-          if (pendingTask && pendingTask.status !== 'synced') {
-            storageState.firestoreGamesMemoryStore.set(docKey, pendingTask.game);
-            return;
-          }
-
-          const { normalizedGame, isMisplaced, reason } = normalizeGameFolderMetadata(
-            { ...rawData, id: docKey },
-            docKey
-          );
-
-          if (isMisplaced && !storageState.inFlightAutoHealIds.has(docKey)) {
-            storageState.inFlightAutoHealIds.add(docKey);
-            console.log(
-              `[AUTO-CORRECTION] ${reason || 'Reorganización de subcarpeta'}. Partida ID: ${docKey}, Fecha exacta: ${normalizedGame.dailyDate}, Subcarpeta: ${normalizedGame.subfolderDay}, Ruta: ${normalizedGame.folderPath}`
-            );
-            setDoc(
-              doc(db, 'saved_games', docKey),
-              {
-                id: docKey,
-                dailyDate: normalizedGame.dailyDate,
-                subfolderDay: normalizedGame.subfolderDay,
-                folderPath: normalizedGame.folderPath,
-                operatorFolder: normalizedGame.operatorFolder,
-                operatorName: normalizedGame.operatorName,
-                dateFormatted: normalizedGame.dateFormatted,
-              },
-              { merge: true }
-            )
-              .catch((err) => {
-                console.warn(`[AUTO-CORRECTION] Error syncing auto-healed game ${docKey}:`, err);
-              })
-              .finally(() => {
-                setTimeout(() => storageState.inFlightAutoHealIds.delete(docKey), 3000);
-              });
-          }
-
-          storageState.firestoreGamesMemoryStore.set(docKey, normalizedGame);
-          void saveGameToIndexedDB(normalizedGame);
-        });
-
-        // Remove documents that were deleted remotely (unless they are currently in the local save queue)
-        for (const existingKey of Array.from(storageState.firestoreGamesMemoryStore.keys())) {
-          if (!remoteIds.has(existingKey) && !storageState.syncQueueMap.has(existingKey)) {
-            storageState.firestoreGamesMemoryStore.delete(existingKey);
-          }
-        }
-
-        storageState.hasSyncedWithFirestore = true;
-        storageState.cachedSortedGames = sortGamesChronologicallyDesc(
-          Array.from(storageState.firestoreGamesMemoryStore.values())
-        );
-
-        syncTemporaryLocalCache(storageState.cachedSortedGames);
-        storageState.savedGamesSubscribers.forEach((sub) => {
-          try {
-            sub(storageState.cachedSortedGames);
-          } catch (cbErr) {
-            console.warn('Error in saved_games subscriber callback:', cbErr);
-          }
-        });
-      },
-      (error) => {
-        console.warn('Firestore saved_games subscription error:', error);
-        updateSyncStatus({ isFirestoreReachable: false });
-      }
-    );
-  } catch (err) {
-    console.warn('Could not initialize shared saved_games subscription:', err);
-  }
-}
+const galleryService = createGalleryService({
+  initConnectionMonitor,
+  updateSyncStatus,
+  deleteGameFromIndexedDB,
+  saveGameToIndexedDB,
+  normalizeGameFolderMetadata,
+  sortGamesChronologicallyDesc,
+  syncTemporaryLocalCache,
+  safeGetItem,
+  savedGamesGalleryStorageKey: STORAGE_KEY_SAVED_GAMES_GALLERY,
+  hasExplicitGameDateKey,
+});
 
 export function subscribeToSavedGamesFirestore(
   callback: (games: GameSequenceItem[]) => void
 ): () => void {
-  if (typeof window === 'undefined') {
-    return () => {};
-  }
-
-  storageState.savedGamesSubscribers.add(callback);
-  ensureSharedSavedGamesListener();
-
-  if (storageState.hasSyncedWithFirestore || storageState.firestoreGamesMemoryStore.size > 0) {
-    try {
-      callback(
-        sortGamesChronologicallyDesc(Array.from(storageState.firestoreGamesMemoryStore.values()))
-      );
-    } catch (e) {
-      console.warn('Initial subscriber callback error:', e);
-    }
-  }
-
-  return () => {
-    storageState.savedGamesSubscribers.delete(callback);
-    if (storageState.savedGamesSubscribers.size === 0 && storageState.activeFirestoreUnsubscribe) {
-      storageState.activeFirestoreUnsubscribe();
-      storageState.activeFirestoreUnsubscribe = null;
-    }
-  };
+  return galleryService.subscribeToSavedGamesFirestore(callback);
 }
+
+export function getSavedGamesGallery(): GameSequenceItem[] {
+  return galleryService.getSavedGamesGallery();
+}
+
+export function saveGameToGalleryCache(normalizedItem: GameSequenceItem): void {
+  galleryService.saveGameToGalleryCache(normalizedItem);
+}
+
 
 
 /**
@@ -784,44 +677,6 @@ export async function reorganizeAndHealAllStoredGames(): Promise<{
   return { totalChecked, reorganizedCount, details };
 }
 
-/**
- * Returns all saved games from the authoritative Offline-First + Firestore memory store.
- */
-export function getSavedGamesGallery(): GameSequenceItem[] {
-  if (storageState.hasSyncedWithFirestore || storageState.firestoreGamesMemoryStore.size > 0) {
-    return sortGamesChronologicallyDesc(
-      Array.from(storageState.firestoreGamesMemoryStore.values()).filter(
-        (g) => g && g.id && !storageState.deletedGameIdsSet.has(g.id) && hasExplicitGameDateKey(g) !== null
-      )
-    );
-  }
-
-  if (typeof window === 'undefined') return [];
-
-  try {
-    const raw = safeGetItem(STORAGE_KEY_SAVED_GAMES_GALLERY);
-    if (raw) {
-      const parsed: GameSequenceItem[] = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        const valid = parsed
-          .filter(
-            (item) =>
-              item &&
-              typeof item.round === 'number' &&
-              item.round >= 1 &&
-              (!item.id || !storageState.deletedGameIdsSet.has(item.id)) &&
-              hasExplicitGameDateKey(item) !== null
-          )
-          .map((item) => normalizeGameFolderMetadata(item, item.id).normalizedGame);
-        return sortGamesChronologicallyDesc(valid);
-      }
-    }
-  } catch (e) {
-    console.error('Error reading temporary saved games cache', e);
-  }
-
-  return [];
-}
 
 /**
  * Resolves the existing document ID if a game with the same ID or same
@@ -1486,36 +1341,6 @@ export async function updateGameUnified(
   return saveGameUnified(item);
 }
 
-/**
- * Updates the authoritative memory store + temporary cache and notifies UI components immediately.
- */
-export function saveGameToGalleryCache(normalizedItem: GameSequenceItem): void {
-  if (!normalizedItem) return;
-  const { normalizedGame } = normalizeGameFolderMetadata(normalizedItem, normalizedItem.id);
-  storageState.firestoreGamesMemoryStore.set(normalizedGame.id!, normalizedGame);
-
-  const allGames = sortGamesChronologicallyDesc(
-    Array.from(storageState.firestoreGamesMemoryStore.values())
-  );
-  storageState.cachedSortedGames = allGames;
-  syncTemporaryLocalCache(allGames);
-
-  storageState.savedGamesSubscribers.forEach((sub) => {
-    try {
-      sub(allGames);
-    } catch {
-      // ignore
-    }
-  });
-
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(
-      new CustomEvent('bingo_saved_games_updated', {
-        detail: { total: allGames.length, savedItem: normalizedGame },
-      })
-    );
-  }
-}
 
 /**
  * Backward compatibility alias for saveGameUnified.
