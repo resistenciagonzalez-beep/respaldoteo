@@ -89,6 +89,8 @@ import {
 import { createGalleryService } from './galleryService';
 import { createDeletionService } from './deletionService';
 import { createGameRepository } from './gameRepository';
+import { createSyncStatus } from './syncStatus';
+import { createQueueProcessor } from './queueProcessor';
 
 export { getDiagnosticSaveLogs };
 export { subscribeToActivityLogsCentralized, subscribeToUsersCentralized };
@@ -110,149 +112,18 @@ export const STORAGE_KEY_SEQUENCE_90 = 'bingo_90_game_sequence_history';
 
 const QUEUE_WATCHDOG_TIMEOUT_MS = 20000;
 
-
-function notifySyncStatusSubscribers(): void {
-  const snapshot: SyncStatusState = {
-    ...storageState.currentSyncState,
-    queueItems: [...storageState.currentSyncState.queueItems],
-  };
-  storageState.syncStatusSubscribers.forEach((cb) => {
-    try {
-      cb(snapshot);
-    } catch (err) {
-      console.warn('Error in syncStatusSubscriber:', err);
-    }
-  });
-}
-
-function computeQueueDiagnostics(): {
-  pendingCount: number;
-  syncingCount: number;
-  syncedCount: number;
-  errorCount: number;
-  queueItems: QueueTaskDiagnosticItem[];
-  derivedStatus: SyncStatusType;
-} {
-  const tasks = Array.from(storageState.syncQueueMap.values()).sort((a, b) => a.enqueuedAt - b.enqueuedAt);
-  let pendingCount = 0;
-  let syncingCount = 0;
-  let errorCount = 0;
-
-  const queueItems: QueueTaskDiagnosticItem[] = tasks.map((t) => {
-    const effectiveStatus =
-      t.status === 'syncing' && (!storageState.isProcessingQueue || storageState.currentSyncState.activeSaveId !== t.gameId)
-        ? t.lastError
-          ? 'error'
-          : 'pending'
-        : t.status;
-
-    if (effectiveStatus === 'syncing') syncingCount++;
-    else if (effectiveStatus === 'error') errorCount++;
-    else if (effectiveStatus === 'pending') pendingCount++;
-
-    return {
-      gameId: t.gameId,
-      round: t.game?.round || 1,
-      dailyDate: t.game?.dailyDate || '',
-      operatorName: t.game?.operatorName || 'Operadora',
-      status: effectiveStatus,
-      retryCount: t.retryCount,
-      lastError: t.lastError,
-      nextRetryAt: t.nextRetryAt,
-      enqueuedAt: t.enqueuedAt,
-    };
-  });
-
-  let syncedCount = 0;
-  storageState.firestoreGamesMemoryStore.forEach((g, id) => {
-    if (g && !storageState.deletedGameIdsSet.has(id) && !storageState.syncQueueMap.has(id)) {
-      syncedCount++;
-    }
-  });
-
-  let derivedStatus: SyncStatusType = 'synced';
-  if (storageState.isProcessingQueue && storageState.currentSyncState.activeSaveId && syncingCount > 0) {
-    derivedStatus = 'saving';
-  } else if (errorCount > 0) {
-    derivedStatus = 'error';
-  } else if (pendingCount > 0 || tasks.length > 0) {
-    derivedStatus = 'pending';
-  } else {
-    derivedStatus = 'synced';
-  }
-
-  return {
-    pendingCount,
-    syncingCount,
-    syncedCount,
-    errorCount,
-    queueItems,
-    derivedStatus,
-  };
-}
+const syncStatusService = createSyncStatus({ state: storageState });
 
 function updateSyncStatus(partial: Partial<SyncStatusState>): void {
-  if ('activeSaveId' in partial) {
-    storageState.currentSyncState.activeSaveId = partial.activeSaveId ?? null;
-  }
-  if ('lastError' in partial) {
-    storageState.currentSyncState.lastError = partial.lastError ?? null;
-  }
-  if ('lastErrorAt' in partial) {
-    storageState.currentSyncState.lastErrorAt = partial.lastErrorAt ?? null;
-  }
-  if ('isOnline' in partial && typeof partial.isOnline === 'boolean') {
-    storageState.currentSyncState.isOnline = partial.isOnline;
-  }
-  if ('isFirestoreReachable' in partial && typeof partial.isFirestoreReachable === 'boolean') {
-    storageState.currentSyncState.isFirestoreReachable = partial.isFirestoreReachable;
-  }
-  if ('lastSyncedAt' in partial) {
-    storageState.currentSyncState.lastSyncedAt = partial.lastSyncedAt ?? null;
-  }
-
-  const diag = computeQueueDiagnostics();
-
-  storageState.currentSyncState = {
-    ...storageState.currentSyncState,
-    pendingCount: diag.pendingCount,
-    syncingCount: diag.syncingCount,
-    syncedCount: diag.syncedCount,
-    errorCount: diag.errorCount,
-    queueItems: diag.queueItems,
-    status: partial.status || diag.derivedStatus,
-  };
-
-  // Safety guarantee: never stay in 'saving' if queue is not actively processing a task
-  if (storageState.currentSyncState.status === 'saving' && (!storageState.isProcessingQueue || !storageState.currentSyncState.activeSaveId)) {
-    storageState.currentSyncState.status = diag.errorCount > 0 ? 'error' : diag.pendingCount > 0 ? 'pending' : 'synced';
-  }
-
-  notifySyncStatusSubscribers();
+  syncStatusService.updateSyncStatus(partial);
 }
 
 export function getSyncStatusState(): SyncStatusState {
-  const diag = computeQueueDiagnostics();
-  return {
-    ...storageState.currentSyncState,
-    pendingCount: diag.pendingCount,
-    syncingCount: diag.syncingCount,
-    syncedCount: diag.syncedCount,
-    errorCount: diag.errorCount,
-    queueItems: diag.queueItems,
-  };
+  return syncStatusService.getSyncStatusState();
 }
 
 export function subscribeToSyncStatus(callback: (state: SyncStatusState) => void): () => void {
-  storageState.syncStatusSubscribers.add(callback);
-  try {
-    callback(getSyncStatusState());
-  } catch (e) {
-    console.warn('Initial sync status callback error:', e);
-  }
-  return () => {
-    storageState.syncStatusSubscribers.delete(callback);
-  };
+  return syncStatusService.subscribeToSyncStatus(callback);
 }
 
 /**
@@ -260,26 +131,7 @@ export function subscribeToSyncStatus(callback: (state: SyncStatusState) => void
  * releases any stale lock, and immediately processes all pending games.
  */
 export async function retryAllFailedAndPendingGamesNow(): Promise<void> {
-  if (storageState.retryTimerHandle) {
-    clearTimeout(storageState.retryTimerHandle);
-    storageState.retryTimerHandle = null;
-  }
-  if (storageState.isProcessingQueue && Date.now() - storageState.queueLockAcquiredAt > 8000) {
-    storageState.isProcessingQueue = false;
-    storageState.queueLockAcquiredAt = 0;
-  }
-  const now = Date.now();
-  for (const [gameId, task] of Array.from(storageState.syncQueueMap.entries())) {
-    const updated: QueuedSaveTask = {
-      ...task,
-      status: task.status === 'syncing' && storageState.isProcessingQueue ? 'syncing' : 'pending',
-      nextRetryAt: now,
-    };
-    storageState.syncQueueMap.set(gameId, updated);
-    void putQueueTaskInIndexedDB(updated);
-  }
-  updateSyncStatus({});
-  await processSaveQueue();
+  return queueProcessor.retryAllFailedAndPendingGamesNow();
 }
 
 // Connection Monitor Setup (detects online, offline, reconnection & Watchdog)
@@ -918,221 +770,37 @@ async function writeAndVerifyGameInFirestore(
   }
 }
 
-/**
- * Processes the Save Queue sequentially (1 active write at a time) WITHOUT Head-of-Line blocking.
- * - If a game fails to sync, it is marked as 'error' (Error Pendiente), its reason is recorded,
- *   an Exponential Backoff retry is scheduled for that game, and the queue IMMEDIATELY continues
- *   processing the remaining ready games in the queue.
- * - All network and IndexedDB operations have strict timeouts.
- * - Locks and activeSaveId are unconditionally released in the finally block.
- */
+const queueProcessor = createQueueProcessor({
+  state: storageState,
+  syncStatus: syncStatusService,
+  firestore: {
+    writeAndVerifyGameInFirestore,
+  },
+  storage: {
+    removeQueueTaskFromIndexedDB,
+    saveGameToIndexedDB,
+    putQueueTaskInIndexedDB,
+  },
+  gallery: {
+    saveGameToGalleryCache,
+  },
+  diagnostics: {
+    recordDiagnosticSaveLog,
+  },
+  retryPolicy: {
+    backoffDelaysMs: BACKOFF_DELAYS_MS,
+    queueWatchdogTimeoutMs: QUEUE_WATCHDOG_TIMEOUT_MS,
+  },
+  normalization: {
+    getCurrentLocalTimeString,
+    getCurrentLocalDateKey,
+    toLightweightSequenceItem,
+  },
+});
+
 export async function processSaveQueue(): Promise<void> {
-  if (storageState.isProcessingQueue) {
-    // Watchdog check: if lock has been held longer than QUEUE_WATCHDOG_TIMEOUT_MS, force-release it
-    if (storageState.queueLockAcquiredAt > 0 && Date.now() - storageState.queueLockAcquiredAt > QUEUE_WATCHDOG_TIMEOUT_MS) {
-      console.warn('[SAVE_QUEUE] Liberando bloqueo estancado antes de procesar la cola.');
-      storageState.isProcessingQueue = false;
-      storageState.queueLockAcquiredAt = 0;
-    } else {
-      storageState.reprocessRequested = true;
-      return;
-    }
-  }
-
-  if (storageState.syncQueueMap.size === 0) {
-    updateSyncStatus({ status: 'synced', activeSaveId: null });
-    return;
-  }
-
-  storageState.isProcessingQueue = true;
-  storageState.queueLockAcquiredAt = Date.now();
-  storageState.reprocessRequested = false;
-
-  try {
-    // Prevent infinite loops within a single queue pass by tracking attempted gameIds in this pass
-    const attemptedInCurrentPass = new Set<string>();
-
-    while (storageState.syncQueueMap.size > 0) {
-      // Refresh lock heartbeat at the start of each item
-      storageState.queueLockAcquiredAt = Date.now();
-      const now = Date.now();
-
-      // Select all tasks whose retry timer is due (nextRetryAt <= now) and haven't failed in this exact pass
-      const readyTasks = Array.from(storageState.syncQueueMap.values())
-        .filter((t) => t.nextRetryAt <= now && !attemptedInCurrentPass.has(t.gameId))
-        .sort((a, b) => {
-          // Prioritize newly created games (retryCount === 0) so an old failing game NEVER delays a new game
-          if (a.retryCount !== b.retryCount) {
-            return a.retryCount - b.retryCount;
-          }
-          return a.enqueuedAt - b.enqueuedAt;
-        });
-
-      const nextTask = readyTasks[0];
-      if (!nextTask) {
-        // No more tasks are ready right now; exit loop and let finally schedule the next retry timer
-        break;
-      }
-
-      attemptedInCurrentPass.add(nextTask.gameId);
-
-      // Sanitize task's sequenceSnapshot in-place in case it was enqueued before payload shrinking
-      if (nextTask.game?.sequenceSnapshot?.gameSequence) {
-        nextTask.game = {
-          ...nextTask.game,
-          sequenceSnapshot: {
-            ...nextTask.game.sequenceSnapshot,
-            gameSequence: nextTask.game.sequenceSnapshot.gameSequence
-              .slice(0, 30)
-              .map(toLightweightSequenceItem),
-          },
-        };
-      }
-
-      const startMs = Date.now();
-      const startTimeStr = getCurrentLocalTimeString();
-
-      nextTask.status = 'syncing';
-      storageState.syncQueueMap.set(nextTask.gameId, nextTask);
-      updateSyncStatus({
-        status: 'saving',
-        activeSaveId: nextTask.gameId,
-      });
-
-      let verified = false;
-      let remoteGame: GameSequenceItem | undefined = undefined;
-      let errorMsg: string | undefined = undefined;
-
-      try {
-        const res = await writeAndVerifyGameInFirestore(nextTask.game);
-        verified = res.verified;
-        remoteGame = res.remoteGame;
-        errorMsg = res.errorMsg;
-      } catch (unexpectedErr: any) {
-        verified = false;
-        errorMsg = unexpectedErr?.message || 'Error inesperado al sincronizar con Firestore';
-      }
-
-      const durationMs = Date.now() - startMs;
-      const endTimeStr = getCurrentLocalTimeString();
-
-      if (verified && remoteGame) {
-        // Successfully verified in Firestore! Remove from queue and update IndexedDB & memory
-        storageState.syncQueueMap.delete(nextTask.gameId);
-        await removeQueueTaskFromIndexedDB(nextTask.gameId);
-        await saveGameToIndexedDB(remoteGame);
-        saveGameToGalleryCache(remoteGame);
-
-        await recordDiagnosticSaveLog({
-          id: `log_${Date.now()}_${nextTask.gameId}`,
-          gameId: nextTask.gameId,
-          round: remoteGame.round,
-          dailyDate: remoteGame.dailyDate || getCurrentLocalDateKey(),
-          startTime: startTimeStr,
-          endTime: endTimeStr,
-          durationMs,
-          retryCount: nextTask.retryCount,
-          result: 'SYNCED_FIRESTORE',
-          errorMessage: null,
-        });
-
-        updateSyncStatus({
-          activeSaveId: null,
-          isFirestoreReachable: true,
-          lastSyncedAt: endTimeStr,
-        });
-      } else {
-        // Failed or offline: Mark as 'error' (Error Pendiente), schedule retry for this item,
-        // and CONTINUE processing the rest of the queue so NO game ever blocks subsequent games!
-        const retryIndex = Math.min(nextTask.retryCount, BACKOFF_DELAYS_MS.length - 1);
-        const delayMs = BACKOFF_DELAYS_MS[retryIndex];
-        const reason = errorMsg || 'Error de sincronización con Firestore';
-        const updatedTask: QueuedSaveTask = {
-          ...nextTask,
-          retryCount: nextTask.retryCount + 1,
-          nextRetryAt: Date.now() + delayMs,
-          lastError: reason,
-          status: 'error',
-        };
-
-        storageState.syncQueueMap.set(nextTask.gameId, updatedTask);
-        await putQueueTaskInIndexedDB(updatedTask);
-
-        await recordDiagnosticSaveLog({
-          id: `log_${Date.now()}_${nextTask.gameId}_retry_${updatedTask.retryCount}`,
-          gameId: nextTask.gameId,
-          round: nextTask.game.round,
-          dailyDate: nextTask.game.dailyDate || getCurrentLocalDateKey(),
-          startTime: startTimeStr,
-          endTime: endTimeStr,
-          durationMs,
-          retryCount: updatedTask.retryCount,
-          result: 'RETRY_SCHEDULED',
-          errorMessage: `${reason} (Reintento en ${delayMs / 1000}s)`,
-        });
-
-        updateSyncStatus({
-          activeSaveId: null,
-          isFirestoreReachable: false,
-          lastError: `Partida #${nextTask.game.round}: ${reason}`,
-          lastErrorAt: endTimeStr,
-        });
-        // Continue to next ready task in queue! Never break here.
-      }
-    }
-  } catch (outerErr: any) {
-    console.error('[SAVE_QUEUE] Error en bucle de sincronización:', outerErr);
-    updateSyncStatus({
-      activeSaveId: null,
-      lastError: outerErr?.message || 'Error interno en cola de sincronización',
-      lastErrorAt: getCurrentLocalTimeString(),
-    });
-  } finally {
-    // Unconditionally release queue lock and reset activeSaveId
-    storageState.isProcessingQueue = false;
-    storageState.queueLockAcquiredAt = 0;
-
-    // Ensure no task remains stuck in 'syncing' state after loop finishes
-    for (const [id, task] of Array.from(storageState.syncQueueMap.entries())) {
-      if (task.status === 'syncing') {
-        storageState.syncQueueMap.set(id, {
-          ...task,
-          status: task.lastError ? 'error' : 'pending',
-        });
-      }
-    }
-
-    // Guarantees indicator transitions to 'synced', 'pending', or 'error' — NEVER stuck in 'saving'
-    updateSyncStatus({ activeSaveId: null });
-
-    // Schedule next automatic retry for the earliest remaining task in the queue
-    if (storageState.syncQueueMap.size > 0) {
-      const now = Date.now();
-      const earliestRetryAt = Math.min(
-        ...Array.from(storageState.syncQueueMap.values()).map((t) => t.nextRetryAt || now + 1000)
-      );
-      const waitMs = Math.max(500, earliestRetryAt - now);
-
-      if (storageState.retryTimerHandle) clearTimeout(storageState.retryTimerHandle);
-      storageState.retryTimerHandle = setTimeout(() => {
-        storageState.retryTimerHandle = null;
-        void processSaveQueue();
-      }, waitMs);
-    }
-
-    // If a new game was enqueued while the queue was finishing up, process it immediately
-    if (storageState.reprocessRequested) {
-      storageState.reprocessRequested = false;
-      const hasImmediate = Array.from(storageState.syncQueueMap.values()).some((t) => t.nextRetryAt <= Date.now());
-      if (hasImmediate) {
-        setTimeout(() => {
-          void processSaveQueue();
-        }, 50);
-      }
-    }
-  }
+  return queueProcessor.processSaveQueue();
 }
-
 const gameRepository = createGameRepository({
   normalization: {
     buildCanonicalGameId,
