@@ -92,6 +92,7 @@ import { createGameRepository } from './gameRepository';
 import { createSyncStatus } from './syncStatus';
 import { createQueueProcessor } from './queueProcessor';
 import { createOfflineFirstEngine } from './offlineFirstEngine';
+import { createGameMaintenanceService } from './gameMaintenanceService';
 
 export { getDiagnosticSaveLogs };
 export { subscribeToActivityLogsCentralized, subscribeToUsersCentralized };
@@ -191,6 +192,40 @@ const ADMIN_EMAILS_LIST = [
   'resistenciagonzalez@gmail.com',
   'genesis.vargas0619@gmail.com',
 ];
+
+const gameMaintenanceService = createGameMaintenanceService({
+  state: storageState,
+  firestore: {
+    db,
+    doc,
+    setDoc,
+    deleteDoc,
+    collection,
+    getDocs,
+  },
+  storage: {
+    deleteGameFromIndexedDB,
+    saveGameToIndexedDB,
+  },
+  normalization: {
+    normalizeGameFolderMetadata,
+    sortGamesChronologicallyDesc,
+  },
+  cache: {
+    syncTemporaryLocalCache,
+  },
+});
+
+function syncTemporaryLocalCache(games: GameSequenceItem[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const sorted = sortGamesChronologicallyDesc(games);
+    const lightweightCache = sanitizeSequenceForStorage(sorted.slice(0, 40));
+    safeSetItem(STORAGE_KEY_SAVED_GAMES_GALLERY, JSON.stringify(lightweightCache));
+  } catch (err) {
+    console.warn('Temporary cache update skipped:', err);
+  }
+}
 
 
 function persistDeletedGameIds(): void {
@@ -359,20 +394,6 @@ export function isRealSavedGameInTodaySubfolder(
   return true;
 }
 
-/**
- * Updates the temporary localStorage cache (strictly non-authoritative fallback).
- */
-function syncTemporaryLocalCache(games: GameSequenceItem[]): void {
-  if (typeof window === 'undefined') return;
-  try {
-    const sorted = sortGamesChronologicallyDesc(games);
-    const lightweightCache = sanitizeSequenceForStorage(sorted.slice(0, 40));
-    safeSetItem(STORAGE_KEY_SAVED_GAMES_GALLERY, JSON.stringify(lightweightCache));
-  } catch (err) {
-    console.warn('Temporary cache update skipped:', err);
-  }
-}
-
 const galleryService = createGalleryService({
   initConnectionMonitor,
   updateSyncStatus,
@@ -412,97 +433,7 @@ export async function reorganizeAndHealAllStoredGames(): Promise<{
   reorganizedCount: number;
   details: Array<{ id: string; round: number; oldSubfolder: string; newSubfolder: string; reason: string }>;
 }> {
-  const details: Array<{ id: string; round: number; oldSubfolder: string; newSubfolder: string; reason: string }> = [];
-  if (storageState.isReorganizationRunning) {
-    return {
-      totalChecked: storageState.firestoreGamesMemoryStore.size,
-      reorganizedCount: 0,
-      details,
-    };
-  }
-
-  storageState.isReorganizationRunning = true;
-  let totalChecked = 0;
-  let reorganizedCount = 0;
-
-  try {
-    const snap = await getDocs(collection(db, 'saved_games'));
-    for (const docSnap of snap.docs) {
-      const rawData = docSnap.data() as GameSequenceItem;
-      const docKey = docSnap.id;
-      if (storageState.deletedGameIdsSet.has(docKey) || (rawData.id && storageState.deletedGameIdsSet.has(rawData.id))) {
-        storageState.firestoreGamesMemoryStore.delete(docKey);
-        void deleteGameFromIndexedDB(docKey);
-        deleteDoc(doc(db, 'saved_games', docKey)).catch(() => {});
-        continue;
-      }
-      totalChecked++;
-      const { normalizedGame, isMisplaced, reason } = normalizeGameFolderMetadata(
-        { ...rawData, id: docKey },
-        docKey
-      );
-
-      if (isMisplaced) {
-        reorganizedCount++;
-        const oldSubfolder = rawData.subfolderDay || rawData.folderPath || 'desconocida';
-        const newSubfolder = normalizedGame.subfolderDay || normalizedGame.dailyDate || 'desconocida';
-
-        details.push({
-          id: docKey,
-          round: normalizedGame.round,
-          oldSubfolder,
-          newSubfolder,
-          reason: reason || 'Reorganización a fecha exacta',
-        });
-
-        console.log(
-          `[REORGANIZACION_SUBCARPETAS] Partida #${normalizedGame.round} (${docKey}) movida de subcarpeta "${oldSubfolder}" a "${newSubfolder}" por fecha exacta.`
-        );
-
-        storageState.inFlightAutoHealIds.add(docKey);
-        await setDoc(
-          doc(db, 'saved_games', docKey),
-          {
-            id: docKey,
-            dailyDate: normalizedGame.dailyDate,
-            subfolderDay: normalizedGame.subfolderDay,
-            folderPath: normalizedGame.folderPath,
-            operatorFolder: normalizedGame.operatorFolder,
-            operatorName: normalizedGame.operatorName,
-            dateFormatted: normalizedGame.dateFormatted,
-          },
-          { merge: true }
-        ).finally(() => {
-          setTimeout(() => storageState.inFlightAutoHealIds.delete(docKey), 3000);
-        });
-
-        storageState.firestoreGamesMemoryStore.set(docKey, normalizedGame);
-        await saveGameToIndexedDB(normalizedGame);
-      } else {
-        storageState.firestoreGamesMemoryStore.set(docKey, normalizedGame);
-      }
-    }
-
-    const sortedGames = sortGamesChronologicallyDesc(
-      Array.from(storageState.firestoreGamesMemoryStore.values())
-    );
-    storageState.cachedSortedGames = sortedGames;
-    syncTemporaryLocalCache(sortedGames);
-
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(
-        new CustomEvent('bingo_saved_games_updated', {
-          detail: { total: sortedGames.length, reorganizedCount },
-        })
-      );
-    }
-  } catch (err) {
-    console.error('Error during reorganizeAndHealAllStoredGames:', err);
-  } finally {
-    storageState.isReorganizationRunning = false;
-  }
-
-  return { totalChecked, reorganizedCount, details };
+  return gameMaintenanceService.reorganizeAndHealAllStoredGames();
 }
 
 
