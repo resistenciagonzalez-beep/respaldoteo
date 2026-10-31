@@ -87,6 +87,7 @@ import {
   updateUserFieldsCentralized as updateUserFieldsCentralizedService,
 } from './usersService';
 import { createGalleryService } from './galleryService';
+import { createDeletionService } from './deletionService';
 
 export { getDiagnosticSaveLogs };
 export { subscribeToActivityLogsCentralized, subscribeToUsersCentralized };
@@ -357,6 +358,29 @@ function persistClearedSequenceBarIds(): void {
     // ignore
   }
 }
+
+const deletionService = createDeletionService({
+  state: storageState,
+  isCurrentSessionAdmin,
+  getSavedGamesGallery,
+  persistDeletedGameIds,
+  persistClearedSequenceBarIds,
+  getCurrentLocalDateKey,
+  getGameNormalizedDateKey,
+  sanitizeOperatorFolderName,
+  sortGamesChronologicallyDesc,
+  updateSyncStatus: () => updateSyncStatus({}),
+  syncTemporaryLocalCache,
+  getAllGamesFromIndexedDB,
+  removeQueueTaskFromIndexedDB,
+  deleteGameFromIndexedDB,
+  safeGetItem,
+  safeSetItem,
+  safeRemoveItem,
+  getKeysByPrefix,
+  sequence75StorageKey: STORAGE_KEY_SEQUENCE_75,
+  sequence90StorageKey: STORAGE_KEY_SEQUENCE_90,
+});
 
 export function isCurrentSessionAdmin(): boolean {
   if (typeof window === 'undefined') return false;
@@ -1349,413 +1373,37 @@ export async function saveGameToFirestoreAndGallery(item: GameSequenceItem): Pro
   await saveGameUnified(item);
 }
 
-/**
- * Cleans deleted games from sequence bars in IndexedDB/memory so deleted games immediately disappear from right sequence bar.
- */
-function purgeDeletedGamesFromLocalSequenceBars(
-  idsToDelete: Set<string>,
-  deletedItems: GameSequenceItem[]
-): void {
-  if (typeof window === 'undefined') return;
-  try {
-    const keysToClean = getKeysByPrefix([STORAGE_KEY_SEQUENCE_75, STORAGE_KEY_SEQUENCE_90]);
 
-    for (const key of keysToClean) {
-      const raw = safeGetItem(key);
-      if (!raw) continue;
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) continue;
-
-      const filtered = parsed.filter((seqItem: GameSequenceItem) => {
-        if (!seqItem) return false;
-        if (seqItem.id && idsToDelete.has(seqItem.id)) return false;
-        const matchDeleted = deletedItems.some(
-          (del) =>
-            del.round === seqItem.round &&
-            getGameNormalizedDateKey(del) === getGameNormalizedDateKey(seqItem) &&
-            (del.timestamp === seqItem.timestamp || del.ballNumber === seqItem.ballNumber)
-        );
-        return !matchDeleted;
-      });
-
-      if (filtered.length !== parsed.length) {
-        safeSetItem(key, JSON.stringify(filtered));
-      }
-    }
-  } catch {
-    // ignore
-  }
-}
-
-/**
- * Core atomic batch deletion across Memory, IndexedDB, Save Queue, Local Sequence Cache, and Firestore.
- * Strictly reserved for Administrators.
- */
-async function executeBatchGameDeletion(
-  idsToDelete: Set<string>,
-  matchingItems: GameSequenceItem[] = []
-): Promise<number> {
-  if (!isCurrentSessionAdmin()) {
-    console.warn('[RBAC] Acción denegada: solo los administradores pueden borrar partidas o carpetas.');
-    return 0;
-  }
-
-  if (idsToDelete.size === 0) return 0;
-
-  // 1. Register tombstones immediately so onSnapshot / auto-heal can NEVER resurrect these games
-  for (const docId of idsToDelete) {
-    storageState.deletedGameIdsSet.add(docId);
-    storageState.syncQueueMap.delete(docId);
-    storageState.firestoreGamesMemoryStore.delete(docId);
-  }
-  persistDeletedGameIds();
-
-  // 2. Purge from local sequence bars and notify all UI subscribers in 0ms
-  purgeDeletedGamesFromLocalSequenceBars(idsToDelete, matchingItems);
-
-  updateSyncStatus({});
-  const remaining = sortGamesChronologicallyDesc(
-    Array.from(storageState.firestoreGamesMemoryStore.values())
-  );
-  storageState.cachedSortedGames = remaining;
-  syncTemporaryLocalCache(remaining);
-
-  storageState.savedGamesSubscribers.forEach((sub) => {
-    try {
-      sub(remaining);
-    } catch {
-      // ignore
-    }
-  });
-
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(
-      new CustomEvent('bingo_saved_games_updated', {
-        detail: {
-          total: remaining.length,
-          deletedCount: idsToDelete.size,
-          deletedIds: Array.from(idsToDelete),
-        },
-      })
-    );
-  }
-
-  // 3. Remove from IndexedDB stores (games_store & save_queue_store) and Firestore in parallel
-  await Promise.allSettled(
-    Array.from(idsToDelete).map(async (docId) => {
-      await removeQueueTaskFromIndexedDB(docId);
-      await deleteGameFromIndexedDB(docId);
-      try {
-        await deleteDoc(doc(db, 'saved_games', docId));
-      } catch (err) {
-        console.warn(`Firestore delete warning for ${docId} (tombstoned locally):`, err);
-      }
-    })
-  );
-
-  return idsToDelete.size;
-}
-
-/**
- * Permanently deletes a game from IndexedDB, Save Queue, and Firestore (Admin only).
- */
+/** Permanently deletes a game from IndexedDB, Save Queue, and Firestore (Admin only). */
 export async function deleteGamePermanently(idOrItem: string | GameSequenceItem): Promise<boolean> {
-  if (!idOrItem || !isCurrentSessionAdmin()) return false;
-
-  const targetId = typeof idOrItem === 'string' ? idOrItem : idOrItem.id;
-  const targetRound = typeof idOrItem === 'object' ? idOrItem.round : undefined;
-  const targetTimestamp = typeof idOrItem === 'object' ? idOrItem.timestamp : undefined;
-  const targetDate = typeof idOrItem === 'object' ? getGameNormalizedDateKey(idOrItem) : undefined;
-  const targetOp =
-    typeof idOrItem === 'object'
-      ? sanitizeOperatorFolderName(idOrItem.operatorFolder || idOrItem.operatorName)
-      : undefined;
-
-  try {
-    const current = getSavedGamesGallery();
-    const localIdbGames = await getAllGamesFromIndexedDB();
-    const combined = [...current, ...localIdbGames];
-
-    const matchingItems = combined.filter((g) => {
-      if (!g) return false;
-      if (targetId && g.id === targetId) return true;
-      if (
-        targetRound !== undefined &&
-        targetDate &&
-        targetOp &&
-        g.round === targetRound &&
-        getGameNormalizedDateKey(g) === targetDate &&
-        sanitizeOperatorFolderName(g.operatorFolder || g.operatorName) === targetOp
-      ) {
-        return true;
-      }
-      if (
-        targetRound !== undefined &&
-        targetTimestamp !== undefined &&
-        g.round === targetRound &&
-        g.timestamp === targetTimestamp
-      ) {
-        return true;
-      }
-      return false;
-    });
-
-    const idsToDelete = new Set<string>();
-    if (targetId) idsToDelete.add(targetId);
-    matchingItems.forEach((g) => {
-      if (g.id) idsToDelete.add(g.id);
-    });
-
-    if (typeof idOrItem === 'object') {
-      matchingItems.push(idOrItem);
-    }
-
-    await executeBatchGameDeletion(idsToDelete, matchingItems);
-    return true;
-  } catch (e) {
-    console.error('Error deleting game:', e);
-    return false;
-  }
+  return deletionService.deleteGamePermanently(idOrItem);
 }
 
-/**
- * Empties the right-hand sequence bar for today's games (works for both Operators and Admins).
- * Marks all current today games as cleared from the right sequence bar, purges local sequence keys,
- * and if the user is an Admin, also deletes them from today's subfolder.
- */
+/** Empties the right-hand sequence bar for today's games (works for both Operators and Admins). */
 export async function clearRightSequenceBarToday(
   gamesToClear: GameSequenceItem[] = [],
   modeFilter?: '75' | '90'
 ): Promise<void> {
-  const todayKey = getCurrentLocalDateKey();
-  const idsToClear = new Set<string>();
-  const itemsToClear: GameSequenceItem[] = [];
-
-  for (const g of gamesToClear) {
-    if (g && g.id) {
-      idsToClear.add(g.id);
-      itemsToClear.push(g);
-    }
-  }
-
-  for (const [docId, g] of storageState.firestoreGamesMemoryStore.entries()) {
-    if (!g) continue;
-    const is90 = g.mode === '90' || g.sheetType === 'traditional-90';
-    const matchesMode =
-      !modeFilter || (modeFilter === '90' ? is90 : !is90);
-    if (matchesMode && getGameNormalizedDateKey(g) === todayKey) {
-      idsToClear.add(docId);
-      if (g.id) idsToClear.add(g.id);
-      itemsToClear.push(g);
-    }
-  }
-
-  for (const id of idsToClear) {
-    storageState.clearedSequenceBarIdsSet.add(id);
-  }
-  persistClearedSequenceBarIds();
-  purgeDeletedGamesFromLocalSequenceBars(idsToClear, itemsToClear);
-
-  if (typeof window !== 'undefined') {
-    try {
-      const keysToRemove = getKeysByPrefix([
-        STORAGE_KEY_SEQUENCE_75,
-        STORAGE_KEY_SEQUENCE_90,
-        'bingo_sheet_custom_sequence',
-      ]);
-      for (const k of keysToRemove) {
-        safeRemoveItem(k);
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  if (isCurrentSessionAdmin() && idsToClear.size > 0) {
-    await executeBatchGameDeletion(idsToClear, itemsToClear);
-  } else {
-    const allGames = sortGamesChronologicallyDesc(
-      Array.from(storageState.firestoreGamesMemoryStore.values())
-    );
-    storageState.cachedSortedGames = allGames;
-    storageState.savedGamesSubscribers.forEach((sub) => {
-      try {
-        sub(allGames);
-      } catch {
-        // ignore
-      }
-    });
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(
-        new CustomEvent('bingo_saved_games_updated', {
-          detail: {
-            total: allGames.length,
-            deletedIds: Array.from(idsToClear),
-          },
-        })
-      );
-    }
-  }
+  return deletionService.clearRightSequenceBarToday(gamesToClear, modeFilter);
 }
 
-/**
- * Permanently deletes all games of a specific operator on a specific dailyDate (YYYY-MM-DD) (Admin only).
- */
-export async function deleteGamesOfDay(
-  operatorName: string,
-  dateKey: string
-): Promise<number> {
-  if (!isCurrentSessionAdmin()) return 0;
-
-  try {
-    const safeOp = sanitizeOperatorFolderName(operatorName);
-    const opTrimmed = operatorName.trim().toLowerCase();
-    const idsToDelete = new Set<string>();
-    const matchingItems: GameSequenceItem[] = [];
-
-    const checkAndCollect = (docId: string | undefined, g: GameSequenceItem) => {
-      if (!g) return;
-      const gOp = (g.operatorName || 'Operadora Principal').trim().toLowerCase();
-      const gFolder = sanitizeOperatorFolderName(g.operatorFolder || gOp);
-      const gDate = getGameNormalizedDateKey(g);
-      const matchesOp =
-        !operatorName ||
-        operatorName === 'all' ||
-        gOp === opTrimmed ||
-        gFolder === safeOp;
-      const matchesDate =
-        gDate === dateKey || g.dailyDate === dateKey || g.subfolderDay === dateKey;
-
-      if (matchesOp && matchesDate) {
-        const resolvedId = docId || g.id;
-        if (resolvedId) idsToDelete.add(resolvedId);
-        matchingItems.push(g);
-      }
-    };
-
-    for (const [docId, g] of storageState.firestoreGamesMemoryStore.entries()) {
-      checkAndCollect(docId, g);
-    }
-
-    const localIdbGames = await getAllGamesFromIndexedDB();
-    for (const g of localIdbGames) {
-      checkAndCollect(g.id, g);
-    }
-
-    try {
-      const snap = await getDocs(collection(db, 'saved_games'));
-      snap.forEach((docSnap) => {
-        checkAndCollect(docSnap.id, docSnap.data() as GameSequenceItem);
-      });
-    } catch {
-      // Offline fallback: already collected from memory and IndexedDB
-    }
-
-    return await executeBatchGameDeletion(idsToDelete, matchingItems);
-  } catch (e) {
-    console.error('Error deleting games of day:', e);
-    return 0;
-  }
+/** Permanently deletes all games of a specific operator on a specific dailyDate (YYYY-MM-DD) (Admin only). */
+export async function deleteGamesOfDay(operatorName: string, dateKey: string): Promise<number> {
+  return deletionService.deleteGamesOfDay(operatorName, dateKey);
 }
 
-/**
- * Permanently deletes all games belonging to an operator's folder (Admin only).
- */
+/** Permanently deletes all games belonging to an operator's folder (Admin only). */
 export async function deleteGamesOfOperatorFolder(operatorName: string): Promise<number> {
-  if (!isCurrentSessionAdmin()) return 0;
-
-  try {
-    const safeOp = sanitizeOperatorFolderName(operatorName);
-    const opTrimmed = operatorName.trim().toLowerCase();
-    const idsToDelete = new Set<string>();
-    const matchingItems: GameSequenceItem[] = [];
-
-    const checkAndCollect = (docId: string | undefined, g: GameSequenceItem) => {
-      if (!g) return;
-      const gOp = (g.operatorName || 'Operadora Principal').trim().toLowerCase();
-      const gFolder = sanitizeOperatorFolderName(g.operatorFolder || gOp);
-      if (gOp === opTrimmed || gFolder === safeOp) {
-        const resolvedId = docId || g.id;
-        if (resolvedId) idsToDelete.add(resolvedId);
-        matchingItems.push(g);
-      }
-    };
-
-    for (const [docId, g] of storageState.firestoreGamesMemoryStore.entries()) {
-      checkAndCollect(docId, g);
-    }
-
-    const localIdbGames = await getAllGamesFromIndexedDB();
-    for (const g of localIdbGames) {
-      checkAndCollect(g.id, g);
-    }
-
-    try {
-      const snap = await getDocs(collection(db, 'saved_games'));
-      snap.forEach((docSnap) => {
-        checkAndCollect(docSnap.id, docSnap.data() as GameSequenceItem);
-      });
-    } catch {
-      // ignore if offline
-    }
-
-    return await executeBatchGameDeletion(idsToDelete, matchingItems);
-  } catch (e) {
-    console.error('Error deleting operator folder games:', e);
-    return 0;
-  }
+  return deletionService.deleteGamesOfOperatorFolder(operatorName);
 }
 
-/**
- * Clears saved games in IndexedDB, Save Queue, and Firestore (all or filtered by mode) (Admin only).
- */
+/** Clears saved games in IndexedDB, Save Queue, and Firestore (all or filtered by mode) (Admin only). */
 export async function clearAllSavedGamesGallery(
   filterMode?: 'all' | '75' | '90'
 ): Promise<void> {
-  if (!isCurrentSessionAdmin()) return;
-
-  try {
-    const idsToDelete = new Set<string>();
-    const matchingItems: GameSequenceItem[] = [];
-
-    const checkAndCollect = (docId: string | undefined, g: GameSequenceItem) => {
-      if (!g) return;
-      const is90 = g.mode === '90' || g.sheetType === 'traditional-90';
-      const matches =
-        !filterMode ||
-        filterMode === 'all' ||
-        (filterMode === '75' && !is90) ||
-        (filterMode === '90' && is90);
-      if (matches) {
-        const resolvedId = docId || g.id;
-        if (resolvedId) idsToDelete.add(resolvedId);
-        matchingItems.push(g);
-      }
-    };
-
-    for (const [docId, g] of storageState.firestoreGamesMemoryStore.entries()) {
-      checkAndCollect(docId, g);
-    }
-
-    const localIdbGames = await getAllGamesFromIndexedDB();
-    for (const g of localIdbGames) {
-      checkAndCollect(g.id, g);
-    }
-
-    try {
-      const snap = await getDocs(collection(db, 'saved_games'));
-      snap.forEach((docSnap) => {
-        checkAndCollect(docSnap.id, docSnap.data() as GameSequenceItem);
-      });
-    } catch {
-      // ignore if offline
-    }
-
-    await executeBatchGameDeletion(idsToDelete, matchingItems);
-  } catch (e) {
-    console.error('Error clearing saved games:', e);
-  }
+  return deletionService.clearAllSavedGamesGallery(filterMode);
 }
+
 
 export async function updateUserFieldsCentralized(
   userId: string,
