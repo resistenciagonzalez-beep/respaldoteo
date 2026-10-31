@@ -1,0 +1,15 @@
+core/
+
+    persistence/
+
+        PersistenceService.ts
+
+        QueueService.ts
+
+        FirestoreService.ts
+
+        IndexedDBService.ts
+
+        DiagnosticsService.ts
+
+        SyncService.ts
