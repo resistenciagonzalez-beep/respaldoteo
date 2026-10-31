@@ -1,7 +1,7 @@
 import { OperatorShift, GameSequenceItem } from '../types';
 import { doc, setDoc, serverTimestamp, collection, onSnapshot } from 'firebase/firestore';
 import { db } from '../firebase';
-import { safeSetItem } from './safeStorage';
+import { safeSetItem, safeGetItem } from './safeStorage';
 
 export const STORAGE_KEY_OPERATOR_SHIFTS = 'bingo_operator_shifts_v1';
 
@@ -40,7 +40,7 @@ function getCanonicalOpKey(operatorUid?: string, operatorName?: string): string 
 }
 
 /**
- * Get all stored shifts from Firestore-backed memory store (with temporary cache fallback on boot)
+ * Get all stored shifts from Firestore-backed memory store (with IndexedDB cache fallback on boot)
  */
 export function getAllShifts(): OperatorShift[] {
   ensureShiftsSubscription();
@@ -50,19 +50,19 @@ export function getAllShifts(): OperatorShift[] {
 
   if (typeof window === 'undefined') return [];
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_OPERATOR_SHIFTS);
+    const raw = safeGetItem(STORAGE_KEY_OPERATOR_SHIFTS);
     if (raw) {
       const parsed: OperatorShift[] = JSON.parse(raw);
       if (Array.isArray(parsed)) return parsed;
     }
   } catch (e) {
-    console.error('Error reading temporary operator shifts cache', e);
+    console.error('Error reading operator shifts cache', e);
   }
   return [];
 }
 
 /**
- * Save shifts list to temporary localStorage cache
+ * Save shifts list to IndexedDB-backed cache (never localStorage)
  */
 function saveShiftsToLocalCache(shifts: OperatorShift[]): void {
   if (typeof window === 'undefined') return;
@@ -278,20 +278,31 @@ export async function recordGameToActiveShift(
   const nextList = nextNewShift ? [nextNewShift, updatedShift, ...filtered] : [updatedShift, ...filtered];
   saveShiftsToLocalCache(nextList);
 
-  try {
-    await setDoc(doc(db, 'operator_shifts', updatedShift.id), {
-      ...updatedShift,
-      updatedAt: serverTimestamp(),
-    });
-    if (nextNewShift) {
-      await setDoc(doc(db, 'operator_shifts', nextNewShift.id), {
-        ...nextNewShift,
-        createdAt: serverTimestamp(),
+  // Fire-and-forget Firestore shift sync with timeout so it never blocks "Nueva Partida"
+  void (async () => {
+    try {
+      const writeShift = setDoc(doc(db, 'operator_shifts', updatedShift.id), {
+        ...updatedShift,
+        updatedAt: serverTimestamp(),
       });
+      await Promise.race([
+        writeShift,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Shift sync timeout')), 5000)),
+      ]);
+      if (nextNewShift) {
+        const writeNextShift = setDoc(doc(db, 'operator_shifts', nextNewShift.id), {
+          ...nextNewShift,
+          createdAt: serverTimestamp(),
+        });
+        await Promise.race([
+          writeNextShift,
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Next shift sync timeout')), 5000)),
+        ]);
+      }
+    } catch (fsErr) {
+      console.warn('Could not sync shift to Firestore:', fsErr);
     }
-  } catch (fsErr) {
-    console.warn('Could not sync shift to Firestore:', fsErr);
-  }
+  })();
 
   if (typeof window !== 'undefined') {
     window.dispatchEvent(

@@ -65,7 +65,13 @@ import {
   savePreviousGameSheet90,
 } from './utils/gameSnapshotStorage';
 import { getActiveShift, recordGameToActiveShift } from './utils/shiftsStorage';
-import { safeSetItem, sanitizeSequenceForStorage, cleanupLocalStorageForQuota } from './utils/safeStorage';
+import {
+  safeSetItem,
+  safeGetItem,
+  safeRemoveItem,
+  cleanupLocalStorageForQuota,
+  toLightweightSequenceItem,
+} from './utils/safeStorage';
 import {
   Minimize2,
   Volume2,
@@ -156,7 +162,7 @@ export default function App() {
   // Bolas cantadas highlight option: persisted across bolillero and sheet views
   const [autoHighlightDrawn, setAutoHighlightDrawn] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('bingo_auto_highlight_drawn');
+      const saved = safeGetItem('bingo_auto_highlight_drawn');
       return saved !== null ? saved === 'true' : true;
     }
     return true;
@@ -165,14 +171,14 @@ export default function App() {
   const handleToggleAutoHighlightDrawn = useCallback((val: boolean) => {
     setAutoHighlightDrawn(val);
     if (typeof window !== 'undefined') {
-      localStorage.setItem('bingo_auto_highlight_drawn', String(val));
+      safeSetItem('bingo_auto_highlight_drawn', String(val));
     }
   }, []);
 
   // Platform Color State (Rojo, Azul, Verde, Morado, Negro, Gris, Marrón, Rosado, Amarillo, Naranja)
   const [platformColor, setPlatformColor] = useState<PlatformColor>(() => {
     if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('bingo_platform_color') as PlatformColor;
+      const saved = safeGetItem('bingo_platform_color') as PlatformColor;
       if (saved) return saved;
     }
     return 'orange';
@@ -181,7 +187,7 @@ export default function App() {
   // Sync platform color attribute to HTML document root and localStorage
   useEffect(() => {
     document.documentElement.setAttribute('data-platform-color', platformColor);
-    localStorage.setItem('bingo_platform_color', platformColor);
+    safeSetItem('bingo_platform_color', platformColor);
   }, [platformColor]);
 
   const handleSelectPlatformColor = useCallback((color: PlatformColor) => {
@@ -333,7 +339,7 @@ export default function App() {
   const [gameObjectives, setGameObjectives] = useState<GameObjectives>(() => {
     if (typeof window !== 'undefined') {
       try {
-        const saved = localStorage.getItem('bingo_game_objectives');
+        const saved = safeGetItem('bingo_game_objectives');
         if (saved) return JSON.parse(saved);
       } catch (err) {
         console.warn('Error reading game objectives:', err);
@@ -346,7 +352,7 @@ export default function App() {
     setGameObjectives((prev) => {
       const updated = { ...prev, [key]: !prev[key] };
       try {
-        localStorage.setItem('bingo_game_objectives', JSON.stringify(updated));
+        safeSetItem('bingo_game_objectives', JSON.stringify(updated));
       } catch (err) {
         console.warn('Error saving game objectives:', err);
       }
@@ -617,7 +623,8 @@ export default function App() {
         // Extract current player summaries (GANO, DEBE, TOTAL) and recorded sequence
         let customSeq: CustomSequenceMap | undefined = undefined;
         try {
-          const rawSeq = localStorage.getItem('bingo_sheet_custom_sequence');
+          const opSeqKey = getOperatorStorageKey('bingo_sheet_custom_sequence', currentUser);
+          const rawSeq = safeGetItem(opSeqKey) || safeGetItem('bingo_sheet_custom_sequence');
           if (rawSeq) customSeq = JSON.parse(rawSeq) as CustomSequenceMap;
         } catch (err) {
           console.warn('Error reading custom sequence:', err);
@@ -720,7 +727,7 @@ export default function App() {
           timestamp: exactTime,
           sequenceSnapshot: {
             customSeqEntries: customSeq,
-            gameSequence: isBingo90 ? gameSequence90 : gameSequence,
+            gameSequence: (isBingo90 ? gameSequence90 : gameSequence).slice(0, 30).map(toLightweightSequenceItem),
             amboRow: effectiveAmboRow,
             ternaRow: effectiveTernaRow,
             bingoRow: effectiveWinRow,
@@ -758,23 +765,14 @@ export default function App() {
         } else {
           if (isBingo90) {
             setGameSequence90([]);
-            try {
-              localStorage.removeItem(STORAGE_KEY_SEQUENCE_90);
-            } catch (err) {
-              console.warn('Error clearing seq90:', err);
-            }
+            safeRemoveItem(STORAGE_KEY_SEQUENCE_90);
           } else {
             setGameSequence([]);
-            try {
-              localStorage.removeItem(STORAGE_KEY_SEQUENCE_75);
-            } catch (err) {
-              console.warn('Error clearing seq75:', err);
-            }
+            safeRemoveItem(STORAGE_KEY_SEQUENCE_75);
           }
-          try {
-            localStorage.removeItem('bingo_sheet_custom_sequence');
-          } catch (err) {
-            console.warn('Error clearing custom sequence:', err);
+          safeRemoveItem('bingo_sheet_custom_sequence');
+          if (currentUser) {
+            safeRemoveItem(getOperatorStorageKey('bingo_sheet_custom_sequence', currentUser));
           }
           setCurrentMatchRound(1);
         }
@@ -883,7 +881,8 @@ export default function App() {
 
       let customSeq: CustomSequenceMap | undefined = undefined;
       try {
-        const rawSeq = localStorage.getItem('bingo_sheet_custom_sequence');
+        const opSeqKey = getOperatorStorageKey('bingo_sheet_custom_sequence', currentUser);
+        const rawSeq = safeGetItem(opSeqKey) || safeGetItem('bingo_sheet_custom_sequence');
         if (rawSeq) customSeq = JSON.parse(rawSeq) as CustomSequenceMap;
       } catch (err) {
         console.warn('Error reading custom sequence on direct save:', err);
@@ -936,7 +935,7 @@ export default function App() {
         timestamp: exactTime,
         sequenceSnapshot: {
           customSeqEntries: customSeq,
-          gameSequence: isBingo90 ? gameSequence90 : gameSequence,
+          gameSequence: (isBingo90 ? gameSequence90 : gameSequence).slice(0, 30).map(toLightweightSequenceItem),
           amboRow: currentMatchAmboRowRef.current ?? undefined,
           ternaRow: currentMatchTernaRowRef.current ?? undefined,
           bingoRow: winRow,

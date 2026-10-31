@@ -25,12 +25,22 @@ import {
   FieldValue,
 } from 'firebase/firestore';
 import { db } from '../firebase';
-import { safeSetItem, sanitizeSequenceForStorage } from './safeStorage';
+import {
+  safeSetItem,
+  safeGetItem,
+  safeRemoveItem,
+  getKeysByPrefix,
+  sanitizeSequenceForStorage,
+  toLightweightSequenceItem,
+  migrateAndHydrateStorageFromIndexedDB,
+} from './safeStorage';
 import {
   SyncStatusState,
   SyncStatusType,
   QueuedSaveTask,
+  QueueTaskDiagnosticItem,
   BACKOFF_DELAYS_MS,
+  withTimeout,
   saveGameToIndexedDB,
   getAllGamesFromIndexedDB,
   deleteGameFromIndexedDB,
@@ -42,7 +52,7 @@ import {
 } from './offlinePersistenceEngine';
 
 export { getDiagnosticSaveLogs };
-export type { SyncStatusState, SyncStatusType };
+export type { SyncStatusState, SyncStatusType, QueueTaskDiagnosticItem };
 
 export const STORAGE_KEY_SAVED_GAMES_GALLERY = 'bingo_saved_games_gallery';
 export const STORAGE_KEY_SEQUENCE_75 = 'bingo_game_sequence_history';
@@ -63,22 +73,33 @@ let hasBootstrappedIndexedDB = false;
 
 const syncQueueMap = new Map<string, QueuedSaveTask>();
 let isProcessingQueue = false;
+let queueLockAcquiredAt = 0;
+let reprocessRequested = false;
 let retryTimerHandle: ReturnType<typeof setTimeout> | null = null;
+const QUEUE_WATCHDOG_TIMEOUT_MS = 20000;
 
 let currentSyncState: SyncStatusState = {
   status: 'synced',
   pendingCount: 0,
+  syncingCount: 0,
+  syncedCount: 0,
+  errorCount: 0,
   activeSaveId: null,
   lastError: null,
+  lastErrorAt: null,
   isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
   isFirestoreReachable: true,
   lastSyncedAt: null,
+  queueItems: [],
 };
 
 const syncStatusSubscribers = new Set<(state: SyncStatusState) => void>();
 
 function notifySyncStatusSubscribers(): void {
-  const snapshot: SyncStatusState = { ...currentSyncState };
+  const snapshot: SyncStatusState = {
+    ...currentSyncState,
+    queueItems: [...currentSyncState.queueItems],
+  };
   syncStatusSubscribers.forEach((cb) => {
     try {
       cb(snapshot);
@@ -88,33 +109,122 @@ function notifySyncStatusSubscribers(): void {
   });
 }
 
+function computeQueueDiagnostics(): {
+  pendingCount: number;
+  syncingCount: number;
+  syncedCount: number;
+  errorCount: number;
+  queueItems: QueueTaskDiagnosticItem[];
+  derivedStatus: SyncStatusType;
+} {
+  const tasks = Array.from(syncQueueMap.values()).sort((a, b) => a.enqueuedAt - b.enqueuedAt);
+  let pendingCount = 0;
+  let syncingCount = 0;
+  let errorCount = 0;
+
+  const queueItems: QueueTaskDiagnosticItem[] = tasks.map((t) => {
+    const effectiveStatus =
+      t.status === 'syncing' && (!isProcessingQueue || currentSyncState.activeSaveId !== t.gameId)
+        ? t.lastError
+          ? 'error'
+          : 'pending'
+        : t.status;
+
+    if (effectiveStatus === 'syncing') syncingCount++;
+    else if (effectiveStatus === 'error') errorCount++;
+    else if (effectiveStatus === 'pending') pendingCount++;
+
+    return {
+      gameId: t.gameId,
+      round: t.game?.round || 1,
+      dailyDate: t.game?.dailyDate || '',
+      operatorName: t.game?.operatorName || 'Operadora',
+      status: effectiveStatus,
+      retryCount: t.retryCount,
+      lastError: t.lastError,
+      nextRetryAt: t.nextRetryAt,
+      enqueuedAt: t.enqueuedAt,
+    };
+  });
+
+  let syncedCount = 0;
+  firestoreGamesMemoryStore.forEach((g, id) => {
+    if (g && !deletedGameIdsSet.has(id) && !syncQueueMap.has(id)) {
+      syncedCount++;
+    }
+  });
+
+  let derivedStatus: SyncStatusType = 'synced';
+  if (isProcessingQueue && currentSyncState.activeSaveId && syncingCount > 0) {
+    derivedStatus = 'saving';
+  } else if (errorCount > 0) {
+    derivedStatus = 'error';
+  } else if (pendingCount > 0 || tasks.length > 0) {
+    derivedStatus = 'pending';
+  } else {
+    derivedStatus = 'synced';
+  }
+
+  return {
+    pendingCount,
+    syncingCount,
+    syncedCount,
+    errorCount,
+    queueItems,
+    derivedStatus,
+  };
+}
+
 function updateSyncStatus(partial: Partial<SyncStatusState>): void {
+  if ('activeSaveId' in partial) {
+    currentSyncState.activeSaveId = partial.activeSaveId ?? null;
+  }
+  if ('lastError' in partial) {
+    currentSyncState.lastError = partial.lastError ?? null;
+  }
+  if ('lastErrorAt' in partial) {
+    currentSyncState.lastErrorAt = partial.lastErrorAt ?? null;
+  }
+  if ('isOnline' in partial && typeof partial.isOnline === 'boolean') {
+    currentSyncState.isOnline = partial.isOnline;
+  }
+  if ('isFirestoreReachable' in partial && typeof partial.isFirestoreReachable === 'boolean') {
+    currentSyncState.isFirestoreReachable = partial.isFirestoreReachable;
+  }
+  if ('lastSyncedAt' in partial) {
+    currentSyncState.lastSyncedAt = partial.lastSyncedAt ?? null;
+  }
+
+  const diag = computeQueueDiagnostics();
+
   currentSyncState = {
     ...currentSyncState,
-    ...partial,
-    pendingCount: syncQueueMap.size,
+    pendingCount: diag.pendingCount,
+    syncingCount: diag.syncingCount,
+    syncedCount: diag.syncedCount,
+    errorCount: diag.errorCount,
+    queueItems: diag.queueItems,
+    status: partial.status || diag.derivedStatus,
   };
 
-  // Derive visual indicator state automatically unless explicitly overridden
-  if (!partial.status) {
-    if (currentSyncState.activeSaveId) {
-      currentSyncState.status = 'saving';
-    } else if (syncQueueMap.size > 0) {
-      const hasError = Array.from(syncQueueMap.values()).some((t) => t.status === 'error');
-      currentSyncState.status =
-        hasError && (!currentSyncState.isOnline || !currentSyncState.isFirestoreReachable)
-          ? 'error'
-          : 'pending';
-    } else {
-      currentSyncState.status = 'synced';
-    }
+  // Safety guarantee: never stay in 'saving' if queue is not actively processing a task
+  if (currentSyncState.status === 'saving' && (!isProcessingQueue || !currentSyncState.activeSaveId)) {
+    currentSyncState.status = diag.errorCount > 0 ? 'error' : diag.pendingCount > 0 ? 'pending' : 'synced';
   }
 
   notifySyncStatusSubscribers();
 }
 
 export function getSyncStatusState(): SyncStatusState {
-  return { ...currentSyncState, pendingCount: syncQueueMap.size };
+  const diag = computeQueueDiagnostics();
+  return {
+    ...currentSyncState,
+    pendingCount: diag.pendingCount,
+    syncingCount: diag.syncingCount,
+    syncedCount: diag.syncedCount,
+    errorCount: diag.errorCount,
+    queueItems: diag.queueItems,
+  };
 }
 
 export function subscribeToSyncStatus(callback: (state: SyncStatusState) => void): () => void {
@@ -129,7 +239,34 @@ export function subscribeToSyncStatus(callback: (state: SyncStatusState) => void
   };
 }
 
-// Connection Monitor Setup (detects online, offline, reconnection & Firestore reachability)
+/**
+ * Manual trigger from Diagnostics Panel: resets retry timers on all queued/failed tasks,
+ * releases any stale lock, and immediately processes all pending games.
+ */
+export async function retryAllFailedAndPendingGamesNow(): Promise<void> {
+  if (retryTimerHandle) {
+    clearTimeout(retryTimerHandle);
+    retryTimerHandle = null;
+  }
+  if (isProcessingQueue && Date.now() - queueLockAcquiredAt > 8000) {
+    isProcessingQueue = false;
+    queueLockAcquiredAt = 0;
+  }
+  const now = Date.now();
+  for (const [gameId, task] of Array.from(syncQueueMap.entries())) {
+    const updated: QueuedSaveTask = {
+      ...task,
+      status: task.status === 'syncing' && isProcessingQueue ? 'syncing' : 'pending',
+      nextRetryAt: now,
+    };
+    syncQueueMap.set(gameId, updated);
+    void putQueueTaskInIndexedDB(updated);
+  }
+  updateSyncStatus({});
+  await processSaveQueue();
+}
+
+// Connection Monitor Setup (detects online, offline, reconnection & Watchdog)
 let connectionMonitorInitialized = false;
 
 function initConnectionMonitor(): void {
@@ -138,21 +275,44 @@ function initConnectionMonitor(): void {
 
   window.addEventListener('online', () => {
     console.info('[CONNECTION_MONITOR] Conexión a Internet restaurada. Sincronizando cola pendiente...');
-    updateSyncStatus({ isOnline: true, lastError: null });
-    if (retryTimerHandle) {
-      clearTimeout(retryTimerHandle);
-      retryTimerHandle = null;
-    }
-    void processSaveQueue();
+    updateSyncStatus({ isOnline: true });
+    void retryAllFailedAndPendingGamesNow();
   });
 
   window.addEventListener('offline', () => {
     console.warn('[CONNECTION_MONITOR] Sin conexión a Internet. Modo Offline-First activo (IndexedDB).');
     updateSyncStatus({
       isOnline: false,
-      status: syncQueueMap.size > 0 ? 'pending' : 'synced',
     });
   });
+
+  // Periodic Watchdog every 5 seconds: releases any stuck lock and triggers due retries
+  setInterval(() => {
+    const now = Date.now();
+    if (isProcessingQueue && queueLockAcquiredAt > 0 && now - queueLockAcquiredAt > QUEUE_WATCHDOG_TIMEOUT_MS) {
+      console.warn('[SYNC_WATCHDOG] Liberando bloqueo de cola por exceso de tiempo (>20s).');
+      isProcessingQueue = false;
+      queueLockAcquiredAt = 0;
+      for (const [id, t] of Array.from(syncQueueMap.entries())) {
+        if (t.status === 'syncing') {
+          syncQueueMap.set(id, {
+            ...t,
+            status: 'error',
+            lastError: t.lastError || 'Tiempo de espera agotado (Watchdog)',
+            nextRetryAt: now + 2000,
+          });
+        }
+      }
+      updateSyncStatus({ activeSaveId: null });
+    }
+
+    if (!isProcessingQueue && syncQueueMap.size > 0) {
+      const hasReadyTask = Array.from(syncQueueMap.values()).some((t) => t.nextRetryAt <= now);
+      if (hasReadyTask && (typeof navigator === 'undefined' || navigator.onLine)) {
+        void processSaveQueue();
+      }
+    }
+  }, 5000);
 
   // Bootstrap persisted IndexedDB games and pending Save Queue on startup
   void bootstrapOfflineFirstEngine();
@@ -169,7 +329,7 @@ const ADMIN_EMAILS_LIST = [
 const deletedGameIdsSet: Set<string> = (() => {
   if (typeof window === 'undefined') return new Set<string>();
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_DELETED_GAME_IDS);
+    const raw = safeGetItem(STORAGE_KEY_DELETED_GAME_IDS);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
@@ -185,7 +345,7 @@ const deletedGameIdsSet: Set<string> = (() => {
 const clearedSequenceBarIdsSet: Set<string> = (() => {
   if (typeof window === 'undefined') return new Set<string>();
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_CLEARED_SEQUENCE_BAR_IDS);
+    const raw = safeGetItem(STORAGE_KEY_CLEARED_SEQUENCE_BAR_IDS);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
@@ -221,7 +381,7 @@ function persistClearedSequenceBarIds(): void {
 export function isCurrentSessionAdmin(): boolean {
   if (typeof window === 'undefined') return false;
   try {
-    const saved = localStorage.getItem('bingo_current_user_session');
+    const saved = safeGetItem('bingo_current_user_session');
     if (saved) {
       const parsed = JSON.parse(saved);
       if (parsed && typeof parsed === 'object') {
@@ -245,6 +405,33 @@ async function bootstrapOfflineFirstEngine(): Promise<void> {
   hasBootstrappedIndexedDB = true;
 
   try {
+    // 0. Ensure automatic migration from localStorage to IndexedDB and KV hydration finishes first
+    await migrateAndHydrateStorageFromIndexedDB();
+
+    // Hydrate deleted/cleared sets from IndexedDB KV store if present
+    try {
+      const delRaw = safeGetItem(STORAGE_KEY_DELETED_GAME_IDS);
+      if (delRaw) {
+        const parsed = JSON.parse(delRaw);
+        if (Array.isArray(parsed)) {
+          parsed.forEach((id) => {
+            if (typeof id === 'string') deletedGameIdsSet.add(id);
+          });
+        }
+      }
+      const clrRaw = safeGetItem(STORAGE_KEY_CLEARED_SEQUENCE_BAR_IDS);
+      if (clrRaw) {
+        const parsed = JSON.parse(clrRaw);
+        if (Array.isArray(parsed)) {
+          parsed.forEach((id) => {
+            if (typeof id === 'string') clearedSequenceBarIdsSet.add(id);
+          });
+        }
+      }
+    } catch {
+      // ignore
+    }
+
     // 1. Load all locally saved games from IndexedDB into memory store immediately
     const localGames = await getAllGamesFromIndexedDB();
     for (const g of localGames) {
@@ -333,7 +520,8 @@ export function getCurrentLocalTimeString(): string {
 }
 
 /**
- * Recursively removes undefined fields from an object to ensure Firestore compatibility.
+ * Recursively removes undefined fields from plain objects/arrays to ensure Firestore compatibility,
+ * while preserving special Firebase FieldValue instances (such as serverTimestamp()) and Dates.
  */
 function sanitizeForFirestore<T>(obj: T): T {
   if (obj === null || obj === undefined) return null as unknown as T;
@@ -341,6 +529,10 @@ function sanitizeForFirestore<T>(obj: T): T {
   if (obj instanceof Date) return obj;
   if (Array.isArray(obj)) {
     return obj.map((item) => sanitizeForFirestore(item)) as unknown as T;
+  }
+  // Preserve Firebase FieldValue / Sentinel instances (e.g., serverTimestamp())
+  if ((obj as any)._methodName || (obj.constructor && obj.constructor !== Object)) {
+    return obj;
   }
   const result: Record<string, any> = {};
   for (const [key, value] of Object.entries(obj)) {
@@ -1025,7 +1217,7 @@ export function getSavedGamesGallery(): GameSequenceItem[] {
   if (typeof window === 'undefined') return [];
 
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_SAVED_GAMES_GALLERY);
+    const raw = safeGetItem(STORAGE_KEY_SAVED_GAMES_GALLERY);
     if (raw) {
       const parsed: GameSequenceItem[] = JSON.parse(raw);
       if (Array.isArray(parsed)) {
@@ -1162,7 +1354,9 @@ interface FirestoreGamePayload {
 function buildFirestorePayloadFromItem(normalizedItem: GameSequenceItem): FirestoreGamePayload {
   const mode: BingoMode =
     normalizedItem.mode || (normalizedItem.sheetType === 'traditional-90' ? '90' : '75');
-  const drawnBalls = normalizedItem.drawnBallsPlayed || [];
+  const drawnBalls = Array.isArray(normalizedItem.drawnBallsPlayed)
+    ? normalizedItem.drawnBallsPlayed.slice(0, 90)
+    : [];
   const exactLines = getGameLines(normalizedItem);
 
   const firestorePayload: FirestoreGamePayload = {
@@ -1211,12 +1405,33 @@ function buildFirestorePayloadFromItem(normalizedItem: GameSequenceItem): Firest
     firestorePayload.playerSummarySnapshot = JSON.parse(JSON.stringify(normalizedItem.playerSummarySnapshot));
   }
   if (normalizedItem.sequenceSnapshot) {
-    firestorePayload.sequenceSnapshot = JSON.parse(JSON.stringify(normalizedItem.sequenceSnapshot));
+    const seqCopy: GameSequenceSnapshot = {
+      ...normalizedItem.sequenceSnapshot,
+      customSeqEntries: normalizedItem.sequenceSnapshot.customSeqEntries
+        ? JSON.parse(JSON.stringify(normalizedItem.sequenceSnapshot.customSeqEntries))
+        : undefined,
+      // Always strip nested snapshots from sequenceSnapshot.gameSequence to prevent >1MB Firestore payloads
+      gameSequence: Array.isArray(normalizedItem.sequenceSnapshot.gameSequence)
+        ? normalizedItem.sequenceSnapshot.gameSequence.slice(0, 30).map(toLightweightSequenceItem)
+        : undefined,
+    };
+    firestorePayload.sequenceSnapshot = seqCopy;
   }
   if (normalizedItem.sheet75Snapshot) {
     const s75Copy: BingoSheetData = JSON.parse(JSON.stringify(normalizedItem.sheet75Snapshot));
     if (normalizedItem.playerSummarySnapshot && (!s75Copy.playerSummaryList || s75Copy.playerSummaryList.length === 0)) {
       s75Copy.playerSummaryList = normalizedItem.playerSummarySnapshot;
+    }
+    // Prevent giant base64 background images from exceeding Firestore's 1 MiB document size limit
+    if (
+      s75Copy.background?.url &&
+      s75Copy.background.url.startsWith('data:image') &&
+      s75Copy.background.url.length > 35000
+    ) {
+      s75Copy.background = {
+        ...s75Copy.background,
+        url: '',
+      };
     }
     firestorePayload.sheet75Snapshot = s75Copy;
   }
@@ -1224,12 +1439,14 @@ function buildFirestorePayloadFromItem(normalizedItem: GameSequenceItem): Firest
     firestorePayload.sheet90Snapshot = JSON.parse(JSON.stringify(normalizedItem.sheet90Snapshot));
   }
 
-  return sanitizeForFirestore(firestorePayload);
+  const sanitized = sanitizeForFirestore(firestorePayload);
+  sanitized.updatedAt = serverTimestamp();
+  return sanitized;
 }
 
 /**
- * Writes a single game to Firestore and immediately reads it back via getDoc
- * to verify that all critical fields match 100%.
+ * Writes a single game to Firestore with a strict 8s timeout and immediately reads it back via getDoc
+ * (with a strict 6s timeout) to verify that all critical fields match 100%.
  */
 async function writeAndVerifyGameInFirestore(
   game: GameSequenceItem
@@ -1240,12 +1457,30 @@ async function writeAndVerifyGameInFirestore(
 
   const docId = game.id!;
   const docRef = doc(db, 'saved_games', docId);
-  const sanitizedPayload = buildFirestorePayloadFromItem(game);
+
+  let sanitizedPayload: FirestoreGamePayload;
+  try {
+    sanitizedPayload = buildFirestorePayloadFromItem(game);
+  } catch (serializeErr: any) {
+    return {
+      verified: false,
+      errorMsg: `Error preparando datos de partida: ${serializeErr?.message || 'Payload inválido'}`,
+    };
+  }
 
   try {
-    await setDoc(docRef, sanitizedPayload, { merge: true });
+    await withTimeout(
+      setDoc(docRef, sanitizedPayload, { merge: true }),
+      8000,
+      `Firestore setDoc (${docId})`
+    );
 
-    const snap = await getDoc(docRef);
+    const snap = await withTimeout(
+      getDoc(docRef),
+      6000,
+      `Firestore getDoc (${docId})`
+    );
+
     if (!snap.exists()) {
       return { verified: false, errorMsg: 'El documento no existe en Firestore tras la escritura' };
     }
@@ -1284,33 +1519,74 @@ async function writeAndVerifyGameInFirestore(
 }
 
 /**
- * Processes the Save Queue strictly sequentially (maximum 1 active write at any time).
- * Uses Exponential Backoff (1s, 2s, 4s, 8s, 15s, 30s, 60s) on failure without ever losing a game.
+ * Processes the Save Queue sequentially (1 active write at a time) WITHOUT Head-of-Line blocking.
+ * - If a game fails to sync, it is marked as 'error' (Error Pendiente), its reason is recorded,
+ *   an Exponential Backoff retry is scheduled for that game, and the queue IMMEDIATELY continues
+ *   processing the remaining ready games in the queue.
+ * - All network and IndexedDB operations have strict timeouts.
+ * - Locks and activeSaveId are unconditionally released in the finally block.
  */
 export async function processSaveQueue(): Promise<void> {
-  if (isProcessingQueue) return;
+  if (isProcessingQueue) {
+    // Watchdog check: if lock has been held longer than QUEUE_WATCHDOG_TIMEOUT_MS, force-release it
+    if (queueLockAcquiredAt > 0 && Date.now() - queueLockAcquiredAt > QUEUE_WATCHDOG_TIMEOUT_MS) {
+      console.warn('[SAVE_QUEUE] Liberando bloqueo estancado antes de procesar la cola.');
+      isProcessingQueue = false;
+      queueLockAcquiredAt = 0;
+    } else {
+      reprocessRequested = true;
+      return;
+    }
+  }
+
   if (syncQueueMap.size === 0) {
     updateSyncStatus({ status: 'synced', activeSaveId: null });
     return;
   }
 
   isProcessingQueue = true;
+  queueLockAcquiredAt = Date.now();
+  reprocessRequested = false;
 
   try {
-    while (syncQueueMap.size > 0) {
-      const tasks = Array.from(syncQueueMap.values()).sort((a, b) => a.enqueuedAt - b.enqueuedAt);
-      const nextTask = tasks[0];
-      if (!nextTask) break;
+    // Prevent infinite loops within a single queue pass by tracking attempted gameIds in this pass
+    const attemptedInCurrentPass = new Set<string>();
 
+    while (syncQueueMap.size > 0) {
+      // Refresh lock heartbeat at the start of each item
+      queueLockAcquiredAt = Date.now();
       const now = Date.now();
-      if (nextTask.nextRetryAt > now) {
-        const waitMs = nextTask.nextRetryAt - now;
-        if (retryTimerHandle) clearTimeout(retryTimerHandle);
-        retryTimerHandle = setTimeout(() => {
-          retryTimerHandle = null;
-          void processSaveQueue();
-        }, waitMs);
+
+      // Select all tasks whose retry timer is due (nextRetryAt <= now) and haven't failed in this exact pass
+      const readyTasks = Array.from(syncQueueMap.values())
+        .filter((t) => t.nextRetryAt <= now && !attemptedInCurrentPass.has(t.gameId))
+        .sort((a, b) => {
+          // Prioritize newly created games (retryCount === 0) so an old failing game NEVER delays a new game
+          if (a.retryCount !== b.retryCount) {
+            return a.retryCount - b.retryCount;
+          }
+          return a.enqueuedAt - b.enqueuedAt;
+        });
+
+      const nextTask = readyTasks[0];
+      if (!nextTask) {
+        // No more tasks are ready right now; exit loop and let finally schedule the next retry timer
         break;
+      }
+
+      attemptedInCurrentPass.add(nextTask.gameId);
+
+      // Sanitize task's sequenceSnapshot in-place in case it was enqueued before payload shrinking
+      if (nextTask.game?.sequenceSnapshot?.gameSequence) {
+        nextTask.game = {
+          ...nextTask.game,
+          sequenceSnapshot: {
+            ...nextTask.game.sequenceSnapshot,
+            gameSequence: nextTask.game.sequenceSnapshot.gameSequence
+              .slice(0, 30)
+              .map(toLightweightSequenceItem),
+          },
+        };
       }
 
       const startMs = Date.now();
@@ -1323,7 +1599,20 @@ export async function processSaveQueue(): Promise<void> {
         activeSaveId: nextTask.gameId,
       });
 
-      const { verified, remoteGame, errorMsg } = await writeAndVerifyGameInFirestore(nextTask.game);
+      let verified = false;
+      let remoteGame: GameSequenceItem | undefined = undefined;
+      let errorMsg: string | undefined = undefined;
+
+      try {
+        const res = await writeAndVerifyGameInFirestore(nextTask.game);
+        verified = res.verified;
+        remoteGame = res.remoteGame;
+        errorMsg = res.errorMsg;
+      } catch (unexpectedErr: any) {
+        verified = false;
+        errorMsg = unexpectedErr?.message || 'Error inesperado al sincronizar con Firestore';
+      }
+
       const durationMs = Date.now() - startMs;
       const endTimeStr = getCurrentLocalTimeString();
 
@@ -1350,18 +1639,19 @@ export async function processSaveQueue(): Promise<void> {
         updateSyncStatus({
           activeSaveId: null,
           isFirestoreReachable: true,
-          lastError: null,
           lastSyncedAt: endTimeStr,
         });
       } else {
-        // Failed or offline: Keep in IndexedDB and schedule exponential backoff retry
+        // Failed or offline: Mark as 'error' (Error Pendiente), schedule retry for this item,
+        // and CONTINUE processing the rest of the queue so NO game ever blocks subsequent games!
         const retryIndex = Math.min(nextTask.retryCount, BACKOFF_DELAYS_MS.length - 1);
         const delayMs = BACKOFF_DELAYS_MS[retryIndex];
+        const reason = errorMsg || 'Error de sincronización con Firestore';
         const updatedTask: QueuedSaveTask = {
           ...nextTask,
           retryCount: nextTask.retryCount + 1,
           nextRetryAt: Date.now() + delayMs,
-          lastError: errorMsg || 'Error de sincronización',
+          lastError: reason,
           status: 'error',
         };
 
@@ -1378,28 +1668,68 @@ export async function processSaveQueue(): Promise<void> {
           durationMs,
           retryCount: updatedTask.retryCount,
           result: 'RETRY_SCHEDULED',
-          errorMessage: `${errorMsg || 'Fallo Firestore'} (Reintento en ${delayMs / 1000}s)`,
+          errorMessage: `${reason} (Reintento en ${delayMs / 1000}s)`,
         });
 
         updateSyncStatus({
           activeSaveId: null,
           isFirestoreReachable: false,
-          lastError: errorMsg || 'Pendiente de sincronizar con servidor',
-          status: typeof navigator !== 'undefined' && !navigator.onLine ? 'pending' : 'error',
+          lastError: `Partida #${nextTask.game.round}: ${reason}`,
+          lastErrorAt: endTimeStr,
         });
-
-        if (retryTimerHandle) clearTimeout(retryTimerHandle);
-        retryTimerHandle = setTimeout(() => {
-          retryTimerHandle = null;
-          void processSaveQueue();
-        }, delayMs);
-
-        break;
+        // Continue to next ready task in queue! Never break here.
       }
     }
+  } catch (outerErr: any) {
+    console.error('[SAVE_QUEUE] Error en bucle de sincronización:', outerErr);
+    updateSyncStatus({
+      activeSaveId: null,
+      lastError: outerErr?.message || 'Error interno en cola de sincronización',
+      lastErrorAt: getCurrentLocalTimeString(),
+    });
   } finally {
+    // Unconditionally release queue lock and reset activeSaveId
     isProcessingQueue = false;
-    updateSyncStatus({});
+    queueLockAcquiredAt = 0;
+
+    // Ensure no task remains stuck in 'syncing' state after loop finishes
+    for (const [id, task] of Array.from(syncQueueMap.entries())) {
+      if (task.status === 'syncing') {
+        syncQueueMap.set(id, {
+          ...task,
+          status: task.lastError ? 'error' : 'pending',
+        });
+      }
+    }
+
+    // Guarantees indicator transitions to 'synced', 'pending', or 'error' — NEVER stuck in 'saving'
+    updateSyncStatus({ activeSaveId: null });
+
+    // Schedule next automatic retry for the earliest remaining task in the queue
+    if (syncQueueMap.size > 0) {
+      const now = Date.now();
+      const earliestRetryAt = Math.min(
+        ...Array.from(syncQueueMap.values()).map((t) => t.nextRetryAt || now + 1000)
+      );
+      const waitMs = Math.max(500, earliestRetryAt - now);
+
+      if (retryTimerHandle) clearTimeout(retryTimerHandle);
+      retryTimerHandle = setTimeout(() => {
+        retryTimerHandle = null;
+        void processSaveQueue();
+      }, waitMs);
+    }
+
+    // If a new game was enqueued while the queue was finishing up, process it immediately
+    if (reprocessRequested) {
+      reprocessRequested = false;
+      const hasImmediate = Array.from(syncQueueMap.values()).some((t) => t.nextRetryAt <= Date.now());
+      if (hasImmediate) {
+        setTimeout(() => {
+          void processSaveQueue();
+        }, 50);
+      }
+    }
   }
 }
 
@@ -1460,6 +1790,15 @@ export async function saveGameUnified(
       ? (item.timestamp.trim().split(':').length === 2 ? `${item.timestamp.trim()}:00` : item.timestamp.trim())
       : getCurrentLocalTimeString();
 
+  const cleanSequenceSnapshot: GameSequenceSnapshot | undefined = item.sequenceSnapshot
+    ? {
+        ...item.sequenceSnapshot,
+        gameSequence: Array.isArray(item.sequenceSnapshot.gameSequence)
+          ? item.sequenceSnapshot.gameSequence.slice(0, 30).map(toLightweightSequenceItem)
+          : undefined,
+      }
+    : undefined;
+
   const normalizedItem: GameSequenceItem = {
     ...item,
     id: docId,
@@ -1475,6 +1814,7 @@ export async function saveGameUnified(
     dateFormatted: formattedDate,
     timestamp: exactTimestamp,
     totalLinesPlayed: exactLines,
+    sequenceSnapshot: cleanSequenceSnapshot,
   };
 
   // 3. STEP 1 OF OFFLINE-FIRST: Save immediately to IndexedDB & Memory Store
@@ -1486,11 +1826,10 @@ export async function saveGameUnified(
     clearedSequenceBarIdsSet.delete(docId);
     persistClearedSequenceBarIds();
   }
-  updateSyncStatus({ status: 'saving', activeSaveId: docId });
   await saveGameToIndexedDB(normalizedItem);
   saveGameToGalleryCache(normalizedItem);
 
-  await recordDiagnosticSaveLog({
+  void recordDiagnosticSaveLog({
     id: `log_local_${Date.now()}_${docId}`,
     gameId: docId,
     round: validRound,
@@ -1528,12 +1867,17 @@ export async function saveGameUnified(
     }
   }
 
-  // 5. STEP 3 OF OFFLINE-FIRST: Process the Sequential Save Queue
-  // If online, wait up to 4.5s for immediate Firestore verification; if slow or offline,
-  // continue seamlessly since the game is already safely persisted in IndexedDB and queued.
+  // 5. STEP 3 OF OFFLINE-FIRST: Trigger the Sequential Save Queue
+  // Wait up to 1.2s for fast cloud verification; if network is slow or offline,
+  // return immediately so "Nueva Partida" never lags while processSaveQueue continues in background.
   const queuePromise = processSaveQueue();
-  const timeoutPromise = new Promise<void>((resolve) => setTimeout(resolve, 4500));
-  await Promise.race([queuePromise, timeoutPromise]);
+  let raceTimer: ReturnType<typeof setTimeout> | null = null;
+  const fastTimeout = new Promise<void>((resolve) => {
+    raceTimer = setTimeout(resolve, 1200);
+  });
+  await Promise.race([queuePromise, fastTimeout]).finally(() => {
+    if (raceTimer !== null) clearTimeout(raceTimer);
+  });
 
   const isAlreadySynced = !syncQueueMap.has(docId);
   const latestGame = firestoreGamesMemoryStore.get(docId) || normalizedItem;
@@ -1599,7 +1943,7 @@ export async function saveGameToFirestoreAndGallery(item: GameSequenceItem): Pro
 }
 
 /**
- * Cleans deleted games from localStorage sequence bars so deleted games immediately disappear from right sequence bar.
+ * Cleans deleted games from sequence bars in IndexedDB/memory so deleted games immediately disappear from right sequence bar.
  */
 function purgeDeletedGamesFromLocalSequenceBars(
   idsToDelete: Set<string>,
@@ -1607,19 +1951,10 @@ function purgeDeletedGamesFromLocalSequenceBars(
 ): void {
   if (typeof window === 'undefined') return;
   try {
-    const keysToClean: string[] = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (
-        k &&
-        (k.startsWith(STORAGE_KEY_SEQUENCE_75) || k.startsWith(STORAGE_KEY_SEQUENCE_90))
-      ) {
-        keysToClean.push(k);
-      }
-    }
+    const keysToClean = getKeysByPrefix([STORAGE_KEY_SEQUENCE_75, STORAGE_KEY_SEQUENCE_90]);
 
     for (const key of keysToClean) {
-      const raw = localStorage.getItem(key);
+      const raw = safeGetItem(key);
       if (!raw) continue;
       const parsed = JSON.parse(raw);
       if (!Array.isArray(parsed)) continue;
@@ -1816,16 +2151,13 @@ export async function clearRightSequenceBarToday(
 
   if (typeof window !== 'undefined') {
     try {
-      for (let i = localStorage.length - 1; i >= 0; i--) {
-        const k = localStorage.key(i);
-        if (
-          k &&
-          (k.startsWith(STORAGE_KEY_SEQUENCE_75) ||
-            k.startsWith(STORAGE_KEY_SEQUENCE_90) ||
-            k.startsWith('bingo_sheet_custom_sequence'))
-        ) {
-          localStorage.removeItem(k);
-        }
+      const keysToRemove = getKeysByPrefix([
+        STORAGE_KEY_SEQUENCE_75,
+        STORAGE_KEY_SEQUENCE_90,
+        'bingo_sheet_custom_sequence',
+      ]);
+      for (const k of keysToRemove) {
+        safeRemoveItem(k);
       }
     } catch {
       // ignore

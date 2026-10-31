@@ -9,7 +9,7 @@ import {
   GameSequenceSnapshot,
 } from '../types';
 import { getBingo75Letter } from './ballColors';
-import { safeSetItem } from './safeStorage';
+import { safeSetItem, safeGetItem } from './safeStorage';
 import {
   getOperatorStorageKey,
   isGameOfOperator,
@@ -113,11 +113,11 @@ export function getPreviousGameSheet75(user?: AppUser | null): BingoSheetData | 
       candidateFallback = memoryPreviousSheet75;
     }
 
-    // 3. Temporary cache fallback
+    // 3. IndexedDB & memory cache fallback
     if (typeof window !== 'undefined') {
       if (user) {
         const opKey = getOperatorStorageKey(STORAGE_KEY_PREVIOUS_SHEET_75, user);
-        const opRaw = localStorage.getItem(opKey);
+        const opRaw = safeGetItem(opKey);
         if (opRaw) {
           const parsed: BingoSheetData = JSON.parse(opRaw);
           if (parsed && Array.isArray(parsed.columns)) {
@@ -127,7 +127,7 @@ export function getPreviousGameSheet75(user?: AppUser | null): BingoSheetData | 
         }
       }
 
-      const raw = localStorage.getItem(STORAGE_KEY_PREVIOUS_SHEET_75);
+      const raw = safeGetItem(STORAGE_KEY_PREVIOUS_SHEET_75);
       if (raw) {
         const parsed: BingoSheetData = JSON.parse(raw);
         if (parsed && Array.isArray(parsed.columns)) {
@@ -172,11 +172,11 @@ export function getPreviousGameSheet90(user?: AppUser | null): Traditional90Shee
       candidateFallback = memoryPreviousSheet90;
     }
 
-    // 3. Temporary cache fallback
+    // 3. IndexedDB & memory cache fallback
     if (typeof window !== 'undefined') {
       if (user) {
         const opKey = getOperatorStorageKey(STORAGE_KEY_PREVIOUS_SHEET_90, user);
-        const opRaw = localStorage.getItem(opKey);
+        const opRaw = safeGetItem(opKey);
         if (opRaw) {
           const parsed = JSON.parse(opRaw);
           if (parsed && (parsed.table1 || parsed.tables)) {
@@ -186,7 +186,7 @@ export function getPreviousGameSheet90(user?: AppUser | null): Traditional90Shee
         }
       }
 
-      const raw = localStorage.getItem(STORAGE_KEY_PREVIOUS_SHEET_90);
+      const raw = safeGetItem(STORAGE_KEY_PREVIOUS_SHEET_90);
       if (raw) {
         const parsed = JSON.parse(raw);
         if (parsed && (parsed.table1 || parsed.tables)) {
@@ -345,12 +345,12 @@ export function createDefaultSheet90(): Traditional90SheetData {
 }
 
 /**
- * Read current 75-ball multiplier sheet snapshot from temporary localStorage cache
+ * Read current 75-ball multiplier sheet snapshot from IndexedDB-backed storage
  */
 export function getStoredSheet75Snapshot(): BingoSheetData | null {
   if (typeof window === 'undefined') return null;
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_SHEET_75);
+    const raw = safeGetItem(STORAGE_KEY_SHEET_75);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (parsed && Array.isArray(parsed.columns) && parsed.columns.length > 0) {
@@ -364,12 +364,12 @@ export function getStoredSheet75Snapshot(): BingoSheetData | null {
 }
 
 /**
- * Read current 90-ball traditional sheet snapshot from temporary localStorage cache
+ * Read current 90-ball traditional sheet snapshot from IndexedDB-backed storage
  */
 export function getStoredSheet90Snapshot(): Traditional90SheetData | null {
   if (typeof window === 'undefined') return null;
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_SHEET_90);
+    const raw = safeGetItem(STORAGE_KEY_SHEET_90);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (parsed && (parsed.table1 || parsed.tables)) {

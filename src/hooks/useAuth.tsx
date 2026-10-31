@@ -22,7 +22,7 @@ import {
 } from 'firebase/firestore';
 import { auth, db } from '../firebase';
 import { AppUser, ActivityLogItem, BingoMode } from '../types';
-import { safeSetItem, cleanupLocalStorageForQuota } from '../utils/safeStorage';
+import { safeSetItem, safeGetItem, safeRemoveItem, cleanupLocalStorageForQuota } from '../utils/safeStorage';
 import { getStoredUsers, saveStoredUsers } from '../utils/userStorage';
 import { hashPassword, verifyPassword, sanitizeInput, stripSensitiveUserData } from '../utils/security';
 import { getCurrentLocalDateKey } from '../utils/savedGamesStorage';
@@ -58,7 +58,7 @@ const ADMIN_EMAILS = [
 export function useAuthProvider(): AuthContextType {
   const [currentUser, setCurrentUser] = useState<AppUser | null>(() => {
     try {
-      const saved = localStorage.getItem('bingo_current_user_session');
+      const saved = safeGetItem('bingo_current_user_session');
       if (saved) {
         const parsed = JSON.parse(saved);
         if (parsed && typeof parsed === 'object') {
@@ -117,11 +117,7 @@ export function useAuthProvider(): AuthContextType {
 
           if (updatedUser.status === 'suspended') {
             setCurrentUser(null);
-            try {
-              localStorage.removeItem('bingo_current_user_session');
-            } catch (rmErr) {
-              console.warn('Error removing suspended session:', rmErr);
-            }
+            safeRemoveItem('bingo_current_user_session');
             setError('Esta cuenta ha sido suspendida por un administrador.');
           } else {
             const cleanUser = stripSensitiveUserData(updatedUser) as AppUser;
@@ -198,27 +194,33 @@ export function useAuthProvider(): AuthContextType {
         return;
       }
 
-      try {
-        const operatorUid = currentUser?.id || auth.currentUser?.uid || 'anon';
-        const operatorName = sanitizeInput(currentUser?.name || auth.currentUser?.displayName || 'Operador', 60);
-        const operatorEmail = sanitizeInput(currentUser?.email || auth.currentUser?.email || '', 100);
-        const safeAction = sanitizeInput(action, 80);
-        const safeDetails = sanitizeInput(details || '', 500);
+      void (async () => {
+        try {
+          const operatorUid = currentUser?.id || auth.currentUser?.uid || 'anon';
+          const operatorName = sanitizeInput(currentUser?.name || auth.currentUser?.displayName || 'Operador', 60);
+          const operatorEmail = sanitizeInput(currentUser?.email || auth.currentUser?.email || '', 100);
+          const safeAction = sanitizeInput(action, 80);
+          const safeDetails = sanitizeInput(details || '', 500);
 
-        await addDoc(collection(db, 'activity_logs'), {
-          operatorUid,
-          operatorName,
-          operatorEmail,
-          action: safeAction,
-          actionType,
-          details: safeDetails,
-          timestamp: new Date().toISOString(),
-          createdAt: serverTimestamp(),
-          mode: mode || '75',
-        });
-      } catch (e) {
-        console.warn('Could not record activity log in Firestore:', e);
-      }
+          const writeLog = addDoc(collection(db, 'activity_logs'), {
+            operatorUid,
+            operatorName,
+            operatorEmail,
+            action: safeAction,
+            actionType,
+            details: safeDetails,
+            timestamp: new Date().toISOString(),
+            createdAt: serverTimestamp(),
+            mode: mode || '75',
+          });
+          await Promise.race([
+            writeLog,
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Activity log timeout')), 4000)),
+          ]);
+        } catch (e) {
+          console.warn('Could not record activity log in Firestore:', e);
+        }
+      })();
     },
     [currentUser]
   );
@@ -689,7 +691,7 @@ export function useAuthProvider(): AuthContextType {
         console.warn('Firebase signOut notice:', signOutErr);
       }
       setCurrentUser(null);
-      localStorage.removeItem('bingo_current_user_session');
+      safeRemoveItem('bingo_current_user_session');
     } catch (e) {
       console.error('Logout error:', e);
     }

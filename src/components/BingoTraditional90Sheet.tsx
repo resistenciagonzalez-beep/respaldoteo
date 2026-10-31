@@ -39,6 +39,7 @@ import { GameSheetSnapshotModal } from './GameSheetSnapshotModal';
 import { Bolillero90Sidebar } from './Bolillero90Sidebar';
 import { GameSequenceBar } from './GameSequenceBar';
 import { deleteGamePermanently } from '../utils/savedGamesStorage';
+import { safeSetItem, safeGetItem } from '../utils/safeStorage';
 
 interface BingoTraditional90SheetProps {
   drawnBalls?: Ball[];
@@ -135,7 +136,7 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
     };
 
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
+      const saved = safeGetItem(STORAGE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
         const parsedTables: Traditional90Table[] =
@@ -189,7 +190,7 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
   // Sheet Density: ultra (extra compact for full screen vertical view), compact, mini, or standard
   const [sheetDensity, setSheetDensity] = useState<'ultra' | 'compact' | 'mini' | 'standard'>(() => {
     try {
-      const saved = localStorage.getItem('bingo_90_sheet_density') as 'ultra' | 'compact' | 'mini' | 'standard' | null;
+      const saved = safeGetItem('bingo_90_sheet_density') as 'ultra' | 'compact' | 'mini' | 'standard' | null;
       if (saved && ['ultra', 'compact', 'mini', 'standard'].includes(saved)) {
         return saved;
       }
@@ -201,11 +202,7 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
 
   const handleSetDensity = (newDensity: 'ultra' | 'compact' | 'mini' | 'standard') => {
     setSheetDensity(newDensity);
-    try {
-      localStorage.setItem('bingo_90_sheet_density', newDensity);
-    } catch (err) {
-      console.warn('Error saving bingo_90_sheet_density:', err);
-    }
+    safeSetItem('bingo_90_sheet_density', newDensity);
   };
   const [showPlayersBar, setShowPlayersBar] = useState<boolean>(true);
 
@@ -215,7 +212,7 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
   // Auto highlight drawn balls toggle (persisted)
   const [localAutoHighlightDrawn] = useState<boolean>(() => {
     try {
-      return localStorage.getItem('bingo_auto_highlight_drawn') === 'true';
+      return safeGetItem('bingo_auto_highlight_drawn') === 'true';
     } catch (err) {
       console.warn('Error reading bingo_auto_highlight_drawn:', err);
       return true;
@@ -315,7 +312,7 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
   // Collapsible top toolbar state to maximize vertical screen space
   const [isToolbarHidden, setIsToolbarHidden] = useState<boolean>(() => {
     try {
-      return localStorage.getItem('bingo_90_toolbar_hidden') === 'true';
+      return safeGetItem('bingo_90_toolbar_hidden') === 'true';
     } catch (err) {
       console.warn('Error reading bingo_90_toolbar_hidden:', err);
       return false;
@@ -325,11 +322,7 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
   const handleToggleToolbar = () => {
     setIsToolbarHidden((prev) => {
       const next = !prev;
-      try {
-        localStorage.setItem('bingo_90_toolbar_hidden', String(next));
-      } catch (err) {
-        console.warn('Error saving bingo_90_toolbar_hidden:', err);
-      }
+      safeSetItem('bingo_90_toolbar_hidden', String(next));
       notify(next ? 'Barra de opciones oculta. Máximo espacio vertical activo.' : 'Barra de opciones restaurada.');
       return next;
     });
@@ -569,14 +562,45 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
     notify(`Planilla eliminada`);
   };
 
-  // Persist to localStorage
+  // Persist to IndexedDB-backed safeStorage
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(sheetData));
-    } catch (err) {
-      console.warn('Failed to save traditional 90 sheet data', err);
-    }
+    safeSetItem(STORAGE_KEY, JSON.stringify(sheetData));
   }, [sheetData]);
+
+  // Hydrate if IndexedDB KV store finishes async hydration on initial boot
+  useEffect(() => {
+    const handleIdbHydrated = () => {
+      try {
+        const savedRaw = safeGetItem(STORAGE_KEY);
+        if (savedRaw) {
+          const parsed = JSON.parse(savedRaw);
+          if (parsed && (parsed.tables || parsed.table1)) {
+            setSheetData((prev) => {
+              const hasAssigned = (prev.tables || []).some((t) =>
+                t.rows?.some((r) => Boolean(r.playerId || r.playerName))
+              );
+              if (hasAssigned) return prev;
+              const parsedTables: Traditional90Table[] =
+                parsed.tables && parsed.tables.length > 0
+                  ? parsed.tables
+                  : [parsed.table1, parsed.table2].filter(Boolean);
+              return {
+                ...prev,
+                ...parsed,
+                tables: parsedTables,
+                table1: parsedTables[0] || prev.table1,
+                table2: parsedTables[1] || prev.table2,
+              };
+            });
+          }
+        }
+      } catch {
+        // ignore
+      }
+    };
+    window.addEventListener('bingo_indexeddb_kv_hydrated', handleIdbHydrated);
+    return () => window.removeEventListener('bingo_indexeddb_kv_hydrated', handleIdbHydrated);
+  }, []);
 
   // Set of drawn ball numbers from bolillero 90
   const drawnSet = useMemo(() => {

@@ -1,11 +1,11 @@
 import { AppUser } from '../types';
-import { safeSetItem } from './safeStorage';
+import { safeSetItem, safeGetItem } from './safeStorage';
 
 export const USERS_STORAGE_KEY = 'bingo_master_admin_users';
 
 export function getStoredUsers(): AppUser[] {
   try {
-    const raw = localStorage.getItem(USERS_STORAGE_KEY);
+    const raw = safeGetItem(USERS_STORAGE_KEY);
     if (raw) {
       const parsed: AppUser[] = JSON.parse(raw);
       if (Array.isArray(parsed)) {

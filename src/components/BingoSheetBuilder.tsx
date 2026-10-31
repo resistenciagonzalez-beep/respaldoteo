@@ -65,7 +65,7 @@ import { executeMismosReconstruction, getImmediatelyPrecedingSheet75 } from '../
 import {
   getOperatorActiveLines,
 } from '../utils/shiftsStorage';
-import { safeSetItem } from '../utils/safeStorage';
+import { safeSetItem, safeGetItem, safeRemoveItem } from '../utils/safeStorage';
 import {
   getOperatorStorageKey,
   getCurrentLocalDateKey,
@@ -389,7 +389,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
   // Toggle for top font size adjustment bar and results button above the sheet (can be completely hidden and reopened)
   const [isTopAdjustmentBarVisible, setIsTopAdjustmentBarVisible] = useState<boolean>(() => {
     try {
-      const saved = localStorage.getItem('bingo_top_adjust_bar_visible');
+      const saved = safeGetItem('bingo_top_adjust_bar_visible');
       return saved !== null ? JSON.parse(saved) : true;
     } catch (err) {
       console.warn('Error reading bingo_top_adjust_bar_visible:', err);
@@ -399,11 +399,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
 
   const handleToggleTopAdjustmentBar = (visible: boolean) => {
     setIsTopAdjustmentBarVisible(visible);
-    try {
-      localStorage.setItem('bingo_top_adjust_bar_visible', JSON.stringify(visible));
-    } catch (err) {
-      console.warn('Error saving bingo_top_adjust_bar_visible:', err);
-    }
+    safeSetItem('bingo_top_adjust_bar_visible', JSON.stringify(visible));
   };
 
   // Undo history stack for up to 4 moves / actions
@@ -416,7 +412,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
   const [cellFontSizeScale, setCellFontSizeScale] = useState<number>(() => {
     if (typeof window !== 'undefined') {
       try {
-        const saved = localStorage.getItem('bingo_sheet_cell_font_scale');
+        const saved = safeGetItem('bingo_sheet_cell_font_scale');
         return saved ? Number(saved) : 100;
       } catch (err) {
         console.warn('Error reading bingo_sheet_cell_font_scale:', err);
@@ -430,20 +426,16 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     const clamped = Math.max(70, Math.min(150, Math.round(val)));
     setCellFontSizeScale(clamped);
     if (typeof window !== 'undefined') {
-      try {
-        localStorage.setItem('bingo_sheet_cell_font_scale', String(clamped));
-      } catch (err) {
-        console.warn('Error saving bingo_sheet_cell_font_scale:', err);
-      }
+      safeSetItem('bingo_sheet_cell_font_scale', String(clamped));
     }
   };
 
-  // Custom Sequence manual overrides per row (Terna & Bingo) - Isolated per operator
+  // Custom Sequence manual overrides per row (Terna & Bingo) - Isolated per operator in IndexedDB
   const [customSeqEntries, setCustomSeqEntries] = useState<Record<number, { ambo?: number | string; terna?: number | string; bingo?: number | string }>>(() => {
     if (typeof window !== 'undefined') {
       try {
         const key = getOperatorStorageKey('bingo_sheet_custom_sequence', currentUser);
-        const saved = localStorage.getItem(key) || localStorage.getItem('bingo_sheet_custom_sequence');
+        const saved = safeGetItem(key) || safeGetItem('bingo_sheet_custom_sequence');
         return saved ? JSON.parse(saved) : {};
       } catch (err) {
         console.warn('Error reading bingo_sheet_custom_sequence:', err);
@@ -458,13 +450,13 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     if (typeof window === 'undefined') return;
     const key = getOperatorStorageKey('bingo_sheet_custom_sequence', currentUser);
     try {
-      const saved = localStorage.getItem(key);
+      const saved = safeGetItem(key);
       if (saved) {
         setCustomSeqEntries(JSON.parse(saved));
         return;
       }
       if (!currentUser) {
-        const legacy = localStorage.getItem('bingo_sheet_custom_sequence');
+        const legacy = safeGetItem('bingo_sheet_custom_sequence');
         if (legacy) {
           setCustomSeqEntries(JSON.parse(legacy));
           return;
@@ -600,8 +592,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
 
         try {
           const opKey = getOperatorStorageKey('bingo_sheet_custom_sequence', currentUser);
-          localStorage.setItem(opKey, JSON.stringify(next));
-          localStorage.setItem('bingo_sheet_custom_sequence', JSON.stringify(next));
+          safeSetItem(opKey, JSON.stringify(next));
+          safeSetItem('bingo_sheet_custom_sequence', JSON.stringify(next));
         } catch (err) {
           console.error(err);
         }
@@ -672,8 +664,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       }
       try {
         const opKey = getOperatorStorageKey('bingo_sheet_custom_sequence', currentUser);
-        localStorage.setItem(opKey, JSON.stringify(next));
-        localStorage.setItem('bingo_sheet_custom_sequence', JSON.stringify(next));
+        safeSetItem(opKey, JSON.stringify(next));
+        safeSetItem('bingo_sheet_custom_sequence', JSON.stringify(next));
       } catch (err) {
         console.error(err);
       }
@@ -716,7 +708,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
         [playerName]: 0,
       };
       try {
-        localStorage.setItem('bingo_player_cumulative_winnings_v2', JSON.stringify(updated));
+        safeSetItem('bingo_player_cumulative_winnings_v2', JSON.stringify(updated));
       } catch (err) {
         console.warn('Error saving reset winnings:', err);
       }
@@ -733,7 +725,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
         [playerName]: rawCurWonToOffset,
       };
       try {
-        localStorage.setItem('bingo_player_payout_offsets_v1', JSON.stringify(updated));
+        safeSetItem('bingo_player_payout_offsets_v1', JSON.stringify(updated));
       } catch (err) {
         console.warn('Error saving payout offsets:', err);
       }
@@ -760,7 +752,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
         [playerName]: 0,
       };
       try {
-        localStorage.setItem('bingo_player_cumulative_winnings_v2', JSON.stringify(updated));
+        safeSetItem('bingo_player_cumulative_winnings_v2', JSON.stringify(updated));
       } catch (err) {
         console.warn('Error saving reset winnings:', err);
       }
@@ -777,7 +769,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
         [playerName]: 0,
       };
       try {
-        localStorage.setItem('bingo_player_cumulative_debt_v2', JSON.stringify(updated));
+        safeSetItem('bingo_player_cumulative_debt_v2', JSON.stringify(updated));
       } catch (err) {
         console.warn('Error saving reset debt:', err);
       }
@@ -794,7 +786,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
         [playerName]: 999999,
       };
       try {
-        localStorage.setItem('bingo_player_payout_offsets_v1', JSON.stringify(updated));
+        safeSetItem('bingo_player_payout_offsets_v1', JSON.stringify(updated));
       } catch (err) {
         console.warn('Error saving payout offsets:', err);
       }
@@ -886,7 +878,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
         [editingPlayerBalance.name]: finalGano,
       };
       try {
-        localStorage.setItem('bingo_player_cumulative_winnings_v2', JSON.stringify(next));
+        safeSetItem('bingo_player_cumulative_winnings_v2', JSON.stringify(next));
       } catch (err) {
         console.error(err);
       }
@@ -902,16 +894,16 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
         [editingPlayerBalance.name]: finalDebe,
       };
       try {
-        localStorage.setItem('bingo_player_cumulative_debt_v2', JSON.stringify(next));
+        safeSetItem('bingo_player_cumulative_debt_v2', JSON.stringify(next));
       } catch (err) {
         console.error(err);
       }
       return next;
     });
 
-    // Record transaction history
+    // Record transaction history in IndexedDB
     try {
-      const historyRaw = localStorage.getItem('bingo_player_balance_history') || '[]';
+      const historyRaw = safeGetItem('bingo_player_balance_history') || '[]';
       const historyArr = JSON.parse(historyRaw);
       historyArr.unshift({
         id: `tx_${Date.now()}`,
@@ -925,7 +917,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
         operator: currentUser?.name || 'Operador',
       });
       // Keep last 100 transactions
-      localStorage.setItem('bingo_player_balance_history', JSON.stringify(historyArr.slice(0, 100)));
+      safeSetItem('bingo_player_balance_history', JSON.stringify(historyArr.slice(0, 100)));
     } catch (e) {
       console.warn('Balance history save warning:', e);
     }
@@ -1013,10 +1005,10 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       };
     });
 
-    // Try restoring from localStorage if existing, otherwise return clean blank sheet
+    // Try restoring from IndexedDB-backed safeStorage if existing, otherwise return clean blank sheet
     if (typeof window !== 'undefined') {
       try {
-        const savedRaw = localStorage.getItem(STORAGE_KEY);
+        const savedRaw = safeGetItem(STORAGE_KEY);
         if (savedRaw) {
           const parsed = JSON.parse(savedRaw);
           const baseCost = parsed.baseCost ?? 0.10;
@@ -1115,11 +1107,11 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
   const sheetRef = useRef<BingoSheetData>(sheet);
   sheetRef.current = sheet;
 
-  // Persistent cumulative winnings across partidas for players
+  // Persistent cumulative winnings across partidas for players (IndexedDB-backed)
   const [playerCumulativeWinnings, setPlayerCumulativeWinnings] = useState<Record<string, number>>(() => {
     if (typeof window !== 'undefined') {
       try {
-        const saved = localStorage.getItem('bingo_player_cumulative_winnings_v2');
+        const saved = safeGetItem('bingo_player_cumulative_winnings_v2');
         return saved ? JSON.parse(saved) : {};
       } catch (err) {
         console.warn('Error reading bingo_player_cumulative_winnings_v2:', err);
@@ -1129,11 +1121,11 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     return {};
   });
 
-  // Persistent cumulative debts across partidas for players
+  // Persistent cumulative debts across partidas for players (IndexedDB-backed)
   const [playerCumulativeDebt, setPlayerCumulativeDebt] = useState<Record<string, number>>(() => {
     if (typeof window !== 'undefined') {
       try {
-        const saved = localStorage.getItem('bingo_player_cumulative_debt_v2');
+        const saved = safeGetItem('bingo_player_cumulative_debt_v2');
         return saved ? JSON.parse(saved) : {};
       } catch (err) {
         console.warn('Error reading bingo_player_cumulative_debt_v2:', err);
@@ -1143,11 +1135,11 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     return {};
   });
 
-  // Persistent payout offsets (when an operator settles / pays out a player's winnings in the active game)
+  // Persistent payout offsets (IndexedDB-backed)
   const [playerPayoutOffsets, setPlayerPayoutOffsets] = useState<Record<string, number>>(() => {
     if (typeof window !== 'undefined') {
       try {
-        const saved = localStorage.getItem('bingo_player_payout_offsets_v1');
+        const saved = safeGetItem('bingo_player_payout_offsets_v1');
         return saved ? JSON.parse(saved) : {};
       } catch (err) {
         console.warn('Error reading bingo_player_payout_offsets_v1:', err);
@@ -1156,6 +1148,42 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     }
     return {};
   });
+
+  // Hydrate sheet and player balances if IndexedDB KV store finishes async hydration on initial boot
+  useEffect(() => {
+    const handleIdbHydrated = () => {
+      try {
+        const savedSheetRaw = safeGetItem(STORAGE_KEY);
+        if (savedSheetRaw && !hasAssignedCells75(sheetRef.current) && (sheetRef.current?.players?.length || 0) === 0) {
+          const parsed = JSON.parse(savedSheetRaw);
+          if (parsed && Array.isArray(parsed.columns)) {
+            setSheet((prev) => ({
+              ...prev,
+              ...parsed,
+              columns: parsed.columns || prev.columns,
+              players: parsed.players || prev.players,
+            }));
+          }
+        }
+        const savedWonRaw = safeGetItem('bingo_player_cumulative_winnings_v2');
+        if (savedWonRaw) {
+          setPlayerCumulativeWinnings((prev) => (Object.keys(prev).length === 0 ? JSON.parse(savedWonRaw) : prev));
+        }
+        const savedDebtRaw = safeGetItem('bingo_player_cumulative_debt_v2');
+        if (savedDebtRaw) {
+          setPlayerCumulativeDebt((prev) => (Object.keys(prev).length === 0 ? JSON.parse(savedDebtRaw) : prev));
+        }
+        const savedOffsetRaw = safeGetItem('bingo_player_payout_offsets_v1');
+        if (savedOffsetRaw) {
+          setPlayerPayoutOffsets((prev) => (Object.keys(prev).length === 0 ? JSON.parse(savedOffsetRaw) : prev));
+        }
+      } catch {
+        // ignore
+      }
+    };
+    window.addEventListener('bingo_indexeddb_kv_hydrated', handleIdbHydrated);
+    return () => window.removeEventListener('bingo_indexeddb_kv_hydrated', handleIdbHydrated);
+  }, []);
 
   // Modal to edit/adjust a player's balance
   const [editingPlayerBalance, setEditingPlayerBalance] = useState<{
@@ -1395,10 +1423,9 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       // Handle sequence reset if operator chose to clear
       if (!keepSequence) {
         setCustomSeqEntries({});
-        try {
-          localStorage.removeItem('bingo_sheet_custom_sequence');
-        } catch (err) {
-          console.warn('Error clearing custom sequence on reset:', err);
+        safeRemoveItem('bingo_sheet_custom_sequence');
+        if (currentUser) {
+          safeRemoveItem(getOperatorStorageKey('bingo_sheet_custom_sequence', currentUser));
         }
       }
 
@@ -1407,13 +1434,9 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
         setPlayerCumulativeWinnings({});
         setPlayerCumulativeDebt({});
         setPlayerPayoutOffsets({});
-        try {
-          localStorage.removeItem('bingo_player_cumulative_winnings_v2');
-          localStorage.removeItem('bingo_player_cumulative_debt_v2');
-          localStorage.removeItem('bingo_player_payout_offsets_v1');
-        } catch (err) {
-          console.warn('Error clearing balances on reset:', err);
-        }
+        safeRemoveItem('bingo_player_cumulative_winnings_v2');
+        safeRemoveItem('bingo_player_cumulative_debt_v2');
+        safeRemoveItem('bingo_player_payout_offsets_v1');
       } else {
         // Consolidate exact current GANO (totalGano) and DEBE (debe) for every active player into cumulative state
         // If a player's GANO was NOT marked as paid (totalGano > 0), it carries over into the next game's GANO.
@@ -1430,11 +1453,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
             updated[pNameKey] = p.totalGano;
             updated[p.name] = p.totalGano;
           });
-          try {
-            localStorage.setItem('bingo_player_cumulative_winnings_v2', JSON.stringify(updated));
-          } catch (err) {
-            console.warn('Error saving consolidated winnings:', err);
-          }
+          safeSetItem('bingo_player_cumulative_winnings_v2', JSON.stringify(updated));
           return updated;
         });
 
@@ -1448,21 +1467,13 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
             updated[pNameKey] = p.debe;
             updated[p.name] = p.debe;
           });
-          try {
-            localStorage.setItem('bingo_player_cumulative_debt_v2', JSON.stringify(updated));
-          } catch (err) {
-            console.warn('Error saving consolidated debt:', err);
-          }
+          safeSetItem('bingo_player_cumulative_debt_v2', JSON.stringify(updated));
           return updated;
         });
       }
 
       setPlayerPayoutOffsets({});
-      try {
-        localStorage.removeItem('bingo_player_payout_offsets_v1');
-      } catch (err) {
-        console.warn('Error removing payout offsets:', err);
-      }
+      safeRemoveItem('bingo_player_payout_offsets_v1');
 
       setActiveWinningRow(null);
       setActiveTernaRow(null);
