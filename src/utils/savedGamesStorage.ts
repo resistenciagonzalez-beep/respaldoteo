@@ -88,6 +88,7 @@ import {
 } from './usersService';
 import { createGalleryService } from './galleryService';
 import { createDeletionService } from './deletionService';
+import { createGameRepository } from './gameRepository';
 
 export { getDiagnosticSaveLogs };
 export { subscribeToActivityLogsCentralized, subscribeToUsersCentralized };
@@ -702,68 +703,6 @@ export async function reorganizeAndHealAllStoredGames(): Promise<{
 }
 
 
-/**
- * Resolves the existing document ID if a game with the same ID or same
- * (operatorFolder, dailyDate, mode, round, operatorUid) already exists, preventing duplicate records.
- */
-function resolveExistingOrCanonicalDocId(
-  item: GameSequenceItem,
-  operatorFolder: string,
-  dailyDate: string,
-  mode: BingoMode,
-  validRound: number
-): { docId: string; duplicateIdsToClean: string[] } {
-  const existingGames = getSavedGamesGallery();
-  const itemUid = item.operatorUid && item.operatorUid !== 'anon' ? item.operatorUid : null;
-
-  const matchingGames = existingGames.filter((g) => {
-    if (!g) return false;
-    const gDate = getGameNormalizedDateKey(g);
-    const gOp = sanitizeOperatorFolderName(g.operatorFolder || g.operatorName);
-    const gMode: BingoMode = g.mode || (g.sheetType === 'traditional-90' ? '90' : '75');
-    const gUid = g.operatorUid && g.operatorUid !== 'anon' ? g.operatorUid : null;
-
-    if (itemUid && gUid && itemUid !== gUid) {
-      return false;
-    }
-
-    return (
-      gDate === dailyDate &&
-      gOp === operatorFolder &&
-      gMode === mode &&
-      g.round === validRound
-    );
-  });
-
-  const canonicalId = buildCanonicalGameId(
-    operatorFolder,
-    dailyDate,
-    mode,
-    validRound,
-    item.operatorUid
-  );
-
-  const hasExplicitExistingId =
-    Boolean(item.id) && storageState.firestoreGamesMemoryStore.has(item.id!);
-
-  let chosenId: string;
-  if (hasExplicitExistingId) {
-    chosenId = item.id!;
-  } else if (matchingGames.length > 0 && matchingGames[0].id) {
-    chosenId = matchingGames[0].id;
-  } else if (item.id && !/^game_\d{10,}_\d+$/.test(item.id)) {
-    chosenId = item.id;
-  } else {
-    chosenId = canonicalId;
-  }
-
-  const duplicateIdsToClean = matchingGames
-    .map((g) => g.id)
-    .filter((id): id is string => Boolean(id && id !== chosenId));
-
-  return { docId: chosenId, duplicateIdsToClean };
-}
-
 // ============================================================================
 // SEQUENTIAL SAVE QUEUE & FIRESTORE VERIFICATION ENGINE
 // ============================================================================
@@ -1194,17 +1133,41 @@ export async function processSaveQueue(): Promise<void> {
   }
 }
 
-/**
- * Centralized Unified Offline-First Game Persistence Service.
- *
- * Flow:
- * 1. Normalizes exact date & subfolder (${operatorFolder}/${dailyDate}).
- * 2. Saves immediately to IndexedDB (primary local persistence — 0% risk of data loss).
- * 3. Updates authoritative in-memory store and confirms local save immediately.
- * 4. Enqueues the game in the persistent Sequential Save Queue.
- * 5. Processes the Save Queue sequentially (write to Firestore -> read back -> verify -> mark synced,
- *    or retry automatically with Exponential Backoff if offline/unreachable).
- */
+const gameRepository = createGameRepository({
+  normalization: {
+    buildCanonicalGameId,
+    getCurrentLocalTimeString,
+    getGameNormalizedDateKey,
+    getGameLines,
+    parseDateStringToDateKey,
+    sanitizeOperatorFolderName,
+    toLightweightSequenceItem,
+  },
+  storage: {
+    state: storageState,
+    deleteGameFromIndexedDB,
+    persistClearedSequenceBarIds,
+    persistDeletedGameIds,
+    putQueueTaskInIndexedDB,
+    saveGameToIndexedDB,
+  },
+  gallery: {
+    getSavedGamesGallery,
+    saveGameToGalleryCache,
+  },
+  queue: {
+    initConnectionMonitor,
+    processSaveQueue,
+    updateSyncStatus,
+  },
+  diagnostics: {
+    recordDiagnosticSaveLog,
+  },
+  firestore: {
+    deleteDuplicateGameDocument: (gameId) => deleteDoc(doc(db, 'saved_games', gameId)),
+  },
+});
+
 export async function saveGameUnified(
   item: GameSequenceItem
 ): Promise<{
@@ -1213,142 +1176,7 @@ export async function saveGameUnified(
   savedLocally: boolean;
   game: GameSequenceItem;
 }> {
-  if (!item) {
-    throw new Error('No se puede guardar una partida vacía');
-  }
-
-  initConnectionMonitor();
-  const startMs = Date.now();
-  const startTimeStr = getCurrentLocalTimeString();
-
-  // 1. Single source of truth for date: dailyDate (YYYY-MM-DD)
-  const dailyDate = getGameNormalizedDateKey(item);
-  const operatorName = (item.operatorName || 'Operadora Principal').trim();
-  const operatorFolder = sanitizeOperatorFolderName(item.operatorFolder || operatorName);
-  const subfolderDay = dailyDate;
-  const folderPath = `${operatorFolder}/${subfolderDay}`;
-
-  const mode: BingoMode = item.mode || (item.sheetType === 'traditional-90' ? '90' : '75');
-  const validRound = typeof item.round === 'number' && item.round >= 1 ? item.round : 1;
-
-  // 2. Preserve existing document ID strictly to prevent duplicates
-  const { docId, duplicateIdsToClean } = resolveExistingOrCanonicalDocId(
-    item,
-    operatorFolder,
-    dailyDate,
-    mode,
-    validRound
-  );
-
-  const exactLines = getGameLines(item);
-  let formattedDate = item.dateFormatted;
-  if (!formattedDate || !parseDateStringToDateKey(formattedDate)) {
-    const parts = dailyDate.split('-');
-    formattedDate = parts.length === 3 ? `${parts[2]}/${parts[1]}/${parts[0]}` : new Date().toLocaleDateString('es-ES');
-  }
-  const exactTimestamp =
-    item.timestamp && /^\d{1,2}:\d{2}(:\d{2})?$/.test(item.timestamp.trim())
-      ? (item.timestamp.trim().split(':').length === 2 ? `${item.timestamp.trim()}:00` : item.timestamp.trim())
-      : getCurrentLocalTimeString();
-
-  const cleanSequenceSnapshot: GameSequenceSnapshot | undefined = item.sequenceSnapshot
-    ? {
-        ...item.sequenceSnapshot,
-        gameSequence: Array.isArray(item.sequenceSnapshot.gameSequence)
-          ? item.sequenceSnapshot.gameSequence.slice(0, 30).map(toLightweightSequenceItem)
-          : undefined,
-      }
-    : undefined;
-
-  const normalizedItem: GameSequenceItem = {
-    ...item,
-    id: docId,
-    round: validRound,
-    mode,
-    dailyDate,
-    subfolderDay,
-    operatorFolder,
-    folderPath,
-    operatorName,
-    operatorUid: item.operatorUid || 'anon',
-    operatorEmail: item.operatorEmail || '',
-    dateFormatted: formattedDate,
-    timestamp: exactTimestamp,
-    totalLinesPlayed: exactLines,
-    sequenceSnapshot: cleanSequenceSnapshot,
-  };
-
-  // 3. STEP 1 OF OFFLINE-FIRST: Save immediately to IndexedDB & Memory Store
-  if (storageState.deletedGameIdsSet.has(docId)) {
-    storageState.deletedGameIdsSet.delete(docId);
-    persistDeletedGameIds();
-  }
-  if (storageState.clearedSequenceBarIdsSet.has(docId)) {
-    storageState.clearedSequenceBarIdsSet.delete(docId);
-    persistClearedSequenceBarIds();
-  }
-  await saveGameToIndexedDB(normalizedItem);
-  saveGameToGalleryCache(normalizedItem);
-
-  void recordDiagnosticSaveLog({
-    id: `log_local_${Date.now()}_${docId}`,
-    gameId: docId,
-    round: validRound,
-    dailyDate,
-    startTime: startTimeStr,
-    endTime: getCurrentLocalTimeString(),
-    durationMs: Date.now() - startMs,
-    retryCount: 0,
-    result: 'SAVED_LOCAL',
-    errorMessage: null,
-  });
-
-  // 4. STEP 2 OF OFFLINE-FIRST: Add to Persistent Sequential Save Queue
-  const existingTask = storageState.syncQueueMap.get(docId);
-  const queueTask: QueuedSaveTask = {
-    gameId: docId,
-    game: normalizedItem,
-    enqueuedAt: existingTask ? existingTask.enqueuedAt : Date.now(),
-    retryCount: 0,
-    nextRetryAt: Date.now(),
-    lastError: null,
-    status: 'pending',
-  };
-
-  storageState.syncQueueMap.set(docId, queueTask);
-  await putQueueTaskInIndexedDB(queueTask);
-  updateSyncStatus({});
-
-  // Clean up any legacy duplicate IDs
-  if (duplicateIdsToClean.length > 0) {
-    for (const dupId of duplicateIdsToClean) {
-      storageState.firestoreGamesMemoryStore.delete(dupId);
-      void deleteGameFromIndexedDB(dupId);
-      deleteDoc(doc(db, 'saved_games', dupId)).catch(() => {});
-    }
-  }
-
-  // 5. STEP 3 OF OFFLINE-FIRST: Trigger the Sequential Save Queue
-  // Wait up to 1.2s for fast cloud verification; if network is slow or offline,
-  // return immediately so "Nueva Partida" never lags while processSaveQueue continues in background.
-  const queuePromise = processSaveQueue();
-  let raceTimer: ReturnType<typeof setTimeout> | null = null;
-  const fastTimeout = new Promise<void>((resolve) => {
-    raceTimer = setTimeout(resolve, 1200);
-  });
-  await Promise.race([queuePromise, fastTimeout]).finally(() => {
-    if (raceTimer !== null) clearTimeout(raceTimer);
-  });
-
-  const isAlreadySynced = !storageState.syncQueueMap.has(docId);
-  const latestGame = storageState.firestoreGamesMemoryStore.get(docId) || normalizedItem;
-
-  return {
-    success: true,
-    verified: isAlreadySynced,
-    savedLocally: true,
-    game: latestGame,
-  };
+  return gameRepository.saveGameUnified(item);
 }
 
 /**
@@ -1362,9 +1190,8 @@ export async function updateGameUnified(
   savedLocally: boolean;
   game: GameSequenceItem;
 }> {
-  return saveGameUnified(item);
+  return gameRepository.updateGameUnified(item);
 }
-
 
 /**
  * Backward compatibility alias for saveGameUnified.
