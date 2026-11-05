@@ -29,14 +29,17 @@ type GalleryServiceDependencies = {
 
 export function createGalleryService(dependencies: GalleryServiceDependencies) {
   function ensureSharedSavedGamesListener(): void {
+    console.info('[GALLERY_DIAG] ensureSharedSavedGamesListener called');
     if (storageState.activeFirestoreUnsubscribe || typeof window === 'undefined') return;
     dependencies.initConnectionMonitor();
 
     try {
       const q = collection(db, 'saved_games');
+      console.info('[GALLERY_DIAG] creating Firestore listener');
       storageState.activeFirestoreUnsubscribe = onSnapshot(
         q,
         (snapshot) => {
+          console.info(`[GALLERY_DIAG] onSnapshot received ${snapshot.size} docs`);
           const receivedDocumentCount = snapshot.size;
           let discardedByDeletedGameIdsCount = 0;
           console.info('[GALLERY_DIAG] Firestore snapshot documents received:', receivedDocumentCount);
@@ -127,6 +130,7 @@ export function createGalleryService(dependencies: GalleryServiceDependencies) {
           });
         },
         (error) => {
+          console.error('[GALLERY_DIAG] Firestore listener error', error);
           console.warn('Firestore saved_games subscription error:', error);
           dependencies.updateSyncStatus({ isFirestoreReachable: false });
         }
