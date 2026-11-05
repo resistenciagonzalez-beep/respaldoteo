@@ -1,0 +1,445 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "operatorUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "dailyDate",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "operatorUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "subfolderDay",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "operatorFolder",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "dailyDate",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "operatorFolder",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "subfolderDay",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "operatorUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "dailyDate",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "mode",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "operatorUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "dailyDate",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "sheetType",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "operatorUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "subfolderDay",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "mode",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "operatorUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "subfolderDay",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "sheetType",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "operatorFolder",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "dailyDate",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "mode",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "operatorFolder",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "dailyDate",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "sheetType",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "operatorFolder",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "subfolderDay",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "mode",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "operatorFolder",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "subfolderDay",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "sheetType",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "folderPath",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "mode",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "folderPath",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "sheetType",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "operatorUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "dailyDate",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "mode",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "round",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "operatorUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "dailyDate",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "sheetType",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "round",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "operatorUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "subfolderDay",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "mode",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "round",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "operatorUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "subfolderDay",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "sheetType",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "round",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "operatorFolder",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "dailyDate",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "mode",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "round",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "operatorFolder",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "dailyDate",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "sheetType",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "round",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "operatorFolder",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "subfolderDay",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "mode",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "round",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "operatorFolder",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "subfolderDay",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "sheetType",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "round",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "folderPath",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "mode",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "round",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "saved_games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "folderPath",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "sheetType",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "round",
+          "order": "DESCENDING"
+        }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

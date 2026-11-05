@@ -1,5 +1,6 @@
 import type { GameSequenceItem } from '../types';
-import { collection, deleteDoc, doc, getDocs } from 'firebase/firestore';
+import { collection, deleteDoc, doc, getDocs, limit, query, startAfter, where } from 'firebase/firestore';
+import type { QueryConstraint } from 'firebase/firestore';
 import { db } from '../firebase';
 
 type DeletionState = {
@@ -36,6 +37,26 @@ type DeletionServiceDependencies = {
 
 export function createDeletionService(dependencies: DeletionServiceDependencies) {
   const { state } = dependencies;
+
+  async function getSavedGamesInPages(querySpecs: QueryConstraint[][] = [[]]): Promise<Array<{ id: string; game: GameSequenceItem }>> {
+    const records = new Map<string, GameSequenceItem>();
+    for (const spec of querySpecs) {
+      let cursor: any = null;
+      while (true) {
+        const pageQuery = query(
+          collection(db, 'saved_games'),
+          ...spec,
+          ...(cursor ? [startAfter(cursor)] : []),
+          limit(8)
+        );
+        const page = await getDocs(pageQuery);
+        page.docs.forEach((snapshot) => records.set(snapshot.id, snapshot.data() as GameSequenceItem));
+        if (page.size < 8) break;
+        cursor = page.docs[page.docs.length - 1];
+      }
+    }
+    return Array.from(records, ([id, game]) => ({ id, game }));
+  }
 
   function purgeDeletedGamesFromLocalSequenceBars(
     idsToDelete: Set<string>,
@@ -320,10 +341,14 @@ export function createDeletionService(dependencies: DeletionServiceDependencies)
       }
 
       try {
-        const snap = await getDocs(collection(db, 'saved_games'));
-        snap.forEach((docSnap) => {
-          checkAndCollect(docSnap.id, docSnap.data() as GameSequenceItem);
-        });
+        const remoteGames = await getSavedGamesInPages([
+          [where('dailyDate', '==', dateKey)],
+          [where('subfolderDay', '==', dateKey)],
+          ...(operatorName && operatorName !== 'all'
+            ? [[where('folderPath', '==', `${safeOp}/${dateKey}`)] as QueryConstraint[]]
+            : []),
+        ]);
+        remoteGames.forEach(({ id, game }) => checkAndCollect(id, game));
       } catch {
         // Offline fallback: already collected from memory and IndexedDB
       }
@@ -365,10 +390,11 @@ export function createDeletionService(dependencies: DeletionServiceDependencies)
       }
 
       try {
-        const snap = await getDocs(collection(db, 'saved_games'));
-        snap.forEach((docSnap) => {
-          checkAndCollect(docSnap.id, docSnap.data() as GameSequenceItem);
-        });
+        const remoteGames = await getSavedGamesInPages([
+          [where('operatorFolder', '==', safeOp)],
+          [where('operatorName', '==', operatorName)],
+        ]);
+        remoteGames.forEach(({ id, game }) => checkAndCollect(id, game));
       } catch {
         // ignore if offline
       }
@@ -414,10 +440,8 @@ export function createDeletionService(dependencies: DeletionServiceDependencies)
       }
 
       try {
-        const snap = await getDocs(collection(db, 'saved_games'));
-        snap.forEach((docSnap) => {
-          checkAndCollect(docSnap.id, docSnap.data() as GameSequenceItem);
-        });
+        const remoteGames = await getSavedGamesInPages();
+        remoteGames.forEach(({ id, game }) => checkAndCollect(id, game));
       } catch {
         // ignore if offline
       }

@@ -45,8 +45,6 @@ import {
   setDoc,
   serverTimestamp,
   deleteDoc,
-  collection,
-  getDocs,
   getDoc,
   FieldValue,
 } from 'firebase/firestore';
@@ -200,8 +198,6 @@ const gameMaintenanceService = createGameMaintenanceService({
     doc,
     setDoc,
     deleteDoc,
-    collection,
-    getDocs,
   },
   storage: {
     deleteGameFromIndexedDB,
@@ -397,7 +393,6 @@ export function isRealSavedGameInTodaySubfolder(
 const galleryService = createGalleryService({
   initConnectionMonitor,
   updateSyncStatus,
-  deleteGameFromIndexedDB,
   saveGameToIndexedDB,
   normalizeGameFolderMetadata,
   sortGamesChronologicallyDesc,
@@ -405,16 +400,51 @@ const galleryService = createGalleryService({
   safeGetItem,
   savedGamesGalleryStorageKey: STORAGE_KEY_SAVED_GAMES_GALLERY,
   hasExplicitGameDateKey,
+  sanitizeOperatorFolderName,
+  getGameNormalizedDateKey,
+  getGameLines,
 });
 
+export function subscribeToRecentSavedGames(
+  callback: (games: GameSequenceItem[]) => void
+): () => void {
+  return galleryService.subscribeToRecentSavedGames(callback);
+}
+
+/** Compatibility wrapper; this is intentionally bounded and never observes the full collection. */
 export function subscribeToSavedGamesFirestore(
   callback: (games: GameSequenceItem[]) => void
 ): () => void {
-  return galleryService.subscribeToSavedGamesFirestore(callback);
+  return galleryService.subscribeToRecentSavedGames(callback);
 }
 
 export function getSavedGamesGallery(): GameSequenceItem[] {
   return galleryService.getSavedGamesGallery();
+}
+
+export function getGalleryOperators(currentUser: AppUser | null | undefined, isAdmin: boolean) {
+  return galleryService.getGalleryOperators(currentUser, isAdmin);
+}
+
+export function getGalleryDates(operator: import('./galleryService').GalleryOperator) {
+  return galleryService.getGalleryDates(operator);
+}
+
+export function getGalleryGamesPage(
+  operator: import('./galleryService').GalleryOperator,
+  dateKey: string,
+  cursor?: import('./galleryService').GalleryGamesCursor | null
+) {
+  return galleryService.getGalleryGamesPage(operator, dateKey, cursor);
+}
+
+export function subscribeToTodaySavedGames(
+  operator: import('./galleryService').GalleryOperator,
+  dateKey: string,
+  mode: BingoMode,
+  callback: (games: GameSequenceItem[]) => void
+): () => void {
+  return galleryService.subscribeToTodaySavedGames(operator, dateKey, mode, callback);
 }
 
 export function saveGameToGalleryCache(normalizedItem: GameSequenceItem): void {
@@ -423,11 +453,7 @@ export function saveGameToGalleryCache(normalizedItem: GameSequenceItem): void {
 
 
 
-/**
- * Scans all saved games in Firestore.
- * If any game has a date different from the subfolder where it is stored,
- * it is automatically moved to its correct subfolder.
- */
+/** Reorganizes already loaded saved games without scanning the Firestore collection. */
 export async function reorganizeAndHealAllStoredGames(): Promise<{
   totalChecked: number;
   reorganizedCount: number;

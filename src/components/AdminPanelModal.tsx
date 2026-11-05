@@ -40,7 +40,7 @@ import {
   deleteGamePermanently,
   deleteGamesOfDay,
   updateGameUnified,
-  subscribeToSavedGamesFirestore,
+  subscribeToRecentSavedGames,
   getCurrentLocalDateKey,
   getGameNormalizedDateKey,
   subscribeToUsersCentralized,
@@ -205,7 +205,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     return () => unsubscribeActivity();
   }, [isOpen, addToast]);
 
-  // 3. Real-time listener for Firestore `saved_games` collection via centralized service
+  // 3. Bounded listener for the most recent saved games; never watches the full collection.
   useEffect(() => {
     if (!isOpen) return;
 
@@ -214,7 +214,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     );
     setSavedGamesList(currentLocal);
 
-    const unsubscribeGames = subscribeToSavedGamesFirestore((games) => {
+    const unsubscribeGames = subscribeToRecentSavedGames((games) => {
       setIsFirestoreConnected(true);
       const filtered = games.filter((g) => g && g.id && !deletedGameIdsRef.current.has(g.id));
       filtered.sort((a, b) => (b.round || 0) - (a.round || 0));

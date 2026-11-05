@@ -42,7 +42,7 @@ import {
   getSavedGamesGallery,
   saveGameUnified,
   deleteGamePermanently,
-  subscribeToSavedGamesFirestore,
+  subscribeToTodaySavedGames,
   isGameOfOperator,
   getOperatorStorageKey,
   STORAGE_KEY_SEQUENCE_75,
@@ -50,6 +50,7 @@ import {
   getCurrentLocalDateKey,
   getCurrentLocalTimeString,
   getGameNormalizedDateKey,
+  sanitizeOperatorFolderName,
   isRealSavedGameInTodaySubfolder,
   clearRightSequenceBarToday,
 } from './utils/savedGamesStorage';
@@ -410,6 +411,7 @@ export default function App() {
   // Gallery of Saved Games state & Active Round Counter
   const [showSavedGamesGallery, setShowSavedGamesGallery] = useState<boolean>(false);
   const [savedGamesList, setSavedGamesList] = useState<GameSequenceItem[]>(() => getSavedGamesGallery());
+  const [todaySavedGamesState, setTodaySavedGamesState] = useState<GameSequenceItem[]>([]);
 
   const [currentMatchRound, setCurrentMatchRound] = useState<number>(() => {
     if (typeof window !== 'undefined') {
@@ -426,7 +428,6 @@ export default function App() {
     const galleryGames = getSavedGamesGallery();
     const list = galleryGames.filter((g) => {
       if (!g || typeof g.round !== 'number' || g.round < 1) {
-        console.warn('[GALLERY_DIAG] refreshSavedGamesList discarded game: invalid round', g);
         return false;
       }
       return true;
@@ -441,7 +442,7 @@ export default function App() {
     const isBingo90 = activeSheetType === 'traditional-90' || settings.mode === '90';
     const operatorForBar = currentUser && isAdmin ? { ...currentUser, role: 'operator' as const } : currentUser;
 
-    return savedGamesList
+    return todaySavedGamesState
       .filter((g) => {
         if (!g || !isRealSavedGameInTodaySubfolder(g, todayKey)) return false;
         if (operatorForBar && !isGameOfOperator(g, operatorForBar)) return false;
@@ -450,9 +451,9 @@ export default function App() {
         return true;
       })
       .sort((a, b) => (b.round || 0) - (a.round || 0));
-  }, [savedGamesList, currentUser, isAdmin, activeSheetType, settings.mode]);
+  }, [todaySavedGamesState, currentUser, isAdmin, activeSheetType, settings.mode]);
 
-  // Listen to global save/delete events and Firestore real-time updates so all operator games stay 100% synchronized
+  // Listen to local save/delete events. Firestore sequence updates use a scoped operator/day/mode subscription.
   useEffect(() => {
     refreshSavedGamesList();
     const handleSavedGamesUpdated = (e?: Event) => {
@@ -481,47 +482,46 @@ export default function App() {
     window.addEventListener('bingo_saved_games_updated', handleSavedGamesUpdated);
     window.addEventListener('storage', handleSavedGamesUpdated);
 
-    // Subscribe to Firestore so all operators' saved games appear in real time in their folders
-    const unsubscribeFirestore = subscribeToSavedGamesFirestore((remoteGames) => {
-      console.info('[GALLERY_DIAG] App received remoteGames.length:', remoteGames.length);
-      setSavedGamesList(remoteGames);
-
-      const todayKey = getCurrentLocalDateKey();
-      const myTodayGames = remoteGames.filter(
-        (g) =>
-          g &&
-          isRealSavedGameInTodaySubfolder(g, todayKey) &&
-          (isAdmin || !currentUser || isGameOfOperator(g, currentUser))
-      );
-
-      if (myTodayGames.length > 0) {
-        const maxTodayRound = Math.max(0, ...myTodayGames.map((g) => g.round || 0));
-        if (drawnBallsRef.current.length === 0) {
-          setCurrentMatchRound((prev) => Math.max(prev, maxTodayRound + 1));
-        }
-
-        const myToday75 = myTodayGames
-          .filter((g) => g.mode !== '90' && g.sheetType !== 'traditional-90')
-          .sort((a, b) => (a.round || 0) - (b.round || 0));
-        setGameSequence(myToday75);
-
-        const myToday90 = myTodayGames
-          .filter((g) => g.mode === '90' || g.sheetType === 'traditional-90')
-          .sort((a, b) => (a.round || 0) - (b.round || 0));
-        setGameSequence90(myToday90);
-      } else {
-        // If no games saved today yet (or all cleared/deleted), keep sequence empty
-        setGameSequence([]);
-        setGameSequence90([]);
-      }
-    });
-
     return () => {
       window.removeEventListener('bingo_saved_games_updated', handleSavedGamesUpdated);
       window.removeEventListener('storage', handleSavedGamesUpdated);
-      unsubscribeFirestore();
     };
-  }, [refreshSavedGamesList, currentUser, isAdmin]);
+  }, [refreshSavedGamesList]);
+
+  useEffect(() => {
+    const operatorUid = currentUser?.id || currentUser?.uid;
+    if (!currentUser || !operatorUid) {
+      setTodaySavedGamesState([]);
+      return;
+    }
+
+    const mode = activeSheetType === 'traditional-90' || settings.mode === '90' ? '90' : '75';
+    const operator = {
+      key: `uid:${operatorUid}`,
+      operatorUid,
+      operatorName: currentUser.name || 'Operadora Principal',
+      operatorFolder: sanitizeOperatorFolderName(currentUser.name || 'Operadora Principal'),
+    };
+    const operatorUser = { ...currentUser, role: 'operator' as const };
+    const unsubscribe = subscribeToTodaySavedGames(operator, getCurrentLocalDateKey(), mode, (games) => {
+      const todayKey = getCurrentLocalDateKey();
+      const validGames = games.filter((game) =>
+        isRealSavedGameInTodaySubfolder(game, todayKey) &&
+        isGameOfOperator(game, operatorUser)
+      );
+      setTodaySavedGamesState(validGames);
+      if (validGames.length > 0) {
+        const maxTodayRound = Math.max(0, ...validGames.map((game) => game.round || 0));
+        if (drawnBallsRef.current.length === 0) {
+          setCurrentMatchRound((previous) => Math.max(previous, maxTodayRound + 1));
+        }
+      }
+      const ascendingGames = [...validGames].sort((a, b) => (a.round || 0) - (b.round || 0));
+      if (mode === '90') setGameSequence90(ascendingGames);
+      else setGameSequence(ascendingGames);
+    });
+    return unsubscribe;
+  }, [currentUser, activeSheetType, settings.mode, isAdmin]);
 
   // Real-time calculation of current sheet financials for the active game
   const currentGameFinancials = useMemo(() => {
@@ -1689,7 +1689,7 @@ export default function App() {
             refreshSavedGamesList();
             setShowSavedGamesGallery(true);
           }}
-          savedGamesCount={savedGamesList.length}
+          savedGamesCount={todaySavedGames.length}
           platformColor={platformColor}
           onSelectPlatformColor={handleSelectPlatformColor}
           isFullscreen={isFullscreen}
@@ -1729,7 +1729,6 @@ export default function App() {
         {/* Saved Games Gallery Modal */}
         <SavedGamesGalleryModal
           isOpen={showSavedGamesGallery}
-          savedGames={savedGamesList}
           onClose={() => setShowSavedGamesGallery(false)}
           onRefreshGallery={refreshSavedGamesList}
           currentUser={currentUser}
@@ -1878,7 +1877,7 @@ export default function App() {
             refreshSavedGamesList();
             setShowSavedGamesGallery(true);
           }}
-          savedGamesCount={savedGamesList.length}
+          savedGamesCount={todaySavedGames.length}
           platformColor={platformColor}
           onSelectPlatformColor={handleSelectPlatformColor}
         />
@@ -2021,9 +2020,9 @@ export default function App() {
                 <Layers className="w-3.5 h-3.5 text-yellow-200 flex-shrink-0" />
                 <span className="hidden sm:inline">Partidas Guardadas</span>
                 <span className="sm:hidden">Partidas</span>
-                {savedGamesList.length > 0 && (
+                {todaySavedGames.length > 0 && (
                   <span className="px-1.5 py-0.2 rounded-full bg-amber-950 text-yellow-300 text-[9px] font-black leading-none">
-                    {savedGamesList.length}
+                    {todaySavedGames.length}
                   </span>
                 )}
               </button>
@@ -2400,7 +2399,6 @@ export default function App() {
       {/* Saved Games Gallery Modal */}
       <SavedGamesGalleryModal
         isOpen={showSavedGamesGallery}
-        savedGames={savedGamesList}
         onClose={() => setShowSavedGamesGallery(false)}
         onRefreshGallery={refreshSavedGamesList}
         currentUser={currentUser}

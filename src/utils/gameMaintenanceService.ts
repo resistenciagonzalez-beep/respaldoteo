@@ -2,7 +2,7 @@ import type { GameSequenceItem } from '../types';
 import type { storageState } from './storageState';
 
 type GameMaintenanceState = typeof storageState;
-type FirestoreApi = Pick<typeof import('firebase/firestore'), 'doc' | 'setDoc' | 'deleteDoc' | 'collection' | 'getDocs'>;
+type FirestoreApi = Pick<typeof import('firebase/firestore'), 'doc' | 'setDoc' | 'deleteDoc'>;
 
 type GameMaintenanceDependencies = {
   state: GameMaintenanceState;
@@ -11,8 +11,6 @@ type GameMaintenanceDependencies = {
     doc: FirestoreApi['doc'];
     setDoc: FirestoreApi['setDoc'];
     deleteDoc: FirestoreApi['deleteDoc'];
-    collection: FirestoreApi['collection'];
-    getDocs: FirestoreApi['getDocs'];
   };
   storage: {
     deleteGameFromIndexedDB: (gameId: string) => Promise<void>;
@@ -32,7 +30,7 @@ type GameMaintenanceDependencies = {
 
 export function createGameMaintenanceService(dependencies: GameMaintenanceDependencies) {
   const { state } = dependencies;
-  const { db, doc, setDoc, deleteDoc, collection, getDocs } = dependencies.firestore;
+  const { db, doc, setDoc, deleteDoc } = dependencies.firestore;
   const { deleteGameFromIndexedDB, saveGameToIndexedDB } = dependencies.storage;
   const { normalizeGameFolderMetadata, sortGamesChronologicallyDesc } = dependencies.normalization;
   const { syncTemporaryLocalCache } = dependencies.cache;
@@ -56,10 +54,7 @@ export function createGameMaintenanceService(dependencies: GameMaintenanceDepend
     let reorganizedCount = 0;
 
     try {
-      const snap = await getDocs(collection(db, 'saved_games'));
-      for (const docSnap of snap.docs) {
-        const rawData = docSnap.data() as GameSequenceItem;
-        const docKey = docSnap.id;
+      for (const [docKey, rawData] of state.firestoreGamesMemoryStore.entries()) {
         if (state.deletedGameIdsSet.has(docKey) || (rawData.id && state.deletedGameIdsSet.has(rawData.id))) {
           state.firestoreGamesMemoryStore.delete(docKey);
           void deleteGameFromIndexedDB(docKey);

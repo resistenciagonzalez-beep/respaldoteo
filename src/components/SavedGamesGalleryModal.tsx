@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { GameSequenceItem, AppUser } from '../types';
 import { getBingo75Letter, getBallBadgeColor } from '../utils/ballColors';
 import {
@@ -30,14 +30,16 @@ import {
 import {
   clearAllSavedGamesGallery,
   deleteGamePermanently,
-  isGameOfOperator,
-  parseDateStringToDateKey,
   getGameLines,
   deleteGamesOfDay,
   deleteGamesOfOperatorFolder,
   getCurrentLocalDateKey,
   reorganizeAndHealAllStoredGames,
+  getGalleryOperators,
+  getGalleryDates,
+  getGalleryGamesPage,
 } from '../utils/savedGamesStorage';
+import type { GalleryDate, GalleryGamesCursor, GalleryOperator } from '../utils/galleryService';
 import {
   exportElementAsJpg,
   exportElementAsPdf,
@@ -47,7 +49,6 @@ import {
 
 interface SavedGamesGalleryModalProps {
   isOpen: boolean;
-  savedGames: GameSequenceItem[];
   onClose: () => void;
   onRefreshGallery?: () => void;
   currentUser?: AppUser | null;
@@ -64,64 +65,6 @@ interface OperatorFolderGroup {
   totalCollected: number;
   totalPrizes: number;
   lastDate?: string;
-}
-
-function getOperatorFolderKey(
-  game: Partial<GameSequenceItem>,
-  currentUser?: AppUser | null,
-  isAdmin = false
-): string {
-  if (!isAdmin && currentUser) {
-    const currentUid = currentUser.id || currentUser.uid;
-    if (currentUid) return `uid:${currentUid}`;
-    const currentName = (currentUser.name || 'Operadora Principal').trim().toLowerCase();
-    return `name:${currentName}`;
-  }
-
-  const operatorFolder = game.operatorFolder?.trim().toLowerCase();
-  if (operatorFolder) return `folder:${operatorFolder}`;
-
-  const operatorUid = game.operatorUid?.trim();
-  if (operatorUid && operatorUid !== 'anon') return `uid:${operatorUid}`;
-
-  return `name:${(game.operatorName || 'Operadora Principal').trim().toLowerCase()}`;
-}
-
-function belongsToOperatorFolder(
-  game: GameSequenceItem,
-  folder: OperatorFolderGroup,
-  currentUser?: AppUser | null,
-  isAdmin = false
-): boolean {
-  if (!isAdmin && currentUser) {
-    const userUid = currentUser.id || currentUser.uid;
-    const gameUid = game.operatorUid?.trim();
-    if (userUid && gameUid && gameUid !== 'anon') return gameUid === userUid;
-    return isGameOfOperator(game, currentUser);
-  }
-
-  const operatorFolder = game.operatorFolder?.trim().toLowerCase();
-  if (folder.operatorFolder && operatorFolder) {
-    return folder.operatorFolder.trim().toLowerCase() === operatorFolder;
-  }
-
-  const operatorUid = game.operatorUid?.trim();
-  if (folder.key.startsWith('uid:') && operatorUid && operatorUid !== 'anon') {
-    return folder.key === `uid:${operatorUid}`;
-  }
-
-  return (game.operatorName || 'Operadora Principal').trim().toLowerCase() === folder.operatorName.trim().toLowerCase();
-}
-
-function getGalleryDateKey(game: Partial<GameSequenceItem>): string {
-  const candidates = [game.dailyDate, game.subfolderDay, game.folderPath?.split('/').pop()];
-  for (const candidate of candidates) {
-    const value = candidate?.trim();
-    if (!value) continue;
-    const normalized = parseDateStringToDateKey(value);
-    if (normalized) return normalized;
-  }
-  return '';
 }
 
 function getGameTimeValue(timestamp?: string): number {
@@ -145,14 +88,11 @@ function sortGamesByTimeDesc(games: GameSequenceItem[]): GameSequenceItem[] {
 
 export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
   isOpen,
-  savedGames,
   onClose,
   onRefreshGallery,
   currentUser,
   isAdmin = false,
 }) => {
-  console.info('[GALLERY_DIAG] SavedGamesGalleryModal savedGames.length:', savedGames.length);
-
   const [filterMode, setFilterMode] = useState<'all' | '75' | '90'>('all');
   const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -166,6 +106,28 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
   const [viewMode, setViewMode] = useState<'folders' | 'all'>('folders');
   const [selectedFolderOperator, setSelectedFolderOperator] = useState<string | null>(null);
   const [selectedFolderDay, setSelectedFolderDay] = useState<string | null>(null);
+  const [galleryOperators, setGalleryOperators] = useState<GalleryOperator[]>([]);
+  const [operatorDates, setOperatorDates] = useState<GalleryDate[]>([]);
+  const [loadedGames, setLoadedGames] = useState<GameSequenceItem[]>([]);
+  const [gamesCursor, setGamesCursor] = useState<GalleryGamesCursor | null>(null);
+  const [gamesHaveMore, setGamesHaveMore] = useState(false);
+  const [isLoadingGallery, setIsLoadingGallery] = useState(false);
+  const gamesRequestIdRef = useRef(0);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    setIsLoadingGallery(true);
+    getGalleryOperators(currentUser, isAdmin)
+      .then((operators) => {
+        if (!cancelled) setGalleryOperators(operators);
+      })
+      .catch((error) => console.warn('Could not load gallery operators:', error))
+      .finally(() => {
+        if (!cancelled) setIsLoadingGallery(false);
+      });
+    return () => { cancelled = true; };
+  }, [isOpen, currentUser, isAdmin]);
 
   // Reorganization & Auto-healing state
   const [isReorganizing, setIsReorganizing] = useState<boolean>(false);
@@ -174,20 +136,6 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     total: number;
     message: string;
   } | null>(null);
-
-  // Auto-audit on modal open to ensure all subfolders are strictly sorted by exact dates
-  React.useEffect(() => {
-    if (isOpen) {
-      reorganizeAndHealAllStoredGames().then((res) => {
-        if (res.reorganizedCount > 0) {
-          console.log(`[GALLERY_OPEN] Auto-reorganized ${res.reorganizedCount} games into exact date subfolders.`);
-          onRefreshGallery?.();
-        }
-      }).catch((e) => {
-        console.warn('Auto-reorganize check on gallery open skipped:', e);
-      });
-    }
-  }, [isOpen]);
 
   const handleManualReorganize = async () => {
     if (isReorganizing) return;
@@ -199,8 +147,8 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
         total: res.totalChecked,
         message:
           res.reorganizedCount > 0
-            ? `Se reorganizaron ${res.reorganizedCount} partida(s) a su subcarpeta de fecha exacta (${res.totalChecked} partidas verificadas).`
-            : `Todas las subcarpetas (${res.totalChecked} partidas) corresponden exactamente a sus fechas.`,
+          ? `Se reorganizaron ${res.reorganizedCount} partida(s) cargada(s) a su subcarpeta de fecha exacta (${res.totalChecked} partidas verificadas).`
+          : `Todas las partidas cargadas (${res.totalChecked}) corresponden exactamente a sus fechas.`,
       });
       onRefreshGallery?.();
       setTimeout(() => setReorganizeFeedback(null), 5000);
@@ -226,255 +174,181 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     setSelectedGame(null);
   };
 
-  // Filter and sort items
-  const filteredItems = useMemo(() => {
-    let list = [...savedGames];
-
-    // Non-admin operators ONLY see their own matches! Everything is strictly individual.
-    if (!isAdmin && currentUser) {
-      list = list.filter((g) => isGameOfOperator(g, currentUser));
-    }
-
-    if (filterMode === '75') {
-      list = list.filter((g) => g.mode === '75' || g.sheetType === 'multipliers-15');
-    } else if (filterMode === '90') {
-      list = list.filter((g) => g.mode === '90' || g.sheetType === 'traditional-90');
-    }
-
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase().trim();
-      list = list.filter((g) => {
-        const roundMatch = String(g.round).includes(q);
-        const playerMatch = g.winningPlayerName?.toLowerCase().includes(q);
-        const ballMatch = String(g.ballNumber).includes(q);
-        const dateMatch = g.dateFormatted?.toLowerCase().includes(q);
-        const opMatch = g.operatorName?.toLowerCase().includes(q);
-        return roundMatch || playerMatch || ballMatch || dateMatch || opMatch;
-      });
-    }
-
-    list.sort((a, b) => {
-      if (sortOrder === 'desc') {
-        return (b.round || 0) - (a.round || 0);
-      } else {
-        return (a.round || 0) - (b.round || 0);
-      }
-    });
-
-    return list;
-  }, [savedGames, filterMode, sortOrder, searchQuery, isAdmin, currentUser]);
-
-  // Group items by operator for folder view with role-based restriction & exact line counts (NO INVENTED NUMBERS)
-  const operatorFolders = useMemo(() => {
-    const groups: Record<string, OperatorFolderGroup> = {};
-
-    filteredItems.forEach((game) => {
-      const opName = (game.operatorName || 'Operadora Principal').trim();
-      const opFolder = (game.operatorFolder || opName).trim();
-      const key = getOperatorFolderKey(game, currentUser, isAdmin);
-      if (!groups[key]) {
-        groups[key] = {
-          key,
-          operatorName: opName,
-          operatorUid: game.operatorUid || (!isAdmin ? currentUser?.id || currentUser?.uid : undefined) || 'anon',
-          operatorFolder: opFolder,
-          games: [],
-          totalLines: 0,
-          totalCollected: 0,
-          totalPrizes: 0,
-          lastDate: game.dateFormatted || game.dailyDate,
-        };
-      }
-      groups[key].games.push(game);
-      // Exact lines played: suma del valor/multiplicador de cada columna (ej: 4 columnas X2 = 8 líneas)
-      const lines = getGameLines(game);
-      groups[key].totalLines += lines;
-      groups[key].totalCollected = Math.round((groups[key].totalCollected + (game.totalCollected || 0)) * 100) / 100;
-      groups[key].totalPrizes = Math.round((groups[key].totalPrizes + (game.totalPrizesPaid || 0)) * 100) / 100;
-    });
-
-    let list = Object.values(groups);
-
-    // filteredItems already applies isGameOfOperator for non-admin users.
-    if (!isAdmin && currentUser && list.length === 0) {
-      const operatorName = (currentUser.name || 'Operadora Principal').trim();
-      const operatorUid = currentUser.id || currentUser.uid || 'anon';
-      list = [{
-        key: getOperatorFolderKey({}, currentUser, false),
-        operatorName,
-        operatorUid,
-        operatorFolder: operatorName,
-        games: [],
-        totalLines: 0,
-        totalCollected: 0,
-        totalPrizes: 0,
-        lastDate: 'Hoy',
-      }];
-    }
-
-    return list.sort((a, b) => b.games.length - a.games.length);
-  }, [filteredItems, isAdmin, currentUser]);
-  console.info('[GALLERY_DIAG] SavedGamesGalleryModal carpetas.length:', operatorFolders.length);
-
-  // Keep operators inside the folder represented by their already-filtered games.
-  React.useEffect(() => {
-    if (!isAdmin && currentUser) {
-      setSelectedFolderOperator(getOperatorFolderKey({}, currentUser, false));
-      setSelectedFolderDay(null);
-    }
-  }, [isAdmin, currentUser]);
+  const operatorFolders = useMemo<OperatorFolderGroup[]>(() => {
+    return galleryOperators.map((operator) => ({
+      key: operator.key,
+      operatorName: operator.operatorName,
+      operatorUid: operator.operatorUid,
+      operatorFolder: operator.operatorFolder,
+      games: [],
+      totalLines: 0,
+      totalCollected: 0,
+      totalPrizes: 0,
+      lastDate: 'Historial bajo demanda',
+    }));
+  }, [galleryOperators]);
 
   React.useEffect(() => {
+    if (!isAdmin && currentUser) {
+      const uid = currentUser.id || currentUser.uid || '';
+      const ownOperator = galleryOperators.find((operator) => operator.operatorUid === uid);
+      if (ownOperator && selectedFolderOperator !== ownOperator.key) {
+        setSelectedFolderOperator(ownOperator.key);
+        setSelectedFolderDay(null);
+      }
+    }
     if (isAdmin && selectedFolderOperator && !operatorFolders.some((folder) => folder.key === selectedFolderOperator)) {
       setSelectedFolderOperator(null);
       setSelectedFolderDay(null);
     }
-  }, [isAdmin, operatorFolders, selectedFolderOperator]);
+  }, [isAdmin, currentUser, galleryOperators, operatorFolders, selectedFolderOperator]);
 
   const selectedOperatorFolder = operatorFolders.find((folder) => folder.key === selectedFolderOperator) || null;
   const selectedOperatorName = selectedOperatorFolder?.operatorName || (currentUser?.name || 'Operadora Principal').trim();
 
-  // Subfolders by Day (Día / Fecha) when inside an operator's folder
-  const operatorDaysList = useMemo(() => {
-    if (!selectedOperatorFolder) return [];
-
-    const folderGames = filteredItems.filter((game) => belongsToOperatorFolder(game, selectedOperatorFolder, currentUser, isAdmin));
-
-    // Group games by exact normalized dateKey (YYYY-MM-DD) - STRICT ISOLATION PER DAY
-    const dayMap: Record<
-      string,
-      {
-        dateKey: string;
-        displayDate: string;
-        fullDate: string;
-        formattedDate: string;
-        games: GameSequenceItem[];
-        totalLines: number;
-        totalCollected: number;
-        totalPrizes: number;
-        netProfit: number;
-      }
-    > = {};
-
-    folderGames.forEach((g) => {
-      const dateKey = getGalleryDateKey(g);
-
-      if (!dayMap[dateKey]) {
-        const todayKey = getCurrentLocalDateKey();
-        const yesterdayObj = new Date();
-        yesterdayObj.setDate(yesterdayObj.getDate() - 1);
-        const yesterdayKey = `${yesterdayObj.getFullYear()}-${String(yesterdayObj.getMonth() + 1).padStart(2, '0')}-${String(yesterdayObj.getDate()).padStart(2, '0')}`;
-
-        let prefix = '';
-        if (dateKey === todayKey) prefix = 'Hoy - ';
-        else if (dateKey === yesterdayKey) prefix = 'Ayer - ';
-
-        let display = dateKey;
-        let fullDate = dateKey;
-        try {
-          const [y, m, d] = dateKey.split('-').map(Number);
-          if (y && m && d) {
-            const dateObj = new Date(y, m - 1, d);
-            const weekday = dateObj.toLocaleDateString('es-ES', { weekday: 'long' });
-            const capitalizedWeekday = weekday.charAt(0).toUpperCase() + weekday.slice(1);
-            const formatted = dateObj.toLocaleDateString('es-ES', {
-              day: 'numeric',
-              month: 'long',
-              year: 'numeric',
-            });
-            fullDate = `${capitalizedWeekday}, ${formatted}`;
-            display = dateObj.toLocaleDateString('es-ES', {
-              day: 'numeric',
-              month: 'short',
-              year: 'numeric',
-            });
-          }
-        } catch (err) {
-          console.warn('Error formatting date key:', err);
-        }
-
-        dayMap[dateKey] = {
-          dateKey,
-          displayDate: `${prefix}${display}`,
-          fullDate,
-          formattedDate: g.dateFormatted || display,
-          games: [],
-          totalLines: 0,
-          totalCollected: 0,
-          totalPrizes: 0,
-          netProfit: 0,
-        };
-      }
-
-      dayMap[dateKey].games.push(g);
-      const lines = getGameLines(g);
-      dayMap[dateKey].totalLines += lines;
-      dayMap[dateKey].totalCollected = Math.round((dayMap[dateKey].totalCollected + (g.totalCollected || 0)) * 100) / 100;
-      dayMap[dateKey].totalPrizes = Math.round((dayMap[dateKey].totalPrizes + (g.totalPrizesPaid || 0)) * 100) / 100;
-      dayMap[dateKey].netProfit = Math.round((dayMap[dateKey].totalCollected - dayMap[dateKey].totalPrizes) * 100) / 100;
-    });
-
-    // If no games exist yet for this operator, only provide today's empty placeholder folder for non-admin operators
-    if (Object.keys(dayMap).length === 0 && !isAdmin) {
+  useEffect(() => {
+    if (!isOpen || !selectedOperatorFolder) {
+      setOperatorDates([]);
+      return;
+    }
+    let cancelled = false;
+    setIsLoadingGallery(true);
+    setGamesCursor(null);
+    setGamesHaveMore(false);
+    getGalleryDates({
+      key: selectedOperatorFolder.key,
+      operatorUid: selectedOperatorFolder.operatorUid,
+      operatorName: selectedOperatorFolder.operatorName,
+      operatorFolder: selectedOperatorFolder.operatorFolder,
+    }).then((dates) => {
+      if (cancelled) return;
       const todayKey = getCurrentLocalDateKey();
-      const todayObj = new Date();
-      const weekday = todayObj.toLocaleDateString('es-ES', { weekday: 'long' });
-      const capitalizedWeekday = weekday.charAt(0).toUpperCase() + weekday.slice(1);
-      const formatted = todayObj.toLocaleDateString('es-ES', {
-        day: 'numeric',
-        month: 'long',
-        year: 'numeric',
-      });
-      const todayDisplay = todayObj.toLocaleDateString('es-ES', {
-        day: 'numeric',
-        month: 'short',
-        year: 'numeric',
-      });
-      dayMap[todayKey] = {
-        dateKey: todayKey,
-        displayDate: `Hoy - ${todayDisplay}`,
-        fullDate: `${capitalizedWeekday}, ${formatted}`,
-        formattedDate: new Date().toLocaleDateString('es-ES'),
-        games: [],
-        totalLines: 0,
-        totalCollected: 0,
-        totalPrizes: 0,
-        netProfit: 0,
-      };
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yesterdayKey = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`;
+      const datesForState = dates.map((date) => ({
+        ...date,
+        displayDate: `${date.dateKey === todayKey ? 'Hoy - ' : date.dateKey === yesterdayKey ? 'Ayer - ' : ''}${date.displayDate}`,
+      }));
+      setOperatorDates(datesForState);
+    }).catch((error) => {
+      console.error('Could not load operator game dates:', error);
+      if (!cancelled) setOperatorDates([]);
+    }).finally(() => {
+      if (!cancelled) setIsLoadingGallery(false);
+    });
+    return () => { cancelled = true; };
+  }, [isOpen, selectedOperatorFolder]);
+
+  useEffect(() => {
+    const requestId = ++gamesRequestIdRef.current;
+    let cancelled = false;
+    const isCurrentRequest = () => !cancelled && gamesRequestIdRef.current === requestId;
+
+    if (!isOpen) {
+      setIsLoadingGallery(false);
+      return () => { cancelled = true; };
+    }
+    if (!selectedOperatorFolder || !selectedFolderDay) {
+      return () => { cancelled = true; };
     }
 
-    return Object.values(dayMap)
-      .map((day) => ({ ...day, games: sortGamesByTimeDesc(day.games) }))
-      .sort((a, b) => b.dateKey.localeCompare(a.dateKey));
-  }, [selectedOperatorFolder, filteredItems, isAdmin, currentUser]);
-
-  // Actual display list based on folder and day subfolder selection (STRICT ISOLATION)
-  const displayItems = useMemo(() => {
-    let list = filteredItems;
-
-    if (viewMode === 'folders' && selectedOperatorFolder) {
-      list = list.filter((game) => belongsToOperatorFolder(game, selectedOperatorFolder, currentUser, isAdmin));
-
-      if (selectedFolderDay && selectedFolderDay !== 'all') {
-        list = list.filter((g) => getGalleryDateKey(g) === selectedFolderDay);
+    setIsLoadingGallery(true);
+    setGamesCursor(null);
+    setGamesHaveMore(false);
+    const operator = {
+      key: selectedOperatorFolder.key,
+      operatorUid: selectedOperatorFolder.operatorUid,
+      operatorName: selectedOperatorFolder.operatorName,
+      operatorFolder: selectedOperatorFolder.operatorFolder,
+    };
+    const loadSelectedGames = async () => {
+      if (selectedFolderDay === 'all') {
+        const allGames = new Map<string, GameSequenceItem>();
+        for (const date of operatorDates) {
+          let cursor: GalleryGamesCursor | null = null;
+          let hasMore = true;
+          while (hasMore && isCurrentRequest()) {
+            const page = await getGalleryGamesPage(operator, date.dateKey, cursor);
+            if (!isCurrentRequest()) return;
+            page.games.forEach((game) => allGames.set(game.id || `${game.round}-${game.timestamp}`, game));
+            cursor = page.cursor;
+            hasMore = page.hasMore;
+          }
+        }
+        const allGamesForState = Array.from(allGames.values());
+        if (isCurrentRequest()) setLoadedGames(allGamesForState);
+        return;
       }
+      const page = await getGalleryGamesPage(operator, selectedFolderDay);
+      if (!isCurrentRequest()) return;
+      setLoadedGames(page.games);
+      setGamesCursor(page.cursor);
+      setGamesHaveMore(page.hasMore);
+    };
+    loadSelectedGames().catch((error) => {
+      console.error('Could not load games for selected date:', error);
+    }).finally(() => {
+      if (isCurrentRequest()) setIsLoadingGallery(false);
+    });
+    return () => {
+      cancelled = true;
+      if (gamesRequestIdRef.current === requestId) gamesRequestIdRef.current += 1;
+    };
+  }, [isOpen, selectedOperatorFolder, selectedFolderDay]);
 
-      list = selectedFolderDay === 'all'
-        ? [...list].sort((a, b) =>
-            getGalleryDateKey(b).localeCompare(getGalleryDateKey(a)) ||
-            getGameTimeValue(b.timestamp) - getGameTimeValue(a.timestamp) ||
-            (b.round || 0) - (a.round || 0)
-          )
-        : sortGamesByTimeDesc(list);
-    } else if (!isAdmin && currentUser) {
-      const currentOpName = (currentUser.name || 'Operadora Principal').trim().toLowerCase();
-      list = list.filter(
-        (g) => (g.operatorName || 'Operadora Principal').trim().toLowerCase() === currentOpName
-      );
+  const loadMoreGames = async () => {
+    if (!selectedOperatorFolder || !selectedFolderDay || selectedFolderDay === 'all' || !gamesCursor || isLoadingGallery) return;
+    const requestId = gamesRequestIdRef.current;
+    setIsLoadingGallery(true);
+    try {
+      const page = await getGalleryGamesPage({
+        key: selectedOperatorFolder.key,
+        operatorUid: selectedOperatorFolder.operatorUid,
+        operatorName: selectedOperatorFolder.operatorName,
+        operatorFolder: selectedOperatorFolder.operatorFolder,
+      }, selectedFolderDay, gamesCursor);
+      if (gamesRequestIdRef.current !== requestId) return;
+      setLoadedGames((previous) => {
+        const merged = new Map(previous.map((game) => [game.id || `${game.round}-${game.timestamp}`, game]));
+        page.games.forEach((game) => merged.set(game.id || `${game.round}-${game.timestamp}`, game));
+        return Array.from(merged.values());
+      });
+      setGamesCursor(page.cursor);
+      setGamesHaveMore(page.hasMore);
+    } catch (error) {
+      console.error('Could not load the next gallery page:', error);
+    } finally {
+      if (gamesRequestIdRef.current === requestId) setIsLoadingGallery(false);
     }
+  };
 
-    return list;
-  }, [filteredItems, viewMode, selectedOperatorFolder, selectedFolderDay, isAdmin, currentUser]);
+  const filteredItems = useMemo(() => {
+    let list = [...loadedGames];
+    if (filterMode === '75') {
+      list = list.filter((game) => game.mode === '75' || game.sheetType === 'multipliers-15');
+    }
+    if (filterMode === '90') {
+      list = list.filter((game) => game.mode === '90' || game.sheetType === 'traditional-90');
+    }
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase().trim();
+      list = list.filter((game) => String(game.round).includes(q) || game.winningPlayerName?.toLowerCase().includes(q) || String(game.ballNumber).includes(q) || game.dateFormatted?.toLowerCase().includes(q) || game.operatorName?.toLowerCase().includes(q));
+    }
+    return list.sort((a, b) => sortOrder === 'desc' ? (b.round || 0) - (a.round || 0) : (a.round || 0) - (b.round || 0));
+  }, [loadedGames, filterMode, searchQuery, sortOrder]);
+
+  const operatorDaysList = useMemo(() => {
+    return operatorDates.map((date) => ({
+      ...date,
+      games: [] as GameSequenceItem[],
+      formattedDate: date.displayDate,
+    }));
+  }, [operatorDates]);
+
+  const displayItems = useMemo(() => {
+    return sortGamesByTimeDesc(filteredItems);
+  }, [filteredItems]);
 
   // Day deletion handlers (ONLY ADMIN)
   const handleRequestDeleteDay = (dateKey: string, e?: React.MouseEvent) => {
@@ -499,14 +373,12 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     }
 
     // Check if the operator still has any remaining games; if not, return to main folders view
-    const remainingForOp = filteredItems.filter(
-      (g) =>
-        belongsToOperatorFolder(g, selectedOperatorFolder, currentUser, isAdmin) &&
-        getGalleryDateKey(g) !== targetDay
-    );
+    const remainingForOp = operatorDates.filter((date) => date.dateKey !== targetDay);
     if (remainingForOp.length === 0) {
       setSelectedFolderOperator(null);
     }
+    setOperatorDates(remainingForOp);
+    setLoadedGames([]);
 
     setReorganizeFeedback({
       count: 0,
@@ -593,7 +465,28 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
   const handleNextGame = () => {
     if (hasNext) {
       setSelectedGame(filteredItems[selectedIndex + 1]);
+      return;
     }
+    if (!gamesHaveMore || !gamesCursor || !selectedOperatorFolder || !selectedFolderDay || selectedFolderDay === 'all') return;
+    void (async () => {
+      const requestId = gamesRequestIdRef.current;
+      const page = await getGalleryGamesPage({
+        key: selectedOperatorFolder.key,
+        operatorUid: selectedOperatorFolder.operatorUid,
+        operatorName: selectedOperatorFolder.operatorName,
+        operatorFolder: selectedOperatorFolder.operatorFolder,
+      }, selectedFolderDay, gamesCursor);
+      if (gamesRequestIdRef.current !== requestId) return;
+      const orderedPage = sortGamesByTimeDesc(page.games);
+      if (orderedPage[0]) setSelectedGame(orderedPage[0]);
+      setLoadedGames((previous) => {
+        const merged = new Map(previous.map((game) => [game.id || `${game.round}-${game.timestamp}`, game]));
+        page.games.forEach((game) => merged.set(game.id || `${game.round}-${game.timestamp}`, game));
+        return Array.from(merged.values());
+      });
+      setGamesCursor(page.cursor);
+      setGamesHaveMore(page.hasMore);
+    })().catch((error) => console.warn('Could not load the next game page:', error));
   };
 
   const handleRequestDeleteItem = (game: GameSequenceItem, e?: React.MouseEvent) => {
@@ -611,6 +504,10 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     setItemToDelete(null);
 
     await deleteGamePermanently(target);
+    setLoadedGames((games) => games.filter((game) => game.id !== target.id));
+    setOperatorDates((dates) => dates.map((date) => date.dateKey === selectedFolderDay
+      ? { ...date, gameCount: Math.max(0, date.gameCount - 1) }
+      : date));
 
     if (
       selectedGame &&
@@ -634,6 +531,8 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     setSelectedGame(null);
     setSelectedFolderOperator(null);
     setSelectedFolderDay(null);
+    setOperatorDates([]);
+    setLoadedGames([]);
     setReorganizeFeedback({
       count: 0,
       total: 0,
@@ -641,6 +540,12 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     });
     onRefreshGallery?.();
   };
+
+  const displayedGameCount = selectedFolderOperator
+    ? selectedFolderDay && selectedFolderDay !== 'all'
+      ? operatorDates.find((date) => date.dateKey === selectedFolderDay)?.gameCount || 0
+      : operatorDates.reduce((sum, date) => sum + date.gameCount, 0)
+    : galleryOperators.length;
 
   return (
     <div
@@ -670,7 +575,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                     Galería de Partidas Guardadas
                   </h3>
                   <span className="px-2.5 py-0.5 rounded-full bg-white/25 text-white text-xs font-black border border-white/30">
-                    {savedGames.length} {savedGames.length === 1 ? 'partida' : 'partidas'}
+                    {selectedFolderOperator ? `${displayedGameCount} partidas` : `${galleryOperators.length} operadoras`}
                   </span>
                 </div>
                 <p className="text-[11px] sm:text-xs text-orange-100 font-medium">
@@ -685,15 +590,15 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                 onClick={handleManualReorganize}
                 disabled={isReorganizing}
                 className="px-2.5 py-1 rounded-xl bg-amber-500/80 hover:bg-amber-500 text-white text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer border border-amber-300/40 shadow-xs disabled:opacity-50"
-                title="Auditar y reorganizar todas las partidas en sus subcarpetas por fecha exacta"
+                title="Revisar y reorganizar las partidas ya cargadas, sin recorrer toda la colección"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${isReorganizing ? 'animate-spin' : ''}`} />
                 <span className="hidden sm:inline">
-                  {isReorganizing ? 'Reorganizando...' : 'Reorganizar Subcarpetas'}
+                  {isReorganizing ? 'Reorganizando...' : 'Reorganizar cargadas'}
                 </span>
               </button>
 
-              {isAdmin && savedGames.length > 0 && (
+              {isAdmin && (
                 <button
                   type="button"
                   onClick={() => setShowClearConfirm(true)}
@@ -898,7 +803,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
           <div className="px-4 sm:px-6 py-2.5 bg-orange-100/60 border-b border-orange-200 flex items-center justify-between flex-wrap gap-2 flex-shrink-0">
             {/* View Mode & Mode Filters */}
             <div className="flex items-center gap-2 flex-wrap">
-              {/* Folder vs List View Toggle */}
+              {/* Operator folders are the only root view; games load after selecting a date. */}
               <div className="flex items-center gap-1 bg-white/90 p-0.5 rounded-xl border border-orange-300 shadow-2xs">
                 <button
                   type="button"
@@ -915,22 +820,6 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                 >
                   <Folder className="w-3.5 h-3.5" />
                   <span>Carpetas por Operadora ({operatorFolders.length})</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setViewMode('all');
-                    setSelectedFolderOperator(null);
-                  }}
-                  className={`px-3 py-1 rounded-lg text-xs font-black transition-all cursor-pointer flex items-center gap-1.5 ${
-                    viewMode === 'all'
-                      ? 'bg-amber-600 text-white shadow-xs'
-                      : 'text-slate-700 hover:bg-orange-100'
-                  }`}
-                  title="Ver listado general de todas las partidas"
-                >
-                  <Layers className="w-3.5 h-3.5" />
-                  <span>Todas ({filteredItems.length})</span>
                 </button>
               </div>
 
@@ -1039,7 +928,10 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                     {operatorFolders.map((folder) => (
                       <div
                         key={folder.key}
-                        onClick={() => setSelectedFolderOperator(folder.key)}
+        onClick={() => {
+          setSelectedFolderOperator(folder.key);
+          setSelectedFolderDay(null);
+        }}
                         className="bg-white border-2 border-amber-200 hover:border-orange-500 rounded-3xl p-5 shadow-sm hover:shadow-lg transition-all cursor-pointer relative group flex flex-col justify-between overflow-hidden"
                       >
                         <div>
@@ -1074,25 +966,8 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                             )}
                           </div>
 
-                          {/* Folder Metrics */}
-                          <div className="grid grid-cols-2 gap-2 mb-3">
-                            <div className="bg-orange-50/80 rounded-xl p-2.5 border border-orange-200 text-center">
-                              <span className="text-[10px] font-bold text-orange-900/70 block uppercase">Partidas</span>
-                              <span className="text-xl font-black text-orange-950 font-mono">
-                                {folder.games.length}
-                              </span>
-                            </div>
-                            <div className="bg-purple-50/80 rounded-xl p-2.5 border border-purple-200 text-center">
-                              <span className="text-[10px] font-bold text-purple-900/70 block uppercase">Líneas Jugadas</span>
-                              <span className="text-xl font-black text-purple-950 font-mono">
-                                {folder.totalLines}
-                              </span>
-                            </div>
-                          </div>
-
-                          <div className="bg-slate-50 rounded-xl p-2.5 border border-slate-200 flex items-center justify-between text-xs text-slate-700 font-semibold">
-                            <span>Recaudado: <strong className="text-emerald-700 font-mono">${folder.totalCollected.toFixed(2)}</strong></span>
-                            <span>Premios: <strong className="text-rose-700 font-mono">${folder.totalPrizes.toFixed(2)}</strong></span>
+                          <div className="bg-slate-50 rounded-xl p-3 border border-slate-200 text-xs text-slate-700 font-semibold">
+                            El historial se consultará al abrir esta carpeta.
                           </div>
                         </div>
 
@@ -1101,7 +976,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                           className="w-full mt-4 py-2.5 rounded-xl bg-gradient-to-r from-orange-600 to-amber-600 hover:from-orange-500 hover:to-amber-500 text-white font-black text-xs flex items-center justify-center gap-2 shadow-sm transition-all group-hover:shadow-md cursor-pointer"
                         >
                           <FolderOpen className="w-4 h-4 text-yellow-200" />
-                          <span>Abrir Carpeta ({folder.games.length} partidas)</span>
+                          <span>Abrir Carpeta</span>
                         </button>
                       </div>
                     ))}
@@ -1211,7 +1086,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                                     {dayFolder.displayDate}
                                   </h5>
                                   <p className="text-[10.5px] text-slate-500 font-medium">
-                                    {dayFolder.games.length} {dayFolder.games.length === 1 ? 'partida registrada' : 'partidas registradas'}
+                                    {dayFolder.gameCount} {dayFolder.gameCount === 1 ? 'partida registrada' : 'partidas registradas'}
                                   </p>
                                 </div>
                               </div>
@@ -1234,7 +1109,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                               <div className="bg-orange-50 rounded-xl p-2 border border-orange-200 text-center">
                                 <span className="text-[9px] font-bold text-orange-800 uppercase block">Partidas</span>
                                 <span className="text-lg font-black text-orange-950 font-mono">
-                                  {dayFolder.games.length}
+                                  {dayFolder.gameCount}
                                 </span>
                               </div>
                               <div className="bg-purple-50 rounded-xl p-2 border border-purple-200 text-center">
@@ -1256,7 +1131,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                             className="w-full mt-3 py-2 rounded-xl bg-gradient-to-r from-orange-600 to-amber-600 hover:from-orange-500 hover:to-amber-500 text-white font-black text-xs flex items-center justify-center gap-1.5 shadow-xs cursor-pointer transition-all"
                           >
                             <FolderOpen className="w-3.5 h-3.5 text-yellow-200" />
-                            <span>Abrir Día ({dayFolder.games.length} partidas)</span>
+                            <span>Abrir Día ({dayFolder.gameCount} partidas)</span>
                           </button>
                         </div>
                       );
@@ -1368,7 +1243,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                         <div className="bg-white/95 rounded-xl p-2.5 text-center shadow-xs">
                           <span className="text-[9px] font-black text-slate-500 uppercase block">Partidas Jugadas</span>
                           <span className="text-xl font-black text-orange-950 font-mono">
-                            {currentDayInfo.games.length}
+                            {currentDayInfo.gameCount}
                           </span>
                         </div>
 
@@ -1410,7 +1285,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                       <Layers className="w-8 h-8 opacity-70" />
                     </div>
                     <h4 className="text-base font-black text-slate-800">
-                      {savedGames.length === 0 ? 'No hay partidas guardadas aún' : 'No se encontraron partidas con ese filtro'}
+                      {isLoadingGallery ? 'Cargando partidas de esta fecha…' : 'No se encontraron partidas para esta fecha'}
                     </h4>
                     <p className="text-xs text-slate-500 max-w-md mx-auto mt-1">
                       Cuando finalices y archives una partida mediante el botón <strong>"Nueva Partida"</strong> o cantes un BINGO, la partida quedará registrada aquí con su planilla completa y todos sus datos.
@@ -1605,6 +1480,18 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                         </div>
                       );
                     })}
+                  </div>
+                )}
+                {gamesHaveMore && selectedFolderDay !== 'all' && (
+                  <div className="flex justify-center py-5">
+                    <button
+                      type="button"
+                      onClick={loadMoreGames}
+                      disabled={isLoadingGallery}
+                      className="px-5 py-2 rounded-xl bg-orange-600 hover:bg-orange-700 text-white text-xs font-black disabled:opacity-50"
+                    >
+                      {isLoadingGallery ? 'Cargando…' : 'Cargar más partidas'}
+                    </button>
                   </div>
                 )}
               </div>
