@@ -434,11 +434,12 @@ export default function App() {
   const todaySavedGames = useMemo(() => {
     const todayKey = getCurrentLocalDateKey();
     const isBingo90 = activeSheetType === 'traditional-90' || settings.mode === '90';
+    const operatorForBar = currentUser && isAdmin ? { ...currentUser, role: 'operator' as const } : currentUser;
 
     return savedGamesList
       .filter((g) => {
         if (!g || !isRealSavedGameInTodaySubfolder(g, todayKey)) return false;
-        if (!isAdmin && currentUser && !isGameOfOperator(g, currentUser)) return false;
+        if (operatorForBar && !isGameOfOperator(g, operatorForBar)) return false;
         const gameIs90 = g.mode === '90' || g.sheetType === 'traditional-90';
         if (isBingo90 !== gameIs90) return false;
         return true;
