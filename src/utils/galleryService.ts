@@ -37,6 +37,9 @@ export function createGalleryService(dependencies: GalleryServiceDependencies) {
       storageState.activeFirestoreUnsubscribe = onSnapshot(
         q,
         (snapshot) => {
+          const receivedDocumentCount = snapshot.size;
+          let discardedByDeletedGameIdsCount = 0;
+          console.info('[GALLERY_DIAG] Firestore snapshot documents received:', receivedDocumentCount);
           dependencies.updateSyncStatus({ isFirestoreReachable: true });
 
           // Merge Firestore documents with any pending local offline saves so unsynced games are NEVER overwritten or lost
@@ -48,6 +51,7 @@ export function createGalleryService(dependencies: GalleryServiceDependencies) {
 
             // If this document was permanently deleted by an Admin, never resurrect it and ensure remote cleanup
             if (storageState.deletedGameIdsSet.has(docKey) || (rawData.id && storageState.deletedGameIdsSet.has(rawData.id))) {
+              discardedByDeletedGameIdsCount += 1;
               storageState.firestoreGamesMemoryStore.delete(docKey);
               void dependencies.deleteGameFromIndexedDB(docKey);
               deleteDoc(doc(db, 'saved_games', docKey)).catch(() => {});
@@ -109,6 +113,9 @@ export function createGalleryService(dependencies: GalleryServiceDependencies) {
           storageState.cachedSortedGames = dependencies.sortGamesChronologicallyDesc(
             Array.from(storageState.firestoreGamesMemoryStore.values())
           );
+          console.info('[GALLERY_DIAG] Documents discarded by deletedGameIdsSet:', discardedByDeletedGameIdsCount);
+          console.info('[GALLERY_DIAG] firestoreGamesMemoryStore final count:', storageState.firestoreGamesMemoryStore.size);
+          console.info('[GALLERY_DIAG] cachedSortedGames.length:', storageState.cachedSortedGames.length);
 
           dependencies.syncTemporaryLocalCache(storageState.cachedSortedGames);
           storageState.savedGamesSubscribers.forEach((sub) => {
@@ -160,35 +167,92 @@ export function createGalleryService(dependencies: GalleryServiceDependencies) {
 
   function getSavedGamesGallery(): GameSequenceItem[] {
     if (storageState.hasSyncedWithFirestore || storageState.firestoreGamesMemoryStore.size > 0) {
-      return dependencies.sortGamesChronologicallyDesc(
-        Array.from(storageState.firestoreGamesMemoryStore.values()).filter(
-          (g) => g && g.id && !storageState.deletedGameIdsSet.has(g.id) && dependencies.hasExplicitGameDateKey(g) !== null
-        )
-      );
+      const memoryGames = Array.from(storageState.firestoreGamesMemoryStore.values());
+      console.info('[GALLERY_DIAG] getSavedGamesGallery memory count before filtering:', memoryGames.length);
+      const validMemoryGames = memoryGames.filter((g) => {
+        if (!g || !g.id) {
+          console.warn('[GALLERY_DIAG] Game discarded: missing id', {
+            round: g?.round,
+            dailyDate: g?.dailyDate,
+            subfolderDay: g?.subfolderDay,
+            folderPath: g?.folderPath,
+          });
+          return false;
+        }
+        if (storageState.deletedGameIdsSet.has(g.id)) {
+          console.warn('[GALLERY_DIAG] Game discarded: tombstone', { id: g.id });
+          return false;
+        }
+        if (dependencies.hasExplicitGameDateKey(g) === null) {
+          console.warn('[GALLERY_DIAG] Game discarded: missing explicit date', {
+            id: g.id,
+            dailyDate: g.dailyDate,
+            subfolderDay: g.subfolderDay,
+            folderPath: g.folderPath,
+          });
+          return false;
+        }
+        if (typeof g.round !== 'number' || g.round < 1) {
+          console.info('[GALLERY_DIAG] Invalid round; not discarded by the memory gallery filter:', { id: g.id, round: g.round });
+        }
+        return true;
+      });
+      console.info('[GALLERY_DIAG] getSavedGamesGallery memory count after filtering:', validMemoryGames.length);
+      return dependencies.sortGamesChronologicallyDesc(validMemoryGames);
     }
 
-    if (typeof window === 'undefined') return [];
+    if (typeof window === 'undefined') {
+      console.info('[GALLERY_DIAG] getSavedGamesGallery unavailable outside browser; before/after filtering: 0');
+      return [];
+    }
 
     try {
       const raw = dependencies.safeGetItem(dependencies.savedGamesGalleryStorageKey);
       if (raw) {
         const parsed: GameSequenceItem[] = JSON.parse(raw);
         if (Array.isArray(parsed)) {
+          console.info('[GALLERY_DIAG] getSavedGamesGallery local cache count before filtering:', parsed.length);
           const valid = parsed
             .filter(
-              (item) =>
-                item &&
-                typeof item.round === 'number' &&
-                item.round >= 1 &&
-                (!item.id || !storageState.deletedGameIdsSet.has(item.id)) &&
-                dependencies.hasExplicitGameDateKey(item) !== null
+              (item) => {
+                if (!item || typeof item.round !== 'number' || item.round < 1) {
+                  console.warn('[GALLERY_DIAG] Local cache game discarded: invalid round', { id: item?.id, round: item?.round });
+                  return false;
+                }
+                if (item.id && storageState.deletedGameIdsSet.has(item.id)) {
+                  console.warn('[GALLERY_DIAG] Local cache game discarded: tombstone', { id: item.id });
+                  return false;
+                }
+                if (dependencies.hasExplicitGameDateKey(item) === null) {
+                  console.warn('[GALLERY_DIAG] Local cache game discarded: missing explicit date', {
+                    id: item.id,
+                    dailyDate: item.dailyDate,
+                    subfolderDay: item.subfolderDay,
+                    folderPath: item.folderPath,
+                  });
+                  return false;
+                }
+                if (!item.id) {
+                  console.info('[GALLERY_DIAG] Local cache game has no id; allowed by the current cache filter:', {
+                    round: item.round,
+                    dailyDate: item.dailyDate,
+                    subfolderDay: item.subfolderDay,
+                    folderPath: item.folderPath,
+                  });
+                }
+                return true;
+              }
             )
             .map((item) => dependencies.normalizeGameFolderMetadata(item, item.id).normalizedGame);
+          console.info('[GALLERY_DIAG] getSavedGamesGallery local cache count after filtering:', valid.length);
           return dependencies.sortGamesChronologicallyDesc(valid);
         }
       }
+      console.info('[GALLERY_DIAG] getSavedGamesGallery local cache count before filtering: 0');
+      console.info('[GALLERY_DIAG] getSavedGamesGallery local cache count after filtering: 0');
     } catch (e) {
       console.error('Error reading temporary saved games cache', e);
+      console.info('[GALLERY_DIAG] getSavedGamesGallery local cache after filtering: 0 (cache read/parse failed)');
     }
 
     return [];

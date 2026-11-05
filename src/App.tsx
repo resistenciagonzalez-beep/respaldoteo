@@ -423,9 +423,14 @@ export default function App() {
   });
 
   const refreshSavedGamesList = useCallback(() => {
-    const list = getSavedGamesGallery().filter(
-      (g) => g && typeof g.round === 'number' && g.round >= 1
-    );
+    const galleryGames = getSavedGamesGallery();
+    const list = galleryGames.filter((g) => {
+      if (!g || typeof g.round !== 'number' || g.round < 1) {
+        console.warn('[GALLERY_DIAG] refreshSavedGamesList discarded game: invalid round', g);
+        return false;
+      }
+      return true;
+    });
     setSavedGamesList(list);
   }, []);
 
@@ -478,6 +483,7 @@ export default function App() {
 
     // Subscribe to Firestore so all operators' saved games appear in real time in their folders
     const unsubscribeFirestore = subscribeToSavedGamesFirestore((remoteGames) => {
+      console.info('[GALLERY_DIAG] App received remoteGames.length:', remoteGames.length);
       setSavedGamesList(remoteGames);
 
       const todayKey = getCurrentLocalDateKey();

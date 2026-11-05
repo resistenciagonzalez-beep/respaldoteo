@@ -151,6 +151,8 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
   currentUser,
   isAdmin = false,
 }) => {
+  console.info('[GALLERY_DIAG] SavedGamesGalleryModal savedGames.length:', savedGames.length);
+
   const [filterMode, setFilterMode] = useState<'all' | '75' | '90'>('all');
   const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -312,6 +314,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
 
     return list.sort((a, b) => b.games.length - a.games.length);
   }, [filteredItems, isAdmin, currentUser]);
+  console.info('[GALLERY_DIAG] SavedGamesGalleryModal carpetas.length:', operatorFolders.length);
 
   // Keep operators inside the folder represented by their already-filtered games.
   React.useEffect(() => {
