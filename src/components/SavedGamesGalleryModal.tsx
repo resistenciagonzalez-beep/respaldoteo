@@ -37,6 +37,10 @@ import {
   deleteGamesOfOperatorFolder,
   getCurrentLocalDateKey,
   reorganizeAndHealAllStoredGames,
+  hydrateAllHistoricalGamesInPages,
+  subscribeToSavedGamesFirestore,
+  subscribeToUsersCentralized,
+  sanitizeOperatorFolderName,
 } from '../utils/savedGamesStorage';
 import {
   exportElementAsJpg,
@@ -60,8 +64,20 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
   onClose,
   onRefreshGallery,
   currentUser,
-  isAdmin = false,
+  isAdmin: isAdminProp = false,
 }) => {
+  const isAdmin = Boolean(
+    isAdminProp ||
+      currentUser?.role === 'admin' ||
+      (currentUser?.email &&
+        [
+          'admin@bolillerobingo.com',
+          'resistenciagonzalez@gmail.com',
+          'genesis.vargas0619@gmail.com',
+          'bingoteteoo@gmail.com',
+        ].includes(currentUser.email.trim().toLowerCase()))
+  );
+
   const [filterMode, setFilterMode] = useState<'all' | '75' | '90'>('all');
   const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -70,6 +86,8 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
   const [showClearConfirm, setShowClearConfirm] = useState<boolean>(false);
   const [isFullScreen, setIsFullScreen] = useState<boolean>(true);
   const [table90View, setTable90View] = useState<'both' | '1' | '2'>('both');
+  const [liveFirestoreGames, setLiveFirestoreGames] = useState<GameSequenceItem[] | null>(null);
+  const [registeredUsers, setRegisteredUsers] = useState<AppUser[]>([]);
 
   // Folders by Operator & Subfolders by Day (Día / Fecha) state
   const [viewMode, setViewMode] = useState<'folders' | 'all'>('folders');
@@ -81,12 +99,15 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
   });
   const [selectedFolderDay, setSelectedFolderDay] = useState<string | null>(null);
 
-  // Automatically lock non-admin operator to their individual folder
+  // Automatically lock non-admin operator to their individual folder, and unlock for admins so all folders appear
   React.useEffect(() => {
     if (!isAdmin && currentUser) {
       setSelectedFolderOperator((currentUser.name || 'Operadora Principal').trim());
+    } else if (isAdmin) {
+      setSelectedFolderOperator(null);
+      setSelectedFolderDay(null);
     }
-  }, [isAdmin, currentUser]);
+  }, [isAdmin, currentUser?.id, currentUser?.email]);
 
   // Reorganization & Auto-healing state
   const [isReorganizing, setIsReorganizing] = useState<boolean>(false);
@@ -96,18 +117,33 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     message: string;
   } | null>(null);
 
-  // Auto-audit on modal open to ensure all subfolders are strictly sorted by exact dates
+  // Real-time Firestore games & users sync on modal open so admins always see 100% of operator folders and games
   React.useEffect(() => {
-    if (isOpen) {
-      reorganizeAndHealAllStoredGames().then((res) => {
+    if (!isOpen) return;
+
+    const unsubGames = subscribeToSavedGamesFirestore((games) => {
+      setLiveFirestoreGames(games);
+    });
+    const unsubUsers = subscribeToUsersCentralized((users) => {
+      setRegisteredUsers(users);
+    });
+
+    void hydrateAllHistoricalGamesInPages();
+
+    reorganizeAndHealAllStoredGames()
+      .then((res) => {
         if (res.reorganizedCount > 0) {
-          console.log(`[GALLERY_OPEN] Auto-reorganized ${res.reorganizedCount} games into exact date subfolders.`);
           onRefreshGallery?.();
         }
-      }).catch((e) => {
+      })
+      .catch((e) => {
         console.warn('Auto-reorganize check on gallery open skipped:', e);
       });
-    }
+
+    return () => {
+      unsubGames();
+      unsubUsers();
+    };
   }, [isOpen]);
 
   const handleManualReorganize = async () => {
@@ -147,11 +183,26 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     setSelectedGame(null);
   };
 
-  // Filter and sort items
+  // Filter and sort items (merging both prop savedGames and liveFirestoreGames so 100% of games up to date are always shown)
   const filteredItems = useMemo(() => {
-    let list = [...savedGames];
+    const mergedMap = new Map<string, GameSequenceItem>();
+    for (const g of savedGames) {
+      if (g) {
+        const key = g.id || `${g.operatorName || 'op'}_${g.dailyDate || ''}_${g.mode || '75'}_${g.round}_${g.timestamp || ''}`;
+        mergedMap.set(key, g);
+      }
+    }
+    if (liveFirestoreGames) {
+      for (const g of liveFirestoreGames) {
+        if (g) {
+          const key = g.id || `${g.operatorName || 'op'}_${g.dailyDate || ''}_${g.mode || '75'}_${g.round}_${g.timestamp || ''}`;
+          mergedMap.set(key, g);
+        }
+      }
+    }
+    let list = Array.from(mergedMap.values());
 
-    // Non-admin operators ONLY see their own matches! Everything is strictly individual.
+    // Non-admin operators ONLY see their own matches! Admins ALWAYS see all matches of all operators.
     if (!isAdmin && currentUser) {
       list = list.filter((g) => isGameOfOperator(g, currentUser));
     }
@@ -183,7 +234,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     });
 
     return list;
-  }, [savedGames, filterMode, sortOrder, searchQuery, isAdmin, currentUser]);
+  }, [savedGames, liveFirestoreGames, filterMode, sortOrder, searchQuery, isAdmin, currentUser]);
 
   // Group items by operator for folder view with role-based restriction & exact line counts (NO INVENTED NUMBERS)
   const operatorFolders = useMemo(() => {
@@ -202,8 +253,9 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
 
     filteredItems.forEach((game) => {
       const opName = (game.operatorName || 'Operadora Principal').trim();
-      if (!groups[opName]) {
-        groups[opName] = {
+      const opKey = sanitizeOperatorFolderName(game.operatorFolder || opName);
+      if (!groups[opKey]) {
+        groups[opKey] = {
           operatorName: opName,
           operatorUid: game.operatorUid || 'anon',
           games: [],
@@ -213,13 +265,33 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
           lastDate: game.dateFormatted || game.dailyDate,
         };
       }
-      groups[opName].games.push(game);
+      groups[opKey].games.push(game);
       // Exact lines played: suma del valor/multiplicador de cada columna (ej: 4 columnas X2 = 8 líneas)
       const lines = getGameLines(game);
-      groups[opName].totalLines += lines;
-      groups[opName].totalCollected = Math.round((groups[opName].totalCollected + (game.totalCollected || 0)) * 100) / 100;
-      groups[opName].totalPrizes = Math.round((groups[opName].totalPrizes + (game.totalPrizesPaid || 0)) * 100) / 100;
+      groups[opKey].totalLines += lines;
+      groups[opKey].totalCollected = Math.round((groups[opKey].totalCollected + (game.totalCollected || 0)) * 100) / 100;
+      groups[opKey].totalPrizes = Math.round((groups[opKey].totalPrizes + (game.totalPrizesPaid || 0)) * 100) / 100;
     });
+
+    // For Administrators, also ensure all registered operators appear as folders even if they have 0 games in the current filter
+    if (isAdmin && registeredUsers.length > 0 && !searchQuery.trim()) {
+      registeredUsers.forEach((u) => {
+        if (!u || !u.name) return;
+        const opName = u.name.trim();
+        const opKey = sanitizeOperatorFolderName(opName);
+        if (!groups[opKey] && u.role === 'operator') {
+          groups[opKey] = {
+            operatorName: opName,
+            operatorUid: u.id || u.uid || 'anon',
+            games: [],
+            totalLines: 0,
+            totalCollected: 0,
+            totalPrizes: 0,
+            lastDate: u.lastActive || 'Sin partidas',
+          };
+        }
+      });
+    }
 
     let list = Object.values(groups);
 
@@ -227,11 +299,13 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     // If user is NOT an administrator, they must ONLY see their own operator folder!
     if (!isAdmin && currentUser) {
       const myOpName = (currentUser.name || 'Operadora Principal').trim().toLowerCase();
+      const myOpKey = sanitizeOperatorFolderName(currentUser.name || 'Operadora Principal');
       const myOpUid = currentUser.id || currentUser.uid;
 
       list = list.filter(
         (f) =>
           f.operatorName.trim().toLowerCase() === myOpName ||
+          sanitizeOperatorFolderName(f.operatorName) === myOpKey ||
           (myOpUid && f.operatorUid === myOpUid)
       );
 
@@ -252,16 +326,19 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     }
 
     return list.sort((a, b) => b.games.length - a.games.length);
-  }, [filteredItems, isAdmin, currentUser]);
+  }, [filteredItems, isAdmin, currentUser, registeredUsers, searchQuery]);
 
   // Subfolders by Day (Día / Fecha) when inside an operator's folder
   const operatorDaysList = useMemo(() => {
     if (!selectedFolderOperator) return [];
 
     const targetOpName = selectedFolderOperator.trim().toLowerCase();
-    const folderGames = filteredItems.filter(
-      (g) => (g.operatorName || 'Operadora Principal').trim().toLowerCase() === targetOpName
-    );
+    const targetOpFolder = sanitizeOperatorFolderName(selectedFolderOperator);
+    const folderGames = filteredItems.filter((g) => {
+      const gName = (g.operatorName || 'Operadora Principal').trim().toLowerCase();
+      const gFolder = sanitizeOperatorFolderName(g.operatorFolder || gName);
+      return gName === targetOpName || gFolder === targetOpFolder;
+    });
 
     // Group games by exact normalized dateKey (YYYY-MM-DD) - STRICT ISOLATION PER DAY
     const dayMap: Record<
@@ -375,18 +452,24 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
 
     if (viewMode === 'folders' && selectedFolderOperator) {
       const targetOpName = selectedFolderOperator.trim().toLowerCase();
-      list = list.filter(
-        (g) => (g.operatorName || 'Operadora Principal').trim().toLowerCase() === targetOpName
-      );
+      const targetOpFolder = sanitizeOperatorFolderName(selectedFolderOperator);
+      list = list.filter((g) => {
+        const gName = (g.operatorName || 'Operadora Principal').trim().toLowerCase();
+        const gFolder = sanitizeOperatorFolderName(g.operatorFolder || gName);
+        return gName === targetOpName || gFolder === targetOpFolder;
+      });
 
       if (selectedFolderDay && selectedFolderDay !== 'all') {
         list = list.filter((g) => getGameNormalizedDateKey(g) === selectedFolderDay);
       }
     } else if (!isAdmin && currentUser) {
       const currentOpName = (currentUser.name || 'Operadora Principal').trim().toLowerCase();
-      list = list.filter(
-        (g) => (g.operatorName || 'Operadora Principal').trim().toLowerCase() === currentOpName
-      );
+      const currentOpFolder = sanitizeOperatorFolderName(currentUser.name || 'Operadora Principal');
+      list = list.filter((g) => {
+        const gName = (g.operatorName || 'Operadora Principal').trim().toLowerCase();
+        const gFolder = sanitizeOperatorFolderName(g.operatorFolder || gName);
+        return gName === currentOpName || gFolder === currentOpFolder;
+      });
     }
 
     return list;
@@ -415,11 +498,14 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     }
 
     // Check if the operator still has any remaining games; if not, return to main folders view
-    const remainingForOp = filteredItems.filter(
-      (g) =>
-        (g.operatorName || 'Operadora Principal').trim().toLowerCase() === targetOp.trim().toLowerCase() &&
-        getGameNormalizedDateKey(g) !== targetDay
-    );
+    const remainingForOp = filteredItems.filter((g) => {
+      const gName = (g.operatorName || 'Operadora Principal').trim().toLowerCase();
+      const gFolder = sanitizeOperatorFolderName(g.operatorFolder || gName);
+      const matchesOp =
+        gName === targetOp.trim().toLowerCase() ||
+        gFolder === sanitizeOperatorFolderName(targetOp);
+      return matchesOp && getGameNormalizedDateKey(g) !== targetDay;
+    });
     if (remainingForOp.length === 0) {
       setSelectedFolderOperator(null);
     }
@@ -586,7 +672,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                     Galería de Partidas Guardadas
                   </h3>
                   <span className="px-2.5 py-0.5 rounded-full bg-white/25 text-white text-xs font-black border border-white/30">
-                    {savedGames.length} {savedGames.length === 1 ? 'partida' : 'partidas'}
+                    {filteredItems.length} {filteredItems.length === 1 ? 'partida' : 'partidas'}
                   </span>
                 </div>
                 <p className="text-[11px] sm:text-xs text-orange-100 font-medium">
@@ -609,7 +695,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                 </span>
               </button>
 
-              {isAdmin && savedGames.length > 0 && (
+              {isAdmin && filteredItems.length > 0 && (
                 <button
                   type="button"
                   onClick={() => setShowClearConfirm(true)}
@@ -1069,7 +1155,20 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                       title="Ver todas las partidas archivadas de esta operadora juntas"
                     >
                       <Layers className="w-3.5 h-3.5 text-amber-600" />
-                      <span>Ver Todas ({filteredItems.filter((g) => (g.operatorName || 'Operadora Principal').trim().toLowerCase() === selectedFolderOperator.trim().toLowerCase()).length})</span>
+                      <span>
+                        Ver Todas (
+                        {
+                          filteredItems.filter((g) => {
+                            const gName = (g.operatorName || 'Operadora Principal').trim().toLowerCase();
+                            const gFolder = sanitizeOperatorFolderName(g.operatorFolder || gName);
+                            return (
+                              gName === selectedFolderOperator.trim().toLowerCase() ||
+                              gFolder === sanitizeOperatorFolderName(selectedFolderOperator)
+                            );
+                          }).length
+                        }
+                        )
+                      </span>
                     </button>
 
                     {isAdmin && (
@@ -1326,7 +1425,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                       <Layers className="w-8 h-8 opacity-70" />
                     </div>
                     <h4 className="text-base font-black text-slate-800">
-                      {savedGames.length === 0 ? 'No hay partidas guardadas aún' : 'No se encontraron partidas con ese filtro'}
+                      {filteredItems.length === 0 ? 'No hay partidas guardadas aún' : 'No se encontraron partidas con ese filtro'}
                     </h4>
                     <p className="text-xs text-slate-500 max-w-md mx-auto mt-1">
                       Cuando finalices y archives una partida mediante el botón <strong>"Nueva Partida"</strong> o cantes un BINGO, la partida quedará registrada aquí con su planilla completa y todos sus datos.

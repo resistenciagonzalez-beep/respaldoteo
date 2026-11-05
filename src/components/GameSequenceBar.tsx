@@ -72,21 +72,34 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
 }) => {
   // Strict Rule: ONLY real games manually saved in today's subfolder (subfolderDay === todayKey)
   // are allowed in the right-hand sequence bar. Never show invented or unsaved sequence items.
+  // Games are numbered sequentially (1, 2, 3, 4...) in chronological order of completion.
   const displayedShortcuts = useMemo(() => {
     const todayKey = getCurrentLocalDateKey();
     const map = new Map<string | number, GameSequenceItem & { isSavedToday?: boolean }>();
 
     (todaySavedGames || []).forEach((saved) => {
       if (!saved || !isRealSavedGameInTodaySubfolder(saved, todayKey)) return;
-      const key = saved.id || saved.round;
+      const key = saved.id || `${saved.timestamp || ''}_${saved.round}`;
       if (key !== undefined) {
         map.set(key, { ...saved, isSavedToday: true });
       }
     });
 
-    const list = Array.from(map.values());
-    list.sort((a, b) => (b.round || 0) - (a.round || 0));
-    return list;
+    const chronologicalAsc = Array.from(map.values()).sort((a, b) => {
+      const timeA = (a.timestamp || '').trim();
+      const timeB = (b.timestamp || '').trim();
+      if (timeA && timeB && timeA !== timeB) {
+        return timeA.localeCompare(timeB);
+      }
+      return (a.round || 0) - (b.round || 0);
+    });
+
+    const numbered = chronologicalAsc.map((item, idx) => ({
+      ...item,
+      round: idx + 1,
+    }));
+
+    return numbered.sort((a, b) => b.round - a.round);
   }, [todaySavedGames]);
 
   const [showAddModal, setShowAddModal] = useState<boolean>(false);
@@ -308,18 +321,6 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
 
           {/* Quick Action Buttons (Slim & Tight) */}
           <div className="flex items-center gap-1 mt-1.5">
-            {onSaveCurrentGame && (
-              <button
-                type="button"
-                onClick={() => onSaveCurrentGame && onSaveCurrentGame()}
-                className="py-1 px-2 rounded-lg bg-orange-600 hover:bg-orange-500 text-white text-[10px] font-black transition-all shadow-xs flex items-center justify-center gap-1 active:scale-95 cursor-pointer border border-orange-700"
-                title="Guardar partida actual con su secuencia, líneas y saldos en la galería"
-              >
-                <BookmarkCheck className="w-3 h-3 text-yellow-200" />
-                <span>Guardar</span>
-              </button>
-            )}
-
             {onOpenSavedGamesGallery && (
               <button
                 type="button"
@@ -466,11 +467,11 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
                       <div className="flex flex-col min-w-0">
                         {row !== undefined ? (
                           <span className="text-[10px] font-black text-orange-950 truncate flex items-center gap-0.5">
-                            Fila #{row}
+                            Partida #{item.round} • Fila #{row}
                           </span>
                         ) : (
                           <span className="text-[10px] font-black text-orange-950 truncate">
-                            Planilla #{item.tableNumber || item.round}
+                            Partida #{item.round}
                           </span>
                         )}
 
@@ -666,19 +667,6 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
                   <span className="hidden sm:inline">Expandir</span>
                 </>
               )}
-            </button>
-          )}
-
-          {/* Guardar Partida Actual */}
-          {onSaveCurrentGame && (
-            <button
-              type="button"
-              onClick={() => onSaveCurrentGame && onSaveCurrentGame()}
-              className="px-2 py-0.5 rounded-lg bg-orange-600 hover:bg-orange-500 text-white text-[10px] font-black transition-all shadow-2xs flex items-center gap-1 active:scale-95 cursor-pointer border border-orange-700"
-              title="Guardar partida actual con su secuencia, líneas y saldos en partidas guardadas"
-            >
-              <BookmarkCheck className="w-2.5 h-2.5 text-yellow-200" />
-              <span className="hidden sm:inline">Guardar</span>
             </button>
           )}
 

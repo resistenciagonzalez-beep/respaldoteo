@@ -536,6 +536,7 @@ export function buildCompleteGameSequenceItem(params: {
   sequenceSnapshot?: GameSequenceSnapshot;
   dailyDate?: string;
   timestamp?: string;
+  savedViaNewGameFlow?: boolean;
 }): GameSequenceItem {
   const {
     round,
@@ -565,6 +566,7 @@ export function buildCompleteGameSequenceItem(params: {
     sequenceSnapshot,
     dailyDate: paramDailyDate,
     timestamp: paramTimestamp,
+    savedViaNewGameFlow,
   } = params;
 
   const resolvedLetter =
@@ -688,6 +690,7 @@ export function buildCompleteGameSequenceItem(params: {
     shiftEndTime,
     playerSummarySnapshot,
     sequenceSnapshot: resolvedSeqSnapshot,
+    savedViaNewGameFlow,
   };
 }
 

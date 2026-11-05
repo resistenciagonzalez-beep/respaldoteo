@@ -53,6 +53,7 @@ const ADMIN_EMAILS = [
   'admin@bolillerobingo.com',
   'resistenciagonzalez@gmail.com',
   'genesis.vargas0619@gmail.com',
+  'bingoteteoo@gmail.com',
 ];
 
 export function useAuthProvider(): AuthContextType {
@@ -62,6 +63,12 @@ export function useAuthProvider(): AuthContextType {
       if (saved) {
         const parsed = JSON.parse(saved);
         if (parsed && typeof parsed === 'object') {
+          const emailLower = typeof parsed.email === 'string' ? parsed.email.trim().toLowerCase() : '';
+          if (emailLower && ADMIN_EMAILS.includes(emailLower)) {
+            parsed.role = 'admin';
+            parsed.assignedMode = 'all';
+            parsed.avatarColor = parsed.avatarColor || '#f59e0b';
+          }
           return stripSensitiveUserData(parsed) as AppUser;
         }
       }
@@ -99,23 +106,32 @@ export function useAuthProvider(): AuthContextType {
         if (snap.exists()) {
           const data = snap.data();
           const fallbackUser = currentUserRef.current;
+          const resolvedEmail = (data.email || fallbackUser?.email || '').trim().toLowerCase();
+          const isEmailAdmin = Boolean(resolvedEmail && ADMIN_EMAILS.includes(resolvedEmail));
+          const resolvedRole: 'admin' | 'operator' =
+            isEmailAdmin || data.role === 'admin' ? 'admin' : 'operator';
+
+          if (isEmailAdmin && data.role !== 'admin') {
+            updateDoc(userDocRef, { role: 'admin', assignedMode: 'all' }).catch(() => {});
+          }
+
           const updatedUser: AppUser = {
             id: snap.id,
             uid: snap.id,
-            name: data.name || fallbackUser?.name || 'Operador',
+            name: data.name || fallbackUser?.name || (isEmailAdmin ? 'Administrador' : 'Operador'),
             email: data.email || fallbackUser?.email || '',
-            role: data.role === 'admin' ? 'admin' : 'operator',
+            role: resolvedRole,
             status: data.status === 'suspended' ? 'suspended' : 'active',
             joinedDate: data.joinedDate || fallbackUser?.joinedDate || getCurrentLocalDateKey(),
             createdAt: data.createdAt,
             lastActive: data.lastActive || 'En línea',
             gamesPlayed: data.gamesPlayed || 0,
             notes: data.notes || '',
-            avatarColor: data.avatarColor || (data.role === 'admin' ? '#f59e0b' : '#10b981'),
-            assignedMode: data.assignedMode || (data.role === 'admin' ? 'all' : '75'),
+            avatarColor: data.avatarColor || (resolvedRole === 'admin' ? '#f59e0b' : '#10b981'),
+            assignedMode: resolvedRole === 'admin' ? 'all' : (data.assignedMode || '75'),
           };
 
-          if (updatedUser.status === 'suspended') {
+          if (updatedUser.status === 'suspended' && !isEmailAdmin) {
             setCurrentUser(null);
             safeRemoveItem('bingo_current_user_session');
             setError('Esta cuenta ha sido suspendida por un administrador.');
@@ -149,22 +165,31 @@ export function useAuthProvider(): AuthContextType {
           const snap = await getDoc(userRef);
           if (snap.exists()) {
             const data = snap.data();
+            const resolvedEmail = (data.email || fbUser.email || '').trim().toLowerCase();
+            const isEmailAdmin = Boolean(resolvedEmail && ADMIN_EMAILS.includes(resolvedEmail));
+            const resolvedRole: 'admin' | 'operator' =
+              isEmailAdmin || data.role === 'admin' ? 'admin' : 'operator';
+
+            if (isEmailAdmin && data.role !== 'admin') {
+              updateDoc(userRef, { role: 'admin', assignedMode: 'all' }).catch(() => {});
+            }
+
             const profile: AppUser = {
               id: fbUser.uid,
               uid: fbUser.uid,
-              name: data.name || fbUser.displayName || 'Operador',
+              name: data.name || fbUser.displayName || (isEmailAdmin ? 'Administrador' : 'Operador'),
               email: data.email || fbUser.email || '',
-              role: data.role === 'admin' ? 'admin' : 'operator',
+              role: resolvedRole,
               status: data.status === 'suspended' ? 'suspended' : 'active',
               joinedDate: data.joinedDate || getCurrentLocalDateKey(),
               createdAt: data.createdAt,
               lastActive: 'En línea',
               gamesPlayed: data.gamesPlayed || 0,
               notes: data.notes || '',
-              avatarColor: data.avatarColor || (data.role === 'admin' ? '#f59e0b' : '#10b981'),
-              assignedMode: data.assignedMode || (data.role === 'admin' ? 'all' : '75'),
+              avatarColor: data.avatarColor || (resolvedRole === 'admin' ? '#f59e0b' : '#10b981'),
+              assignedMode: resolvedRole === 'admin' ? 'all' : (data.assignedMode || '75'),
             };
-            if (profile.status !== 'suspended') {
+            if (profile.status !== 'suspended' || isEmailAdmin) {
               const cleanProfile = stripSensitiveUserData(profile) as AppUser;
               setCurrentUser(cleanProfile);
               safeSetItem('bingo_current_user_session', JSON.stringify(cleanProfile));
@@ -251,7 +276,14 @@ export function useAuthProvider(): AuthContextType {
         if (emailMatch || nameMatch) {
           const isValidPass = await verifyPassword(pass, u.passwordHash || u.password);
           if (isValidPass) {
-            if (u.status === 'suspended') {
+            const isEmailAdmin = Boolean(
+              (u.email && ADMIN_EMAILS.includes(u.email.trim().toLowerCase())) ||
+              ADMIN_EMAILS.includes(cleanInput)
+            );
+            const effectiveRole: 'admin' | 'operator' =
+              isEmailAdmin || u.role === 'admin' ? 'admin' : 'operator';
+
+            if (u.status === 'suspended' && !isEmailAdmin) {
               const msg = 'Esta cuenta ha sido suspendida. Contacte a un administrador.';
               setError(msg);
               return { success: false, error: msg };
@@ -261,10 +293,22 @@ export function useAuthProvider(): AuthContextType {
               const newHash = await hashPassword(pass);
               u.passwordHash = newHash;
               delete u.password;
-              saveStoredUsers(localUsers);
             }
+            u.role = effectiveRole;
+            if (effectiveRole === 'admin') {
+              u.assignedMode = 'all';
+              u.avatarColor = u.avatarColor || '#f59e0b';
+            }
+            saveStoredUsers(localUsers);
+
+            if (u.id && isEmailAdmin) {
+              updateDoc(doc(db, 'users', u.id), { role: 'admin', assignedMode: 'all' }).catch(() => {});
+            }
+
             const cleanProfile = stripSensitiveUserData({
               ...u,
+              role: effectiveRole,
+              assignedMode: effectiveRole === 'admin' ? 'all' : (u.assignedMode || '75'),
               lastActive: 'Hoy, hace un momento',
             }) as AppUser;
             setCurrentUser(cleanProfile);
@@ -697,8 +741,11 @@ export function useAuthProvider(): AuthContextType {
     }
   }, [currentUser, logActivity]);
 
-  const isAdmin = currentUser?.role === 'admin';
-  const isOperator = currentUser?.role === 'operator';
+  const isAdmin = Boolean(
+    currentUser?.role === 'admin' ||
+      (currentUser?.email && ADMIN_EMAILS.includes(currentUser.email.trim().toLowerCase()))
+  );
+  const isOperator = Boolean(currentUser && !isAdmin);
 
   return useMemo(
     () => ({

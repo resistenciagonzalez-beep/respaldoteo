@@ -2479,12 +2479,6 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       };
       setSheet(nextSheet);
       safeSetItem(STORAGE_KEY, JSON.stringify(nextSheet));
-
-      if (onSaveCurrentGame) {
-        Promise.resolve(onSaveCurrentGame(nextSheet)).catch((err) => {
-          console.warn('Auto-save after Mismos failed:', err);
-        });
-      }
     }
 
     notify(result.message);
@@ -2523,12 +2517,6 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       };
       setSheet(nextSheet);
       safeSetItem(STORAGE_KEY, JSON.stringify(nextSheet));
-
-      if (onSaveCurrentGame) {
-        Promise.resolve(onSaveCurrentGame(nextSheet)).catch((err) => {
-          console.warn('Auto-save after Mismos a Todos failed:', err);
-        });
-      }
     }
 
     notify(result.message);
@@ -3334,20 +3322,6 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                   </>
                 )}
               </button>
-
-              {/* Botón Guardar Partida */}
-              {onSaveCurrentGame && (
-                <button
-                  type="button"
-                  onClick={handleSaveCurrentSheetGame}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-orange-600 hover:bg-orange-500 text-white text-xs font-black transition-all active:scale-95 shadow-xs cursor-pointer border border-orange-700"
-                  title="Guardar y archivar la partida actual con su fecha, hora exacta, líneas y saldos en Firestore"
-                >
-                  <BookmarkCheck className="w-3.5 h-3.5 text-yellow-200" />
-                  <span className="hidden sm:inline">Guardar Partida</span>
-                  <span className="sm:hidden">Guardar</span>
-                </button>
-              )}
 
               {/* Partidas Guardadas Button */}
               {onOpenSavedGamesGallery && (
@@ -5396,7 +5370,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                               }}
                               className={`${
                                 is15SheetExpanded ? 'h-[20px]' : 'min-h-[24px] py-0.5'
-                              } px-0.5 sm:px-1 flex items-center justify-center font-black tabular-nums text-[12px] sm:text-[13px] tracking-tight border-b border-black cursor-pointer hover:bg-yellow-100 transition-colors relative group/ganocell ${
+                              } px-1 flex items-center justify-center gap-1 font-black tabular-nums text-[12px] sm:text-[13px] tracking-tight border-b border-black cursor-pointer hover:bg-yellow-100 transition-colors relative group/ganocell ${
                                 p.totalGano > 0 ? 'text-emerald-950 bg-emerald-100/90' : 'text-black bg-[#fefce8]'
                               }`}
                               style={cellFontSizeScale !== 100 ? { fontSize: `calc(1em * ${cellFontSizeScale / 100})` } : undefined}
@@ -5414,7 +5388,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                                 {p.totalGano.toFixed(2)}
                               </span>
 
-                              {/* Quick 1-click button to mark GANO as paid/sent (sets GANO to 0.00) */}
+                              {/* Quick 1-click button in the bottom section to mark GANO as paid/sent (sets GANO to 0.00) */}
                               {p.totalGano > 0 && (
                                 <button
                                   type="button"
@@ -5422,10 +5396,10 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                                     e.stopPropagation();
                                     handleMarkPlayerGanoPaid(p.id, p.name);
                                   }}
-                                  className="no-print opacity-0 group-hover/ganocell:opacity-100 absolute right-0.5 inset-y-0.5 my-auto px-1 py-0.2 rounded bg-emerald-700 text-white hover:bg-emerald-800 font-black text-[7.5px] tracking-tight leading-none flex items-center gap-0.5 shadow-sm transition-opacity cursor-pointer"
+                                  className="no-print px-1 py-0.5 rounded bg-emerald-600 text-white hover:bg-emerald-700 active:scale-95 font-black text-[8px] sm:text-[8.5px] tracking-tight leading-none flex items-center gap-0.5 shadow-2xs transition-all cursor-pointer flex-shrink-0"
                                   title={`Marcar premio de ${p.name.toUpperCase()} como enviado/pagado (deja GANO en 0.00)`}
                                 >
-                                  <Check className="w-2 h-2" />
+                                  <Check className="w-2.5 h-2.5" />
                                   <span>Pagado</span>
                                 </button>
                               )}
@@ -5569,7 +5543,6 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
               notify('Barra de secuencia vaciada correctamente.');
             }}
             onStartNewGame={onStartNewGame}
-            onSaveCurrentGame={handleSaveCurrentSheetGame}
             onOpenSavedGamesGallery={onOpenSavedGamesGallery}
             savedGamesCount={savedGamesCount}
             mode={mode}
@@ -5619,7 +5592,6 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
               notify('Barra de secuencia vaciada correctamente.');
             }}
             onStartNewGame={onStartNewGame}
-            onSaveCurrentGame={handleSaveCurrentSheetGame}
             onOpenSavedGamesGallery={onOpenSavedGamesGallery}
             savedGamesCount={savedGamesCount}
             mode={mode}

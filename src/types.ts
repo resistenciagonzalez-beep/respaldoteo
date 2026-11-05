@@ -273,6 +273,7 @@ export interface GameSequenceItem {
   shiftEndTime?: string;
   playerSummarySnapshot?: PlayerSummarySnapshotItem[];
   sequenceSnapshot?: GameSequenceSnapshot;
+  savedViaNewGameFlow?: boolean;
   createdAt?: FirestoreTimestampLike;
 }
 

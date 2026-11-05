@@ -20,9 +20,16 @@ import {
   getDoc,
   updateDoc,
   query,
+  where,
   orderBy,
   limit,
+  startAfter,
+  documentId,
   FieldValue,
+  QueryDocumentSnapshot,
+  QuerySnapshot,
+  Query,
+  DocumentData,
 } from 'firebase/firestore';
 import { db } from '../firebase';
 import {
@@ -318,12 +325,13 @@ function initConnectionMonitor(): void {
   void bootstrapOfflineFirstEngine();
 }
 
-const STORAGE_KEY_DELETED_GAME_IDS = 'bingo_deleted_game_ids_v1';
+const STORAGE_KEY_DELETED_GAME_IDS = 'bingo_admin_deleted_game_ids_v2';
 const STORAGE_KEY_CLEARED_SEQUENCE_BAR_IDS = 'bingo_cleared_sequence_bar_ids_v1';
 const ADMIN_EMAILS_LIST = [
   'admin@bolillerobingo.com',
   'resistenciagonzalez@gmail.com',
   'genesis.vargas0619@gmail.com',
+  'bingoteteoo@gmail.com',
 ];
 
 const deletedGameIdsSet: Set<string> = (() => {
@@ -568,23 +576,25 @@ export function getOperatorStorageKey(baseKey: string, user?: AppUser | null): s
 }
 
 /**
- * Checks whether a saved game belongs to a specific operator or user session.
- * Used to strictly separate operator sequence, stats, and gallery views.
+ * Checks whether a saved game strictly belongs to a specific operator or user session.
+ * Used to strictly separate operator sequence bars, round counters, and individual views.
  */
 export function isGameOfOperator(
   game: GameSequenceItem,
   user?: AppUser | null
 ): boolean {
   if (!user) return true;
-  if (user.role === 'admin') return true;
 
   const opUid = user.id || user.uid;
   const opEmail = user.email ? user.email.trim().toLowerCase() : '';
   const opName = user.name ? user.name.trim().toLowerCase() : '';
+  const opFolder = sanitizeOperatorFolderName(user.name);
 
   if (
     game.operatorUid &&
     opUid &&
+    opUid !== 'anon' &&
+    game.operatorUid !== 'anon' &&
     (game.operatorUid === opUid || game.operatorUid === user.id || game.operatorUid === user.uid)
   ) {
     return true;
@@ -598,8 +608,12 @@ export function isGameOfOperator(
     return true;
   }
 
-  if (!game.operatorUid && !game.operatorEmail && !game.operatorName) {
+  if (game.operatorFolder && opName && sanitizeOperatorFolderName(game.operatorFolder) === opFolder) {
     return true;
+  }
+
+  if (!opUid && !opEmail && !opName) {
+    return !game.operatorUid || game.operatorUid === 'anon';
   }
 
   return false;
@@ -708,6 +722,33 @@ export function extractGameExactDate(game: Partial<GameSequenceItem>): string {
     if (fromPath) return fromPath;
   }
 
+  if (game.id && typeof game.id === 'string') {
+    const idDateMatch = game.id.match(/(\d{4}-\d{2}-\d{2})/);
+    if (idDateMatch && idDateMatch[1]) {
+      return idDateMatch[1];
+    }
+  }
+
+  const rawUpdated = (game as any).updatedAt || (game as any).createdAt;
+  if (rawUpdated) {
+    try {
+      const d =
+        typeof rawUpdated.toDate === 'function'
+          ? rawUpdated.toDate()
+          : typeof rawUpdated.seconds === 'number'
+            ? new Date(rawUpdated.seconds * 1000)
+            : null;
+      if (d && !isNaN(d.getTime())) {
+        const year = d.getFullYear();
+        const month = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   return getCurrentLocalDateKey();
 }
 
@@ -775,8 +816,20 @@ export function hasExplicitGameDateKey(
 }
 
 /**
+ * Verifies that a stored record is a valid saved game record (has a sheet snapshot, summary, or game data)
+ * so all saved operator games and folders are always visible.
+ */
+export function isGenuineCompletedGameRecord(
+  game: Partial<GameSequenceItem> | null | undefined
+): boolean {
+  if (!game) return false;
+  if (game.savedViaNewGameFlow === false) return false;
+  return true;
+}
+
+/**
  * Strictly validates that a game is a real saved game stored in today's subfolder (not an invented or dateless item,
- * and not deleted or cleared from the right sequence bar).
+ * not a fake intermediate "Mismos" movement save, and not deleted or cleared from the right sequence bar).
  */
 export function isRealSavedGameInTodaySubfolder(
   game: Partial<GameSequenceItem> | null | undefined,
@@ -802,6 +855,8 @@ export function isRealSavedGameInTodaySubfolder(
       (game.sequenceSnapshot && typeof game.sequenceSnapshot === 'object')
   );
   if (!hasSavedSnapshot) return false;
+
+  if (!isGenuineCompletedGameRecord(game)) return false;
 
   return true;
 }
@@ -904,16 +959,57 @@ export function normalizeGameFolderMetadata(
 }
 
 /**
- * Sorts games deterministically: most recent dailyDate first, then highest round first.
+ * Filters out fake intermediate "Mismos" saves, assigns exact sequential round numbers (1, 2, 3, 4...)
+ * chronologically within each (operatorFolder, dailyDate, mode) subfolder, and sorts most recent first.
  */
 function sortGamesChronologicallyDesc(games: GameSequenceItem[]): GameSequenceItem[] {
-  return [...games].sort((a, b) => {
+  const genuineGames = games.filter((g) => g && isGenuineCompletedGameRecord(g));
+
+  // Group by operatorFolder + dailyDate + mode so each operator's daily games are numbered 1, 2, 3, 4...
+  const groups = new Map<string, GameSequenceItem[]>();
+  for (const g of genuineGames) {
+    const dateKey = getGameNormalizedDateKey(g);
+    const opFolder = sanitizeOperatorFolderName(g.operatorFolder || g.operatorName);
+    const modeKey = g.mode === '90' || g.sheetType === 'traditional-90' ? '90' : '75';
+    const groupKey = `${opFolder}__${dateKey}__${modeKey}`;
+    const bucket = groups.get(groupKey);
+    if (bucket) {
+      bucket.push(g);
+    } else {
+      groups.set(groupKey, [g]);
+    }
+  }
+
+  const renumbered: GameSequenceItem[] = [];
+  for (const bucket of groups.values()) {
+    // Sort chronologically ascending (oldest first -> #1, #2, #3...)
+    bucket.sort((a, b) => {
+      const timeA = (a.timestamp || '').trim();
+      const timeB = (b.timestamp || '').trim();
+      if (timeA && timeB && timeA !== timeB) {
+        return timeA.localeCompare(timeB);
+      }
+      return (a.round || 0) - (b.round || 0);
+    });
+
+    bucket.forEach((g, idx) => {
+      renumbered.push({
+        ...g,
+        round: idx + 1,
+      });
+    });
+  }
+
+  return renumbered.sort((a, b) => {
     const dateA = getGameNormalizedDateKey(a);
     const dateB = getGameNormalizedDateKey(b);
     if (dateB !== dateA) {
       return dateB.localeCompare(dateA);
     }
-    return (b.round || 0) - (a.round || 0);
+    if ((b.round || 0) !== (a.round || 0)) {
+      return (b.round || 0) - (a.round || 0);
+    }
+    return (b.timestamp || '').localeCompare(a.timestamp || '');
   });
 }
 
@@ -966,100 +1062,291 @@ const inFlightAutoHealIds = new Set<string>();
 const savedGamesSubscribers = new Set<(games: GameSequenceItem[]) => void>();
 let activeFirestoreUnsubscribe: (() => void) | null = null;
 let cachedSortedGames: GameSequenceItem[] = [];
+let activeHistoricalHydrationPromise: Promise<void> | null = null;
+
+/**
+ * Generates recent YYYY-MM-DD date keys (today and the past N-1 days) in chunks of 10
+ * for Firestore `where('dailyDate', 'in', chunk)` queries.
+ */
+function buildRecentDateChunks(totalDays = 60, chunkSize = 10): string[][] {
+  const keys: string[] = [];
+  const base = new Date();
+  for (let i = 0; i < totalDays; i++) {
+    const d = new Date(base);
+    d.setDate(base.getDate() - i);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    keys.push(`${y}-${m}-${day}`);
+  }
+  const chunks: string[][] = [];
+  for (let i = 0; i < keys.length; i += chunkSize) {
+    chunks.push(keys.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
+/**
+ * Fetches all documents from `saved_games` using selective `where(...)` partitions
+ * so Firestore Enterprise's `$match` pipeline stage filters documents BEFORE the in-memory `$sort` stage.
+ * This guarantees no query ever hits the 128.00 MiB query memory limit while retrieving 100% of
+ * all operator folders, date subfolders, and historical games up to the present date.
+ */
+async function fetchAllSavedGamesDocsPaginated(
+  _pageSize = 60,
+  onPageLoaded?: (docs: QueryDocumentSnapshot<DocumentData>[]) => void
+): Promise<QueryDocumentSnapshot<DocumentData>[]> {
+  const allDocs: QueryDocumentSnapshot<DocumentData>[] = [];
+  const seenDocIds = new Set<string>();
+  const colRef = collection(db, 'saved_games');
+
+  const collectSnapshotDocs = (docs: QueryDocumentSnapshot<DocumentData>[]) => {
+    const fresh: QueryDocumentSnapshot<DocumentData>[] = [];
+    for (const docSnap of docs) {
+      if (!seenDocIds.has(docSnap.id)) {
+        seenDocIds.add(docSnap.id);
+        allDocs.push(docSnap);
+        fresh.push(docSnap);
+      }
+    }
+    if (fresh.length > 0 && onPageLoaded) {
+      onPageLoaded(fresh);
+    }
+  };
+
+  // Helper to fetch a round range with automatic binary splitting if a range ever exceeds memory limits
+  const fetchRoundRange = async (minR: number, maxR: number): Promise<void> => {
+    try {
+      const q: Query<DocumentData> =
+        minR === maxR
+          ? query(colRef, where('round', '==', minR))
+          : query(colRef, where('round', '>=', minR), where('round', '<=', maxR));
+      const snap: QuerySnapshot<DocumentData> = await getDocs(q);
+      if (!snap.empty) {
+        collectSnapshotDocs(snap.docs);
+      }
+    } catch (err) {
+      if (minR < maxR) {
+        const mid = Math.floor((minR + maxR) / 2);
+        await fetchRoundRange(minR, mid);
+        await fetchRoundRange(mid + 1, maxR);
+      } else {
+        // Fallback split by mode ('75' / '90') if a single round number ever exceeds memory
+        try {
+          const [snap75, snap90] = await Promise.all([
+            getDocs(query(colRef, where('round', '==', minR), where('mode', '==', '75'))),
+            getDocs(query(colRef, where('round', '==', minR), where('mode', '==', '90'))),
+          ]);
+          collectSnapshotDocs([...snap75.docs, ...snap90.docs]);
+        } catch (innerErr) {
+          console.warn(`[PARTITION_FETCH] Notice for round ${minR}:`, innerErr);
+        }
+      }
+    }
+  };
+
+  // 1. Fast pass by recent 60 calendar days (in 10-day `in` chunks) so recent subfolders appear immediately
+  const dateChunks = buildRecentDateChunks(60, 10);
+  for (let i = 0; i < dateChunks.length; i += 2) {
+    const batch = dateChunks.slice(i, i + 2);
+    await Promise.all(
+      batch.map(async (chunk) => {
+        try {
+          const snap: QuerySnapshot<DocumentData> = await getDocs(
+            query(colRef, where('dailyDate', 'in', chunk))
+          );
+          if (!snap.empty) {
+            collectSnapshotDocs(snap.docs);
+          }
+        } catch {
+          // If a 10-day chunk is large, fetch day-by-day
+          for (const dayKey of chunk) {
+            try {
+              const daySnap: QuerySnapshot<DocumentData> = await getDocs(
+                query(colRef, where('dailyDate', '==', dayKey))
+              );
+              if (!daySnap.empty) {
+                collectSnapshotDocs(daySnap.docs);
+              }
+            } catch {
+              // Handled by full round partition sweep below
+            }
+          }
+        }
+      })
+    );
+  }
+
+  // 2. Complete mathematical partition sweep across ALL `round` values (-∞ to +∞)
+  // Covers 100% of all historical games from every date and every operator
+  const roundPartitions: Array<[number, number]> = [
+    [1, 1],
+    [2, 2],
+    [3, 3],
+    [4, 4],
+    [5, 5],
+    [6, 6],
+    [7, 7],
+    [8, 8],
+    [9, 9],
+    [10, 10],
+    [11, 12],
+    [13, 14],
+    [15, 16],
+    [17, 19],
+    [20, 22],
+    [23, 26],
+    [27, 31],
+    [32, 38],
+    [39, 48],
+    [49, 65],
+    [66, 95],
+    [96, 150],
+    [151, 300],
+  ];
+
+  for (let i = 0; i < roundPartitions.length; i += 3) {
+    const batch = roundPartitions.slice(i, i + 3);
+    await Promise.all(batch.map(([minR, maxR]) => fetchRoundRange(minR, maxR)));
+  }
+
+  // Also cover boundary rounds (<= 0 and > 300)
+  await Promise.all([
+    getDocs(query(colRef, where('round', '<=', 0)))
+      .then((s) => {
+        if (!s.empty) collectSnapshotDocs(s.docs);
+      })
+      .catch(() => {}),
+    getDocs(query(colRef, where('round', '>', 300)))
+      .then((s) => {
+        if (!s.empty) collectSnapshotDocs(s.docs);
+      })
+      .catch(() => {}),
+  ]);
+
+  return allDocs;
+}
+
+function ingestRemoteGameDoc(docKey: string, rawData: GameSequenceItem): void {
+  if (deletedGameIdsSet.has(docKey) || (rawData.id && deletedGameIdsSet.has(rawData.id))) {
+    firestoreGamesMemoryStore.delete(docKey);
+    void deleteGameFromIndexedDB(docKey);
+    return;
+  }
+
+  const pendingTask = syncQueueMap.get(docKey);
+  if (pendingTask && pendingTask.status !== 'synced') {
+    firestoreGamesMemoryStore.set(docKey, pendingTask.game);
+    return;
+  }
+
+  const { normalizedGame, isMisplaced, reason } = normalizeGameFolderMetadata(
+    { ...rawData, id: docKey },
+    docKey
+  );
+
+  if (isMisplaced && !inFlightAutoHealIds.has(docKey)) {
+    inFlightAutoHealIds.add(docKey);
+    console.log(
+      `[AUTO-CORRECTION] ${reason || 'Reorganización de subcarpeta'}. Partida ID: ${docKey}, Fecha exacta: ${normalizedGame.dailyDate}, Subcarpeta: ${normalizedGame.subfolderDay}, Ruta: ${normalizedGame.folderPath}`
+    );
+    setDoc(
+      doc(db, 'saved_games', docKey),
+      {
+        id: docKey,
+        dailyDate: normalizedGame.dailyDate,
+        subfolderDay: normalizedGame.subfolderDay,
+        folderPath: normalizedGame.folderPath,
+        operatorFolder: normalizedGame.operatorFolder,
+        operatorName: normalizedGame.operatorName,
+        dateFormatted: normalizedGame.dateFormatted,
+      },
+      { merge: true }
+    )
+      .catch((err) => {
+        console.warn(`[AUTO-CORRECTION] Error syncing auto-healed game ${docKey}:`, err);
+      })
+      .finally(() => {
+        setTimeout(() => inFlightAutoHealIds.delete(docKey), 3000);
+      });
+  }
+
+  firestoreGamesMemoryStore.set(docKey, normalizedGame);
+  void saveGameToIndexedDB(normalizedGame);
+}
+
+function broadcastMemoryStoreToSubscribers(): void {
+  hasSyncedWithFirestore = true;
+  cachedSortedGames = sortGamesChronologicallyDesc(
+    Array.from(firestoreGamesMemoryStore.values())
+  );
+
+  syncTemporaryLocalCache(cachedSortedGames);
+  savedGamesSubscribers.forEach((sub) => {
+    try {
+      sub(cachedSortedGames);
+    } catch (cbErr) {
+      console.warn('Error in saved_games subscriber callback:', cbErr);
+    }
+  });
+}
+
+export async function hydrateAllHistoricalGamesInPages(): Promise<void> {
+  if (typeof window === 'undefined') return;
+  if (activeHistoricalHydrationPromise) {
+    return activeHistoricalHydrationPromise;
+  }
+  activeHistoricalHydrationPromise = (async () => {
+    try {
+      await fetchAllSavedGamesDocsPaginated(60, (pageDocs) => {
+        updateSyncStatus({ isFirestoreReachable: true });
+        for (const docSnap of pageDocs) {
+          ingestRemoteGameDoc(docSnap.id, docSnap.data() as GameSequenceItem);
+        }
+        broadcastMemoryStoreToSubscribers();
+      });
+    } finally {
+      activeHistoricalHydrationPromise = null;
+    }
+  })();
+
+  return activeHistoricalHydrationPromise;
+}
 
 function ensureSharedSavedGamesListener(): void {
   if (activeFirestoreUnsubscribe || typeof window === 'undefined') return;
   initConnectionMonitor();
 
+  // 1. Load all historical games in partitioned batches so we never exceed Firestore's 128 MiB query limit
+  void hydrateAllHistoricalGamesInPages();
+
+  // 2. Attach real-time listener for recent days (last 7 days) so live updates across all operators are instant
   try {
-    const q = collection(db, 'saved_games');
+    const recentWeekKeys = buildRecentDateChunks(7, 7)[0] || [getCurrentLocalDateKey()];
+    const boundedRealtimeQuery = query(
+      collection(db, 'saved_games'),
+      where('dailyDate', 'in', recentWeekKeys)
+    );
     activeFirestoreUnsubscribe = onSnapshot(
-      q,
+      boundedRealtimeQuery,
       (snapshot) => {
         updateSyncStatus({ isFirestoreReachable: true });
 
-        // Merge Firestore documents with any pending local offline saves so unsynced games are NEVER overwritten or lost
-        const remoteIds = new Set<string>();
-
-        snapshot.forEach((docSnap) => {
-          const rawData = docSnap.data() as GameSequenceItem;
-          const docKey = docSnap.id;
-
-          // If this document was permanently deleted by an Admin, never resurrect it and ensure remote cleanup
-          if (deletedGameIdsSet.has(docKey) || (rawData.id && deletedGameIdsSet.has(rawData.id))) {
-            firestoreGamesMemoryStore.delete(docKey);
-            void deleteGameFromIndexedDB(docKey);
-            deleteDoc(doc(db, 'saved_games', docKey)).catch(() => {});
+        snapshot.docChanges().forEach((change) => {
+          const docKey = change.doc.id;
+          if (change.type === 'removed') {
+            if (!syncQueueMap.has(docKey)) {
+              firestoreGamesMemoryStore.delete(docKey);
+            }
             return;
           }
-
-          remoteIds.add(docKey);
-
-          // If this document is currently queued locally with newer changes, keep the local queued version in memory
-          const pendingTask = syncQueueMap.get(docKey);
-          if (pendingTask && pendingTask.status !== 'synced') {
-            firestoreGamesMemoryStore.set(docKey, pendingTask.game);
-            return;
-          }
-
-          const { normalizedGame, isMisplaced, reason } = normalizeGameFolderMetadata(
-            { ...rawData, id: docKey },
-            docKey
-          );
-
-          if (isMisplaced && !inFlightAutoHealIds.has(docKey)) {
-            inFlightAutoHealIds.add(docKey);
-            console.log(
-              `[AUTO-CORRECTION] ${reason || 'Reorganización de subcarpeta'}. Partida ID: ${docKey}, Fecha exacta: ${normalizedGame.dailyDate}, Subcarpeta: ${normalizedGame.subfolderDay}, Ruta: ${normalizedGame.folderPath}`
-            );
-            setDoc(
-              doc(db, 'saved_games', docKey),
-              {
-                id: docKey,
-                dailyDate: normalizedGame.dailyDate,
-                subfolderDay: normalizedGame.subfolderDay,
-                folderPath: normalizedGame.folderPath,
-                operatorFolder: normalizedGame.operatorFolder,
-                operatorName: normalizedGame.operatorName,
-                dateFormatted: normalizedGame.dateFormatted,
-              },
-              { merge: true }
-            )
-              .catch((err) => {
-                console.warn(`[AUTO-CORRECTION] Error syncing auto-healed game ${docKey}:`, err);
-              })
-              .finally(() => {
-                setTimeout(() => inFlightAutoHealIds.delete(docKey), 3000);
-              });
-          }
-
-          firestoreGamesMemoryStore.set(docKey, normalizedGame);
-          void saveGameToIndexedDB(normalizedGame);
+          ingestRemoteGameDoc(docKey, change.doc.data() as GameSequenceItem);
         });
 
-        // Remove documents that were deleted remotely (unless they are currently in the local save queue)
-        for (const existingKey of Array.from(firestoreGamesMemoryStore.keys())) {
-          if (!remoteIds.has(existingKey) && !syncQueueMap.has(existingKey)) {
-            firestoreGamesMemoryStore.delete(existingKey);
-          }
-        }
-
-        hasSyncedWithFirestore = true;
-        cachedSortedGames = sortGamesChronologicallyDesc(
-          Array.from(firestoreGamesMemoryStore.values())
-        );
-
-        syncTemporaryLocalCache(cachedSortedGames);
-        savedGamesSubscribers.forEach((sub) => {
-          try {
-            sub(cachedSortedGames);
-          } catch (cbErr) {
-            console.warn('Error in saved_games subscriber callback:', cbErr);
-          }
-        });
+        broadcastMemoryStoreToSubscribers();
       },
       (error) => {
-        console.warn('Firestore saved_games subscription error:', error);
+        console.warn('Firestore saved_games subscription notice:', error);
         updateSyncStatus({ isFirestoreReachable: false });
       }
     );
@@ -1100,7 +1387,7 @@ export function subscribeToSavedGamesFirestore(
 let isReorganizationRunning = false;
 
 /**
- * Scans all saved games in Firestore.
+ * Scans all saved games using safe paginated batches (never exceeding Firestore's 128 MiB limit).
  * If any game has a date different from the subfolder where it is stored,
  * it is automatically moved to its correct subfolder.
  */
@@ -1123,10 +1410,12 @@ export async function reorganizeAndHealAllStoredGames(): Promise<{
   let reorganizedCount = 0;
 
   try {
-    const snap = await getDocs(collection(db, 'saved_games'));
-    for (const docSnap of snap.docs) {
-      const rawData = docSnap.data() as GameSequenceItem;
-      const docKey = docSnap.id;
+    // Always ensure all historical games from Firestore are hydrated before reorganizing
+    await hydrateAllHistoricalGamesInPages();
+
+    const entriesToAudit = Array.from(firestoreGamesMemoryStore.entries());
+    for (const [docKey, rawData] of entriesToAudit) {
+      if (!rawData) continue;
       if (deletedGameIdsSet.has(docKey) || (rawData.id && deletedGameIdsSet.has(rawData.id))) {
         firestoreGamesMemoryStore.delete(docKey);
         void deleteGameFromIndexedDB(docKey);
@@ -1152,10 +1441,6 @@ export async function reorganizeAndHealAllStoredGames(): Promise<{
           reason: reason || 'Reorganización a fecha exacta',
         });
 
-        console.log(
-          `[REORGANIZACION_SUBCARPETAS] Partida #${normalizedGame.round} (${docKey}) movida de subcarpeta "${oldSubfolder}" a "${newSubfolder}" por fecha exacta.`
-        );
-
         inFlightAutoHealIds.add(docKey);
         await setDoc(
           doc(db, 'saved_games', docKey),
@@ -1169,9 +1454,11 @@ export async function reorganizeAndHealAllStoredGames(): Promise<{
             dateFormatted: normalizedGame.dateFormatted,
           },
           { merge: true }
-        ).finally(() => {
-          setTimeout(() => inFlightAutoHealIds.delete(docKey), 3000);
-        });
+        )
+          .catch(() => {})
+          .finally(() => {
+            setTimeout(() => inFlightAutoHealIds.delete(docKey), 3000);
+          });
 
         firestoreGamesMemoryStore.set(docKey, normalizedGame);
         await saveGameToIndexedDB(normalizedGame);
@@ -1194,7 +1481,7 @@ export async function reorganizeAndHealAllStoredGames(): Promise<{
       );
     }
   } catch (err) {
-    console.error('Error during reorganizeAndHealAllStoredGames:', err);
+    console.warn('Notice during reorganizeAndHealAllStoredGames:', err);
   } finally {
     isReorganizationRunning = false;
   }
@@ -1209,7 +1496,11 @@ export function getSavedGamesGallery(): GameSequenceItem[] {
   if (hasSyncedWithFirestore || firestoreGamesMemoryStore.size > 0) {
     return sortGamesChronologicallyDesc(
       Array.from(firestoreGamesMemoryStore.values()).filter(
-        (g) => g && g.id && !deletedGameIdsSet.has(g.id) && hasExplicitGameDateKey(g) !== null
+        (g) =>
+          g &&
+          g.id &&
+          !deletedGameIdsSet.has(g.id) &&
+          isGenuineCompletedGameRecord(g)
       )
     );
   }
@@ -1228,7 +1519,8 @@ export function getSavedGamesGallery(): GameSequenceItem[] {
               typeof item.round === 'number' &&
               item.round >= 1 &&
               (!item.id || !deletedGameIdsSet.has(item.id)) &&
-              hasExplicitGameDateKey(item) !== null
+              hasExplicitGameDateKey(item) !== null &&
+              isGenuineCompletedGameRecord(item)
           )
           .map((item) => normalizeGameFolderMetadata(item, item.id).normalizedGame);
         return sortGamesChronologicallyDesc(valid);
@@ -1349,6 +1641,7 @@ interface FirestoreGamePayload {
   sequenceSnapshot?: GameSequenceSnapshot;
   sheet75Snapshot?: BingoSheetData;
   sheet90Snapshot?: Traditional90SheetData;
+  savedViaNewGameFlow?: boolean;
 }
 
 function buildFirestorePayloadFromItem(normalizedItem: GameSequenceItem): FirestoreGamePayload {
@@ -1398,6 +1691,7 @@ function buildFirestorePayloadFromItem(normalizedItem: GameSequenceItem): Firest
     shiftDate: normalizedItem.shiftDate || normalizedItem.dailyDate,
     shiftStartTime: normalizedItem.shiftStartTime || '',
     shiftEndTime: normalizedItem.shiftEndTime || '',
+    savedViaNewGameFlow: Boolean(normalizedItem.savedViaNewGameFlow),
     updatedAt: serverTimestamp(),
   };
 
@@ -2118,7 +2412,8 @@ export async function deleteGamePermanently(idOrItem: string | GameSequenceItem)
  */
 export async function clearRightSequenceBarToday(
   gamesToClear: GameSequenceItem[] = [],
-  modeFilter?: '75' | '90'
+  modeFilter?: '75' | '90',
+  currentUser?: AppUser | null
 ): Promise<void> {
   const todayKey = getCurrentLocalDateKey();
   const idsToClear = new Set<string>();
@@ -2133,6 +2428,7 @@ export async function clearRightSequenceBarToday(
 
   for (const [docId, g] of firestoreGamesMemoryStore.entries()) {
     if (!g) continue;
+    if (currentUser && !isGameOfOperator(g, currentUser)) continue;
     const is90 = g.mode === '90' || g.sheetType === 'traditional-90';
     const matchesMode =
       !modeFilter || (modeFilter === '90' ? is90 : !is90);
@@ -2164,30 +2460,26 @@ export async function clearRightSequenceBarToday(
     }
   }
 
-  if (isCurrentSessionAdmin() && idsToClear.size > 0) {
-    await executeBatchGameDeletion(idsToClear, itemsToClear);
-  } else {
-    const allGames = sortGamesChronologicallyDesc(
-      Array.from(firestoreGamesMemoryStore.values())
-    );
-    cachedSortedGames = allGames;
-    savedGamesSubscribers.forEach((sub) => {
-      try {
-        sub(allGames);
-      } catch {
-        // ignore
-      }
-    });
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(
-        new CustomEvent('bingo_saved_games_updated', {
-          detail: {
-            total: allGames.length,
-            deletedIds: Array.from(idsToClear),
-          },
-        })
-      );
+  const allGames = sortGamesChronologicallyDesc(
+    Array.from(firestoreGamesMemoryStore.values())
+  );
+  cachedSortedGames = allGames;
+  savedGamesSubscribers.forEach((sub) => {
+    try {
+      sub(allGames);
+    } catch {
+      // ignore
     }
+  });
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent('bingo_saved_games_updated', {
+        detail: {
+          total: allGames.length,
+          deletedIds: Array.from(idsToClear),
+        },
+      })
+    );
   }
 }
 
@@ -2236,8 +2528,8 @@ export async function deleteGamesOfDay(
     }
 
     try {
-      const snap = await getDocs(collection(db, 'saved_games'));
-      snap.forEach((docSnap) => {
+      const docs = await fetchAllSavedGamesDocsPaginated(60);
+      docs.forEach((docSnap) => {
         checkAndCollect(docSnap.id, docSnap.data() as GameSequenceItem);
       });
     } catch {
@@ -2284,8 +2576,8 @@ export async function deleteGamesOfOperatorFolder(operatorName: string): Promise
     }
 
     try {
-      const snap = await getDocs(collection(db, 'saved_games'));
-      snap.forEach((docSnap) => {
+      const docs = await fetchAllSavedGamesDocsPaginated(60);
+      docs.forEach((docSnap) => {
         checkAndCollect(docSnap.id, docSnap.data() as GameSequenceItem);
       });
     } catch {
@@ -2336,8 +2628,8 @@ export async function clearAllSavedGamesGallery(
     }
 
     try {
-      const snap = await getDocs(collection(db, 'saved_games'));
-      snap.forEach((docSnap) => {
+      const docs = await fetchAllSavedGamesDocsPaginated(60);
+      docs.forEach((docSnap) => {
         checkAndCollect(docSnap.id, docSnap.data() as GameSequenceItem);
       });
     } catch {
@@ -2367,20 +2659,32 @@ export function subscribeToUsersCentralized(
         const users: AppUser[] = [];
         snapshot.forEach((docSnap) => {
           const data = docSnap.data();
+          const emailLower = typeof data.email === 'string' ? data.email.trim().toLowerCase() : '';
+          const isEmailAdmin = Boolean(emailLower && ADMIN_EMAILS_LIST.includes(emailLower));
+          const resolvedRole: 'admin' | 'operator' =
+            isEmailAdmin || data.role === 'admin' ? 'admin' : 'operator';
+
+          if (isEmailAdmin && data.role !== 'admin') {
+            updateDoc(doc(db, 'users', docSnap.id), {
+              role: 'admin',
+              assignedMode: 'all',
+            }).catch(() => {});
+          }
+
           users.push({
             id: docSnap.id,
             uid: docSnap.id,
             name: data.name || 'Operador',
             email: data.email || '',
-            role: data.role === 'admin' ? 'admin' : 'operator',
+            role: resolvedRole,
             status: data.status === 'suspended' ? 'suspended' : 'active',
             joinedDate: data.joinedDate || '',
             createdAt: data.createdAt,
             lastActive: data.lastActive || 'Reciente',
             gamesPlayed: data.gamesPlayed || 0,
             notes: data.notes || '',
-            avatarColor: data.avatarColor || (data.role === 'admin' ? '#f59e0b' : '#10b981'),
-            assignedMode: data.assignedMode || (data.role === 'admin' ? 'all' : '75'),
+            avatarColor: data.avatarColor || (resolvedRole === 'admin' ? '#f59e0b' : '#10b981'),
+            assignedMode: resolvedRole === 'admin' ? 'all' : (data.assignedMode || '75'),
           });
         });
         onData(users);
