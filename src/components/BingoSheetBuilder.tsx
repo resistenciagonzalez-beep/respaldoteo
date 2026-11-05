@@ -2479,12 +2479,6 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       };
       setSheet(nextSheet);
       safeSetItem(STORAGE_KEY, JSON.stringify(nextSheet));
-
-      if (onSaveCurrentGame) {
-        Promise.resolve(onSaveCurrentGame(nextSheet)).catch((err) => {
-          console.warn('Auto-save after Mismos failed:', err);
-        });
-      }
     }
 
     notify(result.message);
@@ -2523,12 +2517,6 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       };
       setSheet(nextSheet);
       safeSetItem(STORAGE_KEY, JSON.stringify(nextSheet));
-
-      if (onSaveCurrentGame) {
-        Promise.resolve(onSaveCurrentGame(nextSheet)).catch((err) => {
-          console.warn('Auto-save after Mismos a Todos failed:', err);
-        });
-      }
     }
 
     notify(result.message);
