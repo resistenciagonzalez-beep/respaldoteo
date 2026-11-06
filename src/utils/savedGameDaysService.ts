@@ -1,4 +1,5 @@
 import type { GameSequenceItem } from '../types';
+import { getGameLines } from './gameNormalization';
 import {
   collection,
   documentId,
@@ -25,6 +26,7 @@ export interface SavedGameDay {
   operatorName: string;
   folderPath: string;
   gamesCount: number;
+  totalLines: number;
   lastRound: number;
   updatedAt?: unknown;
 }
@@ -143,9 +145,11 @@ export const savedGameDaysService = {
             ? data.folderPath
             : `${operatorFolder}/${dailyDate}`,
           gamesCount: 0,
+          totalLines: 0,
           lastRound: 0,
         };
         day.gamesCount += 1;
+        day.totalLines += getGameLines(data as unknown as GameSequenceItem);
         day.lastRound = Math.max(day.lastRound, Number(data.round) || 0);
         groupedDays.set(key, day);
       }
