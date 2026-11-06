@@ -910,7 +910,27 @@ export function createGalleryService(dependencies: GalleryServiceDependencies) {
           isMigrated = false;
         }
 
-        if (isMigrated && days.length > 0) {
+        let isIndexCurrent = false;
+        if (isMigrated && days.length > 0 && operatorUid !== 'anon') {
+          try {
+            const latestSavedGamesPage = await getDocs(query(
+              collection(db, 'saved_games'),
+              where('operatorUid', '==', operatorUid),
+              orderBy('dailyDate', 'desc'),
+              limit(1)
+            ));
+            const latestSavedGameDate = latestSavedGamesPage.docs[0]?.data().dailyDate;
+            const latestIndexedDate = days.reduce(
+              (latest, day) => day.dailyDate > latest ? day.dailyDate : latest,
+              ''
+            );
+            isIndexCurrent = Boolean(latestSavedGameDate && latestSavedGameDate === latestIndexedDate);
+          } catch {
+            isIndexCurrent = false;
+          }
+        }
+
+        if (isMigrated && days.length > 0 && isIndexCurrent) {
           const indexedDates = dateRowsToSummaries(days, knownDates);
           const dates = mergeAndPublishDates(indexedDates, activeScan, true, true);
           return cloneGalleryDates(dates);
