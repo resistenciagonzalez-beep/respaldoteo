@@ -822,7 +822,7 @@ export function createGalleryService(dependencies: GalleryServiceDependencies) {
           dateKey,
           ...label,
           gameCount: Number(day.gamesCount) || 0,
-          totalLines: retained?.totalLines || 0,
+          totalLines: Number(day.totalLines) || 0,
           totalCollected: retained?.totalCollected || 0,
           totalPrizes: retained?.totalPrizes || 0,
           netProfit: retained?.netProfit || 0,

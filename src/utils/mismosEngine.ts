@@ -4,10 +4,12 @@ import {
   BingoSheetCell,
   BingoSheetPlayer,
   AppUser,
+  GameSequenceItem,
 } from '../types';
 import { getContrastTextColor, VIBRANT_PLAYER_COLORS } from './playerColors';
-import { getPreviousGameSheet75 } from './gameSnapshotStorage';
-import { getSavedGamesGallery, getCurrentLocalDateKey, isGameOfOperator } from './savedGamesStorage';
+import { getCurrentLocalDateKey, getOperatorStorageKey, isGameOfOperator } from './gameNormalization';
+import { safeGetItem } from './safeStorage';
+import { getSavedGamesHistoryForMismos } from './gameHistoryRepository';
 
 export interface MismosPlayerReport {
   playerId: string;
@@ -42,6 +44,31 @@ export function normalizePlayerName(name?: string): string {
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '');
+}
+
+const PREVIOUS_SHEET_75_ARCHIVE_KEY = 'bingo_previous_sheet_75_archive';
+
+function getArchivedPreviousSheet75(
+  user: AppUser | null | undefined,
+  targetPlayerIdOrName?: string
+): BingoSheetData | null {
+  const keys = user
+    ? [getOperatorStorageKey(PREVIOUS_SHEET_75_ARCHIVE_KEY, user), PREVIOUS_SHEET_75_ARCHIVE_KEY]
+    : [PREVIOUS_SHEET_75_ARCHIVE_KEY];
+  let fallback: BingoSheetData | null = null;
+  for (const key of keys) {
+    const raw = safeGetItem(key);
+    if (!raw) continue;
+    try {
+      const sheet = JSON.parse(raw) as BingoSheetData;
+      if (!sheet || !Array.isArray(sheet.columns)) continue;
+      if (sheetHasPlayerCells(sheet, targetPlayerIdOrName)) return sheet;
+      if (!fallback) fallback = sheet;
+    } catch (error) {
+      console.error('Error reading archived previous sheet75 for Mismos:', error);
+    }
+  }
+  return fallback;
 }
 
 /**
@@ -81,22 +108,27 @@ function sheetHasPlayerCells(sheet?: BingoSheetData | null, targetPlayerIdOrName
  * 2. Most recent saved game from Firestore-backed gallery (excluding the currently active in-progress round)
  * 3. In-session previous sheet snapshot
  */
-export function getImmediatelyPrecedingSheet75(
+export async function getImmediatelyPrecedingSheet75(
   currentUser?: AppUser | null,
   overrideSheet?: BingoSheetData | null,
   targetPlayerIdOrName?: string,
   currentMatchRound?: number
-): BingoSheetData | null {
+): Promise<BingoSheetData | null> {
   if (overrideSheet && Array.isArray(overrideSheet.columns) && overrideSheet.columns.length > 0) {
     return overrideSheet;
   }
 
-  const gallery = getSavedGamesGallery();
+  let history: GameSequenceItem[] = [];
+  try {
+    history = await getSavedGamesHistoryForMismos(currentUser);
+  } catch (error) {
+    console.error('Could not read saved game history for Mismos:', error);
+  }
   const localToday = getCurrentLocalDateKey();
 
   // 1. Search Firestore-backed saved games belonging to current operator (most recent dailyDate & round first)
   if (currentUser) {
-    for (const game of gallery) {
+    for (const game of history) {
       if (
         currentMatchRound !== undefined &&
         game.round !== undefined &&
@@ -113,13 +145,13 @@ export function getImmediatelyPrecedingSheet75(
   }
 
   // 2. Check in-session previous sheet archive
-  const archived = getPreviousGameSheet75(currentUser);
+  const archived = getArchivedPreviousSheet75(currentUser, targetPlayerIdOrName);
   if (archived && sheetHasPlayerCells(archived, targetPlayerIdOrName)) {
     return archived;
   }
 
   // 3. Search all saved games in Firestore-backed gallery
-  for (const game of gallery) {
+  for (const game of history) {
     if (
       currentMatchRound !== undefined &&
       game.round !== undefined &&
@@ -135,7 +167,7 @@ export function getImmediatelyPrecedingSheet75(
 
   // If targetPlayerIdOrName was specified and not found anywhere, still return latest operator game or archived sheet if it has any cells
   if (currentUser) {
-    for (const game of gallery) {
+    for (const game of history) {
       if (
         currentMatchRound !== undefined &&
         game.round !== undefined &&

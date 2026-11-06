@@ -2448,8 +2448,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
 
   // Re-assign automatically all cells/numbers this player had in the previous game ("Mismos")
   // Strict Rule: DO NOT remove or steal cells already assigned to other players; ONLY assign available cells!
-  const handleAssignSameCellsFromPreviousGame = (player: BingoSheetPlayer) => {
-    const previousSheet = getImmediatelyPrecedingSheet75(
+  const handleAssignSameCellsFromPreviousGame = async (player: BingoSheetPlayer) => {
+    const previousSheet = await getImmediatelyPrecedingSheet75(
       currentUser,
       undefined,
       player.name || player.id,
@@ -2486,8 +2486,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
 
   // Re-assign same cells from previous game for ALL players ("Mismos a Todos")
   // Strict Rule: DO NOT remove or steal cells already assigned to other players; ONLY assign available cells!
-  const handleAssignSameCellsForAllPlayers = () => {
-    const previousSheet = getImmediatelyPrecedingSheet75(
+  const handleAssignSameCellsForAllPlayers = async () => {
+    const previousSheet = await getImmediatelyPrecedingSheet75(
       currentUser,
       undefined,
       undefined,
