@@ -898,11 +898,19 @@ export function createGalleryService(dependencies: GalleryServiceDependencies) {
 
     const scanPromise = Promise.resolve().then(async () => {
       try {
-        let [days, isMigrated] = await Promise.all([
-          dependencies.gameDays.getDays(operatorUid),
-          dependencies.gameDays.isOperatorMigrated(operatorUid),
-        ]);
-        if (isMigrated) {
+        let days: SavedGameDay[] = [];
+        let isMigrated = false;
+        try {
+          [days, isMigrated] = await Promise.all([
+            dependencies.gameDays.getDays(operatorUid),
+            dependencies.gameDays.isOperatorMigrated(operatorUid),
+          ]);
+        } catch {
+          days = [];
+          isMigrated = false;
+        }
+
+        if (isMigrated && days.length > 0) {
           const indexedDates = dateRowsToSummaries(days, knownDates);
           const dates = mergeAndPublishDates(indexedDates, activeScan, true, true);
           return cloneGalleryDates(dates);
