@@ -13,7 +13,9 @@ import {
   serverTimestamp,
   setDoc,
   where,
+  writeBatch,
 } from 'firebase/firestore';
+import type { DocumentReference } from 'firebase/firestore';
 import { db } from '../firebase';
 
 export interface SavedGameDay {
@@ -39,6 +41,10 @@ function getGameDayDocumentId(operatorUid: string, dailyDate: string): string {
 
 function getMigrationDocumentId(operatorUid: string): string {
   return `__migration__${encodeURIComponent(operatorUid)}`;
+}
+
+function getFullRebuildDocumentId(version: number): string {
+  return `__migration__saved_games_full_rebuild_v${version}`;
 }
 
 function getGameDayReference(operatorUid: string, dailyDate: string) {
@@ -96,6 +102,100 @@ async function refreshGameDay(operatorUid: string, dailyDate: string, game?: Gam
 }
 
 export const savedGameDaysService = {
+  async isFullCollectionRebuildCompleted(version: number): Promise<boolean> {
+    const markerSnapshot = await getDoc(doc(db, GAME_DAYS_COLLECTION, getFullRebuildDocumentId(version)));
+    return markerSnapshot.exists() &&
+      markerSnapshot.data().rebuildVersion === version &&
+      markerSnapshot.data().rebuildCompleted === true;
+  },
+
+  async beginFullCollectionRebuild(version: number): Promise<void> {
+    await setDoc(doc(db, GAME_DAYS_COLLECTION, getFullRebuildDocumentId(version)), {
+      rebuildVersion: version,
+      rebuildCompleted: false,
+      rebuildStartedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+  },
+
+  async markFullCollectionRebuildCompleted(version: number): Promise<void> {
+    await setDoc(doc(db, GAME_DAYS_COLLECTION, getFullRebuildDocumentId(version)), {
+      rebuildVersion: version,
+      rebuildCompleted: true,
+      rebuiltAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+  },
+
+  async beginFullRebuild(operatorUid: string): Promise<void> {
+    await setDoc(doc(db, GAME_DAYS_COLLECTION, getMigrationDocumentId(operatorUid)), {
+      operatorUid,
+      migrationCompleted: false,
+      fullRebuildCompleted: false,
+      rebuildStartedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+  },
+
+  async replaceOperatorDaysAndMarkCompleted(operatorUid: string, days: SavedGameDay[]): Promise<{ created: number; updated: number; deleted: number }> {
+    const existingQuery = query(collection(db, GAME_DAYS_COLLECTION), where('operatorUid', '==', operatorUid));
+    const existingSnapshot = await getDocs(existingQuery);
+    const existingDayDocs = existingSnapshot.docs.filter((snapshot) => !snapshot.id.startsWith('__migration__'));
+    const desiredIds = new Set(days.map((day) => getGameDayDocumentId(operatorUid, day.dailyDate)));
+    const existingIds = new Set(existingDayDocs.map((snapshot) => snapshot.id));
+    const staleDocs = existingDayDocs.filter((snapshot) => !desiredIds.has(snapshot.id));
+    const operations: Array<{ kind: 'set'; day: SavedGameDay } | { kind: 'delete'; reference: DocumentReference }> = [
+      ...days.map((day) => ({ kind: 'set' as const, day })),
+      ...staleDocs.map((snapshot) => ({ kind: 'delete' as const, reference: snapshot.ref })),
+    ];
+
+    for (let offset = 0; offset < operations.length; offset += 450) {
+      const batch = writeBatch(db);
+      operations.slice(offset, offset + 450).forEach((operation) => {
+        if (operation.kind === 'set') {
+          batch.set(getGameDayReference(operatorUid, operation.day.dailyDate), {
+            ...operation.day,
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          batch.delete(operation.reference);
+        }
+      });
+      await batch.commit();
+    }
+
+    await setDoc(doc(db, GAME_DAYS_COLLECTION, getMigrationDocumentId(operatorUid)), {
+      operatorUid,
+      migrationCompleted: true,
+      fullRebuildCompleted: true,
+      fullRebuildVersion: 2,
+      rebuiltAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+
+    return {
+      created: days.filter((day) => !existingIds.has(getGameDayDocumentId(operatorUid, day.dailyDate))).length,
+      updated: days.filter((day) => existingIds.has(getGameDayDocumentId(operatorUid, day.dailyDate))).length,
+      deleted: staleDocs.length,
+    };
+  },
+
+  async deleteOrphanDayDocuments(validOperatorUids: string[]): Promise<number> {
+    const validUids = new Set(validOperatorUids);
+    const snapshot = await getDocs(collection(db, GAME_DAYS_COLLECTION));
+    const orphanDocs = snapshot.docs.filter((daySnapshot) => {
+      if (daySnapshot.id.startsWith('__migration__')) return false;
+      const operatorUid = daySnapshot.data().operatorUid;
+      return typeof operatorUid !== 'string' || !validUids.has(operatorUid);
+    });
+    for (let offset = 0; offset < orphanDocs.length; offset += 450) {
+      const batch = writeBatch(db);
+      orphanDocs.slice(offset, offset + 450).forEach((daySnapshot) => batch.delete(daySnapshot.ref));
+      await batch.commit();
+    }
+    return orphanDocs.length;
+  },
+
   async getDays(operatorUid: string): Promise<SavedGameDay[]> {
     const daysQuery = query(
       collection(db, GAME_DAYS_COLLECTION),

@@ -36,10 +36,12 @@ import {
   getCurrentLocalDateKey,
   reorganizeAndHealAllStoredGames,
   getGalleryOperators,
+  rebuildSavedGameDaysForAllOperators,
   getGalleryDates,
   invalidateGalleryDatesCache,
   getGalleryGamesPage,
 } from '../utils/savedGamesStorage';
+import { auth } from '../firebase';
 import type { GalleryDate, GalleryGamesCursor, GalleryOperator } from '../utils/galleryService';
 import {
   exportElementAsJpg,
@@ -134,9 +136,44 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     }
     let cancelled = false;
     setIsLoadingGallery(true);
-    getGalleryOperators(currentUser, isAdmin)
+    const operatorsPromise = getGalleryOperators(currentUser, isAdmin);
+    const authenticatedUid = auth.currentUser?.uid;
+    const appUserUid = currentUser?.id || currentUser?.uid || '';
+    if (isAdmin && authenticatedUid && authenticatedUid === appUserUid) {
+      void rebuildSavedGameDaysForAllOperators(operatorsPromise, true, (progress) => {
+        if (cancelled) return;
+        const message = progress.phase === 'scan'
+          ? `Reconstruyendo índice histórico: ${progress.scannedDocuments} partidas leídas en ${progress.pagesRead} páginas; ${progress.operatorCount} operadoras y ${progress.indexedDateCount} fechas identificadas.`
+          : `Guardando ${progress.operatorName || 'operadora'}: ${progress.operatorGamesCount || 0} partidas en ${progress.operatorDateCount || 0} fechas (${progress.completedOperators}/${progress.totalOperators} operadoras).`;
+        setReorganizeFeedback({
+          count: progress.phase === 'scan' ? progress.scannedDocuments : progress.completedOperators,
+          total: progress.phase === 'scan' ? progress.scannedDocuments : progress.totalOperators,
+          message,
+        });
+      }).then((summary) => {
+        if (cancelled || summary.skipped) return;
+        setReorganizeFeedback({
+          count: summary.writtenDays,
+          total: summary.indexedDateCount,
+          message: `Índice reconstruido: ${summary.scannedDocuments} partidas leídas; ${summary.operatorCount} operadoras y ${summary.indexedDateCount} fechas. Días actualizados o creados: ${summary.writtenDays}; días obsoletos eliminados: ${summary.deletedDays}.`,
+        });
+      }).catch((error) => {
+        console.error('Could not rebuild saved_game_days:', error);
+        if (!cancelled) {
+          setReorganizeFeedback({
+            count: 0,
+            total: 0,
+            message: error instanceof Error
+              ? `La reconstrucción del índice no terminó: ${error.message}`
+              : 'La reconstrucción del índice no terminó. Se podrá reintentar al volver a abrir la Galería.',
+          });
+        }
+      });
+    }
+    operatorsPromise
       .then((operators) => {
-        if (!cancelled) setGalleryOperators(operators);
+        if (cancelled) return;
+        setGalleryOperators(operators);
       })
       .catch((error) => console.warn('Could not load gallery operators:', error))
       .finally(() => {
