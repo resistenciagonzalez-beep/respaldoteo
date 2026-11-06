@@ -36,12 +36,11 @@ import {
   getCurrentLocalDateKey,
   reorganizeAndHealAllStoredGames,
   getGalleryOperators,
-  rebuildSavedGameDaysForAllOperators,
+  rebuildSavedGameDays,
   getGalleryDates,
   invalidateGalleryDatesCache,
   getGalleryGamesPage,
 } from '../utils/savedGamesStorage';
-import { auth } from '../firebase';
 import type { GalleryDate, GalleryGamesCursor, GalleryOperator } from '../utils/galleryService';
 import {
   exportElementAsJpg,
@@ -137,39 +136,6 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     let cancelled = false;
     setIsLoadingGallery(true);
     const operatorsPromise = getGalleryOperators(currentUser, isAdmin);
-    const authenticatedUid = auth.currentUser?.uid;
-    const appUserUid = currentUser?.id || currentUser?.uid || '';
-    if (isAdmin && authenticatedUid && authenticatedUid === appUserUid) {
-      void rebuildSavedGameDaysForAllOperators(operatorsPromise, true, (progress) => {
-        if (cancelled) return;
-        const message = progress.phase === 'scan'
-          ? `Reconstruyendo índice histórico: ${progress.scannedDocuments} partidas leídas en ${progress.pagesRead} páginas; ${progress.operatorCount} operadoras y ${progress.indexedDateCount} fechas identificadas.`
-          : `Guardando ${progress.operatorName || 'operadora'}: ${progress.operatorGamesCount || 0} partidas en ${progress.operatorDateCount || 0} fechas (${progress.completedOperators}/${progress.totalOperators} operadoras).`;
-        setReorganizeFeedback({
-          count: progress.phase === 'scan' ? progress.scannedDocuments : progress.completedOperators,
-          total: progress.phase === 'scan' ? progress.scannedDocuments : progress.totalOperators,
-          message,
-        });
-      }).then((summary) => {
-        if (cancelled || summary.skipped) return;
-        setReorganizeFeedback({
-          count: summary.writtenDays,
-          total: summary.indexedDateCount,
-          message: `Índice reconstruido: ${summary.scannedDocuments} partidas leídas; ${summary.operatorCount} operadoras y ${summary.indexedDateCount} fechas. Días actualizados o creados: ${summary.writtenDays}; días obsoletos eliminados: ${summary.deletedDays}.`,
-        });
-      }).catch((error) => {
-        console.error('Could not rebuild saved_game_days:', error);
-        if (!cancelled) {
-          setReorganizeFeedback({
-            count: 0,
-            total: 0,
-            message: error instanceof Error
-              ? `La reconstrucción del índice no terminó: ${error.message}`
-              : 'La reconstrucción del índice no terminó. Se podrá reintentar al volver a abrir la Galería.',
-          });
-        }
-      });
-    }
     operatorsPromise
       .then((operators) => {
         if (cancelled) return;
@@ -184,11 +150,44 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
 
   // Reorganization & Auto-healing state
   const [isReorganizing, setIsReorganizing] = useState<boolean>(false);
+  const [isRebuildingSavedGameDays, setIsRebuildingSavedGameDays] = useState(false);
   const [reorganizeFeedback, setReorganizeFeedback] = useState<{
     count: number;
     total: number;
     message: string;
   } | null>(null);
+
+  const handleRebuildSavedGameDays = async () => {
+    if (!isAdmin || isRebuildingSavedGameDays) return;
+    setIsRebuildingSavedGameDays(true);
+    try {
+      const summary = await rebuildSavedGameDays();
+      const formatError = (error: unknown) => error instanceof Error
+        ? `${error.name}: ${error.message}`
+        : String(error);
+      const errors = [
+        ...summary.sourceErrors.map((entry) => `Fuente ${entry.documentId}: ${entry.error}`),
+        ...summary.writeErrors.map((entry) =>
+          `${entry.operatorUid} | ${entry.dailyDate} | ${entry.documentId}: ${formatError(entry.error)}`
+        ),
+      ];
+      console.info([
+        'Partidas leídas: ' + summary.gamesRead,
+        'Operadoras encontradas: ' + summary.operatorsFound,
+        'Fechas encontradas: ' + summary.datesFound,
+        'Documentos creados: ' + summary.documentsCreated,
+        'Documentos actualizados: ' + summary.documentsUpdated,
+        'Documentos eliminados: ' + summary.documentsDeleted,
+        'Errores:',
+        ...(errors.length ? errors : ['ninguno']),
+      ].join('\n'));
+      console.info('[SAVED_GAME_DAYS_REBUILD] resultado completo', summary);
+    } catch (error) {
+      console.error('[SAVED_GAME_DAYS_REBUILD] reconstrucción fallida', error);
+    } finally {
+      setIsRebuildingSavedGameDays(false);
+    }
+  };
 
   const handleManualReorganize = async () => {
     if (isReorganizing) return;
@@ -715,6 +714,21 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                   {isReorganizing ? 'Reorganizando...' : 'Reorganizar cargadas'}
                 </span>
               </button>
+
+              {isAdmin && (
+                <button
+                  type="button"
+                  onClick={handleRebuildSavedGameDays}
+                  disabled={isRebuildingSavedGameDays}
+                  className="px-2.5 py-1 rounded-xl bg-sky-700/80 hover:bg-sky-700 text-white text-xs font-bold transition-all flex items-center gap-1 cursor-pointer border border-sky-300/40 disabled:opacity-50"
+                  title="Reconstruir manualmente saved_game_days desde todas las partidas"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isRebuildingSavedGameDays ? 'animate-spin' : ''}`} />
+                  <span className="hidden sm:inline">
+                    {isRebuildingSavedGameDays ? 'Reconstruyendo índice...' : 'Reconstruir índice'}
+                  </span>
+                </button>
+              )}
 
               {isAdmin && (
                 <button

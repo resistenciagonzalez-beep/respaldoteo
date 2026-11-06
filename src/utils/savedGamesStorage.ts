@@ -432,12 +432,8 @@ export function getGalleryOperators(currentUser: AppUser | null | undefined, isA
   return galleryService.getGalleryOperators(currentUser, isAdmin, forceRefresh);
 }
 
-export function rebuildSavedGameDaysForAllOperators(
-  operators: import('./galleryService').GalleryOperator[] | Promise<import('./galleryService').GalleryOperator[]>,
-  isAdmin: boolean,
-  onProgress?: (progress: import('./galleryService').GalleryDaysRebuildProgress) => void
-) {
-  return galleryService.rebuildSavedGameDaysForAllOperators(operators, isAdmin, onProgress);
+export function rebuildSavedGameDays() {
+  return savedGameDaysService.rebuildSavedGameDays();
 }
 
 export function getGalleryDates(

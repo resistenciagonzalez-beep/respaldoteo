@@ -95,51 +95,8 @@ type GalleryServiceDependencies = {
   getGameLines: (game: GameSequenceItem) => number;
   gameDays: {
     getDays: (operatorUid: string) => Promise<SavedGameDay[]>;
-    isOperatorMigrated: (operatorUid: string) => Promise<boolean>;
-    createMissingDays: (days: SavedGameDay[]) => Promise<void>;
-    completeMigrationDays: (days: SavedGameDay[]) => Promise<void>;
-    markOperatorMigrated: (operatorUid: string) => Promise<void>;
-    isFullCollectionRebuildCompleted: (version: number) => Promise<boolean>;
-    beginFullCollectionRebuild: (version: number) => Promise<void>;
-    markFullCollectionRebuildCompleted: (version: number) => Promise<void>;
-    beginFullRebuild: (operatorUid: string) => Promise<void>;
-    replaceOperatorDaysAndMarkCompleted: (operatorUid: string, days: SavedGameDay[]) => Promise<{ created: number; updated: number; deleted: number }>;
-    deleteOrphanDayDocuments: (validOperatorUids: string[]) => Promise<number>;
   };
 };
-
-export interface GalleryDaysRebuildProgress {
-  phase: 'scan' | 'write';
-  scannedDocuments: number;
-  pagesRead: number;
-  operatorCount: number;
-  indexedDateCount: number;
-  unindexedDocuments: number;
-  completedOperators: number;
-  totalOperators: number;
-  operatorName?: string;
-  operatorGamesCount?: number;
-  operatorDateCount?: number;
-}
-
-export interface GalleryDaysRebuildSummary {
-  skipped: boolean;
-  scannedDocuments: number;
-  operatorCount: number;
-  indexedDateCount: number;
-  unindexedDocuments: number;
-  createdDays: number;
-  updatedDays: number;
-  writtenDays: number;
-  deletedDays: number;
-  operators: Array<{
-    operatorUid: string;
-    operatorFolder: string;
-    operatorName: string;
-    gamesCount: number;
-    dates: Array<{ dailyDate: string; gamesCount: number }>;
-  }>;
-}
 
 function normalizeDateKey(game: Partial<GameSequenceItem>): string | null {
   const candidates = [game.dailyDate, game.subfolderDay, game.folderPath?.split('/').pop()];
@@ -199,24 +156,6 @@ export function createGalleryService(dependencies: GalleryServiceDependencies) {
     cancelled: boolean;
     promise: Promise<void>;
   }>();
-  let activeDaysRebuild: {
-    promise: Promise<GalleryDaysRebuildSummary>;
-    callbacks: Set<(progress: GalleryDaysRebuildProgress) => void>;
-  } | null = null;
-
-  function publishDaysRebuildProgress(
-    callbacks: Set<(progress: GalleryDaysRebuildProgress) => void>,
-    progress: GalleryDaysRebuildProgress
-  ): void {
-    callbacks.forEach((callback) => {
-      try {
-        callback(progress);
-      } catch (error) {
-        console.warn('Gallery day rebuild progress callback failed:', error);
-      }
-    });
-  }
-
   function getGalleryDatesCacheKey(operator: GalleryOperator): string {
     return operator.operatorUid && operator.operatorUid !== 'anon'
       ? `uid:${operator.operatorUid}`
@@ -821,213 +760,6 @@ export function createGalleryService(dependencies: GalleryServiceDependencies) {
     return request;
   }
 
-  function rebuildSavedGameDaysForAllOperators(
-    _operators: GalleryOperator[] | Promise<GalleryOperator[]>,
-    isAdmin: boolean,
-    onProgress?: (progress: GalleryDaysRebuildProgress) => void
-  ): Promise<GalleryDaysRebuildSummary> {
-    if (!isAdmin) return Promise.reject(new Error('Only an administrator can rebuild the gallery day index.'));
-    if (activeDaysRebuild) {
-      if (onProgress) activeDaysRebuild.callbacks.add(onProgress);
-      return activeDaysRebuild.promise;
-    }
-
-    const callbacks = new Set<(progress: GalleryDaysRebuildProgress) => void>();
-    if (onProgress) callbacks.add(onProgress);
-    const promise = Promise.resolve().then(async (): Promise<GalleryDaysRebuildSummary> => {
-      const rebuildVersion = 2;
-      if (await dependencies.gameDays.isFullCollectionRebuildCompleted(rebuildVersion)) {
-        return {
-          skipped: true,
-          scannedDocuments: 0,
-          operatorCount: 0,
-          indexedDateCount: 0,
-          unindexedDocuments: 0,
-          createdDays: 0,
-          updatedDays: 0,
-          writtenDays: 0,
-          deletedDays: 0,
-          operators: [],
-        };
-      }
-
-      await dependencies.gameDays.beginFullCollectionRebuild(rebuildVersion);
-
-      const groupsByOperatorFolderDate = new Map<string, SavedGameDay>();
-      const operatorsFromSavedGames = new Map<string, GalleryOperator>();
-      let scannedDocuments = 0;
-      let pagesRead = 0;
-      let unindexedDocuments = 0;
-      let cursor: QueryDocumentSnapshot | null = null;
-      while (true) {
-        const constraints: QueryConstraint[] = [orderBy(documentId()), limit(OPERATOR_SCAN_PAGE_SIZE)];
-        if (cursor) constraints.push(startAfter(cursor));
-        const page = await getDocs(query(collection(db, 'saved_games'), ...constraints));
-        if (page.empty) break;
-        pagesRead += 1;
-        scannedDocuments += page.size;
-
-        page.docs.forEach((snapshot) => {
-          const data = snapshot.data() as Record<string, unknown>;
-          const rawOperatorUid = typeof data.operatorUid === 'string' ? data.operatorUid.trim() : 'anon';
-          const rawOperatorFolder = typeof data.operatorFolder === 'string' ? data.operatorFolder.trim() : '';
-          const rawOperatorName = typeof data.operatorName === 'string' ? data.operatorName.trim() : '';
-          const operatorFolder = rawOperatorFolder || dependencies.sanitizeOperatorFolderName(rawOperatorName);
-          const operatorName = rawOperatorName || operatorFolder || 'Operadora';
-          const operatorUid = rawOperatorUid || 'anon';
-          const dailyDate = dependencies.hasExplicitGameDateKey(data as Partial<GameSequenceItem>);
-          if (!operatorFolder || !dailyDate) {
-            unindexedDocuments += 1;
-            return;
-          }
-          const operator = operatorsFromSavedGames.get(operatorUid) || {
-            key: operatorUid === 'anon' ? `folder:${operatorFolder}` : `uid:${operatorUid}`,
-            operatorUid,
-            operatorName,
-            operatorFolder,
-          };
-          operatorsFromSavedGames.set(operatorUid, operator);
-          const tupleKey = `${operatorUid}\u0000${operatorFolder}\u0000${dailyDate}`;
-          const day = groupsByOperatorFolderDate.get(tupleKey) || {
-            operatorUid,
-            dailyDate,
-            operatorFolder,
-            operatorName,
-            folderPath: `${operatorFolder}/${dailyDate}`,
-            gamesCount: 0,
-            lastRound: 0,
-          };
-          day.gamesCount += 1;
-          day.lastRound = Math.max(day.lastRound, Number(data.round) || 0);
-          groupsByOperatorFolderDate.set(tupleKey, day);
-        });
-
-        const indexedDateCount = groupsByOperatorFolderDate.size;
-        publishDaysRebuildProgress(callbacks, {
-          phase: 'scan',
-          scannedDocuments,
-          pagesRead,
-          operatorCount: operatorsFromSavedGames.size,
-          indexedDateCount,
-          unindexedDocuments,
-          completedOperators: 0,
-          totalOperators: 0,
-        });
-        cursor = page.docs[page.docs.length - 1];
-        if (page.size < OPERATOR_SCAN_PAGE_SIZE) break;
-      }
-
-      if (unindexedDocuments > 0) {
-        throw new Error(`Full saved_game_days rebuild stopped: ${unindexedDocuments} saved_games documents lack a usable operator or date.`);
-      }
-
-      const daysByOperator = new Map<string, Map<string, SavedGameDay>>();
-      groupsByOperatorFolderDate.forEach((tupleDay) => {
-        let operatorDays = daysByOperator.get(tupleDay.operatorUid);
-        if (!operatorDays) {
-          operatorDays = new Map<string, SavedGameDay>();
-          daysByOperator.set(tupleDay.operatorUid, operatorDays);
-        }
-        const existingDay = operatorDays.get(tupleDay.dailyDate);
-        if (existingDay) {
-          existingDay.gamesCount += tupleDay.gamesCount;
-          existingDay.lastRound = Math.max(existingDay.lastRound, tupleDay.lastRound);
-          return;
-        }
-        operatorDays.set(tupleDay.dailyDate, { ...tupleDay });
-      });
-
-      const allOperators = Array.from(operatorsFromSavedGames.values())
-        .sort((a, b) => a.operatorName.localeCompare(b.operatorName, 'es'));
-      let writtenDays = 0;
-      let createdDays = 0;
-      let updatedDays = 0;
-      let deletedDays = 0;
-      let completedOperators = 0;
-      const operatorResults: GalleryDaysRebuildSummary['operators'] = [];
-      for (const operator of allOperators) {
-        await dependencies.gameDays.beginFullRebuild(operator.operatorUid);
-        const days = Array.from(daysByOperator.get(operator.operatorUid)?.values() || [])
-          .sort((a, b) => b.dailyDate.localeCompare(a.dailyDate));
-        const result = await dependencies.gameDays.replaceOperatorDaysAndMarkCompleted(operator.operatorUid, days);
-        createdDays += result.created;
-        updatedDays += result.updated;
-        writtenDays += result.created + result.updated;
-        deletedDays += result.deleted;
-        operatorResults.push({
-          operatorUid: operator.operatorUid,
-          operatorFolder: operator.operatorFolder,
-          operatorName: operator.operatorName,
-          gamesCount: days.reduce((total, day) => total + day.gamesCount, 0),
-          dates: days.map((day) => ({ dailyDate: day.dailyDate, gamesCount: day.gamesCount })),
-        });
-        completedOperators += 1;
-        publishDaysRebuildProgress(callbacks, {
-          phase: 'write',
-          scannedDocuments,
-          pagesRead,
-          operatorCount: allOperators.length,
-          indexedDateCount: Array.from(daysByOperator.values()).reduce((total, groupedDays) => total + groupedDays.size, 0),
-          unindexedDocuments,
-          completedOperators,
-          totalOperators: allOperators.length,
-          operatorName: operator.operatorName,
-          operatorGamesCount: days.reduce((total, day) => total + day.gamesCount, 0),
-          operatorDateCount: days.length,
-        });
-        const cacheKey = getGalleryDatesCacheKey(operator);
-        const oldScan = activeDateScans.get(cacheKey);
-        if (oldScan) {
-          oldScan.cancelled = true;
-          activeDateScans.delete(cacheKey);
-        }
-        galleryDatesCache.delete(cacheKey);
-      }
-
-      deletedDays += await dependencies.gameDays.deleteOrphanDayDocuments(allOperators.map((operator) => operator.operatorUid));
-      await dependencies.gameDays.markFullCollectionRebuildCompleted(rebuildVersion);
-      const summary: GalleryDaysRebuildSummary = {
-        skipped: false,
-        scannedDocuments,
-        operatorCount: allOperators.length,
-        indexedDateCount: Array.from(daysByOperator.values()).reduce((total, groupedDays) => total + groupedDays.size, 0),
-        unindexedDocuments,
-        createdDays,
-        updatedDays,
-        writtenDays,
-        deletedDays,
-        operators: operatorResults,
-      };
-      console.info('[SAVED_GAME_DAYS_REBUILD] completed', {
-        operatorsFound: allOperators.length,
-        operators: operatorResults,
-        totalDocumentsCreated: createdDays,
-        totalDocumentsUpdated: updatedDays,
-        totalDocumentsDeleted: deletedDays,
-      });
-      return summary;
-    });
-
-    activeDaysRebuild = { promise, callbacks };
-    promise.then(() => {
-      if (activeDaysRebuild?.promise === promise) activeDaysRebuild = null;
-    }, () => {
-      if (activeDaysRebuild?.promise === promise) activeDaysRebuild = null;
-    });
-    return promise;
-  }
-
-  function makeOperatorQueries(operator: GalleryOperator): Array<{ key: string; constraints: QueryConstraint[] }> {
-    const queries: Array<{ key: string; constraints: QueryConstraint[] }> = [];
-    if (operator.operatorUid && operator.operatorUid !== 'anon') {
-      queries.push({ key: 'uid', constraints: [where('operatorUid', '==', operator.operatorUid)] });
-    }
-    if (operator.operatorFolder) {
-      queries.push({ key: 'folder', constraints: [where('operatorFolder', '==', operator.operatorFolder)] });
-    }
-    return queries;
-  }
-
   async function getGalleryDates(
     operator: GalleryOperator,
     onDatesUpdate?: (dates: GalleryDate[]) => void
@@ -1052,13 +784,6 @@ export function createGalleryService(dependencies: GalleryServiceDependencies) {
 
     if (cachedDates) {
       if (onDatesUpdate) notifyDateCallbacks(onDatesUpdateCallbacks, cachedDates.dates);
-    }
-    const activeRebuildPromise = activeDaysRebuild?.promise;
-    if (activeRebuildPromise) {
-      const rebuildSummary = await activeRebuildPromise.catch(() => undefined);
-      cachedDates = rebuildSummary && !rebuildSummary.skipped
-        ? galleryDatesCache.get(cacheKey)
-        : galleryDatesCache.get(cacheKey) || cachedDates;
     }
     if (cachedDates?.dates.length) prefetchFirstDateGames(operator, cachedDates.dates);
     if (cachedDates) touchOperator(getOperatorIdentity(operator));
@@ -1132,24 +857,6 @@ export function createGalleryService(dependencies: GalleryServiceDependencies) {
       return dates;
     };
 
-    const addGameToDateSummary = (groups: Map<string, GalleryDate>, seenIds: Set<string>, id: string, game: GameSequenceItem) => {
-      if (seenIds.has(id)) return;
-      seenIds.add(id);
-      const dateKey = dependencies.getGameNormalizedDateKey(game) || normalizeDateKey(game);
-      if (!dateKey) return;
-      let summary = groups.get(dateKey);
-      if (!summary) {
-        const label = dateLabel(dateKey);
-        summary = { dateKey, ...label, gameCount: 0, totalLines: 0, totalCollected: 0, totalPrizes: 0, netProfit: 0 };
-        groups.set(dateKey, summary);
-      }
-      summary.gameCount += 1;
-      summary.totalLines += dependencies.getGameLines(game);
-      summary.totalCollected = Math.round((summary.totalCollected + (Number(game.totalCollected) || 0)) * 100) / 100;
-      summary.totalPrizes = Math.round((summary.totalPrizes + (Number(game.totalPrizesPaid) || 0)) * 100) / 100;
-      summary.netProfit = Math.round((summary.totalCollected - summary.totalPrizes) * 100) / 100;
-    };
-
     const activeScan = {
       callbacks: onDatesUpdateCallbacks,
       cancelled: false,
@@ -1158,104 +865,14 @@ export function createGalleryService(dependencies: GalleryServiceDependencies) {
 
     const scanPromise = Promise.resolve().then(async () => {
       try {
-        let days: SavedGameDay[] = [];
-        let isMigrated = false;
-        try {
-          [days, isMigrated] = await Promise.all([
-            dependencies.gameDays.getDays(operatorUid),
-            dependencies.gameDays.isOperatorMigrated(operatorUid),
-          ]);
-        } catch {
-          days = [];
-          isMigrated = false;
-        }
-
-        let isIndexCurrent = false;
-        if (isMigrated && days.length > 0 && operatorUid !== 'anon') {
-          try {
-            const latestSavedGamesPage = await getDocs(query(
-              collection(db, 'saved_games'),
-              where('operatorUid', '==', operatorUid),
-              orderBy('dailyDate', 'desc'),
-              limit(1)
-            ));
-            const latestSavedGameDate = latestSavedGamesPage.docs[0]?.data().dailyDate;
-            const latestIndexedDate = days.reduce(
-              (latest, day) => day.dailyDate > latest ? day.dailyDate : latest,
-              ''
-            );
-            isIndexCurrent = Boolean(latestSavedGameDate && latestSavedGameDate === latestIndexedDate);
-          } catch {
-            isIndexCurrent = false;
-          }
-        }
-
-        if (isMigrated && days.length > 0 && isIndexCurrent) {
-          const indexedDates = dateRowsToSummaries(days, knownDates);
-          const dates = mergeAndPublishDates(indexedDates, activeScan, true, true);
-          return cloneGalleryDates(dates);
-        }
-
-        const seenGameIds = new Set<string>();
-        const groups = new Map<string, GalleryDate>();
-        const lastRoundByDate = new Map<string, number>();
-        const writtenDayKeys = new Set<string>();
-        days.forEach((day) => writtenDayKeys.add(day.dailyDate));
-        const querySpecs = makeOperatorQueries(operator);
-
-        for (const spec of querySpecs) {
-          let cursor: QueryDocumentSnapshot | null = null;
-          while (!activeScan.cancelled) {
-            const constraints = [...spec.constraints, limit(OPERATOR_SCAN_PAGE_SIZE)];
-            if (cursor) constraints.push(startAfter(cursor));
-            const page = await getDocs(query(collection(db, 'saved_games'), ...constraints));
-            if (activeScan.cancelled || page.empty) break;
-            page.docs.forEach((snapshot) => {
-              const game = normalizeRemoteGame(snapshot.id, snapshot.data());
-              if (!game) return;
-              if (operator.operatorUid && operator.operatorUid !== 'anon' && game.operatorUid && game.operatorUid !== 'anon' && game.operatorUid !== operator.operatorUid) return;
-              addGameToDateSummary(groups, seenGameIds, snapshot.id, game);
-              const gameDate = dependencies.getGameNormalizedDateKey(game) || normalizeDateKey(game);
-              if (gameDate) lastRoundByDate.set(gameDate, Math.max(lastRoundByDate.get(gameDate) || 0, Number(game.round) || 0));
-            });
-
-            const migrationDays = Array.from(groups, ([dailyDate, summary]): SavedGameDay => ({
-              operatorUid,
-              dailyDate,
-              operatorFolder: operator.operatorFolder,
-              operatorName: operator.operatorName,
-              folderPath: `${operator.operatorFolder}/${dailyDate}`,
-              gamesCount: summary.gameCount,
-              lastRound: lastRoundByDate.get(dailyDate) || 0,
-            }));
-            const missingDays = migrationDays.filter((day) => !writtenDayKeys.has(day.dailyDate));
-            mergeAndPublishDates(Array.from(groups.values()), activeScan, false);
-            await dependencies.gameDays.createMissingDays(missingDays);
-            missingDays.forEach((day) => writtenDayKeys.add(day.dailyDate));
-            cursor = page.docs[page.docs.length - 1];
-            if (page.size < OPERATOR_SCAN_PAGE_SIZE) break;
-          }
-          if (activeScan.cancelled) break;
-        }
-
+        const days = await dependencies.gameDays.getDays(operatorUid);
         if (activeScan.cancelled) return cloneGalleryDates(galleryDatesCache.get(cacheKey)?.dates || []);
-
-        const completedMigrationDays = Array.from(groups, ([dailyDate, summary]): SavedGameDay => ({
-          operatorUid,
-          dailyDate,
-          operatorFolder: operator.operatorFolder,
-          operatorName: operator.operatorName,
-          folderPath: `${operator.operatorFolder}/${dailyDate}`,
-          gamesCount: summary.gameCount,
-          lastRound: lastRoundByDate.get(dailyDate) || 0,
-        }));
-        await dependencies.gameDays.completeMigrationDays(completedMigrationDays);
-        await dependencies.gameDays.markOperatorMigrated(operatorUid);
-        days = await dependencies.gameDays.getDays(operatorUid);
-
-        const indexedDates = dateRowsToSummaries(days, Array.from(groups.values()));
+        const indexedDates = dateRowsToSummaries(days, knownDates);
         const dates = mergeAndPublishDates(indexedDates, activeScan, true, true);
         return cloneGalleryDates(dates);
+      } catch (error) {
+        console.warn('Could not load saved_game_days for gallery dates:', error);
+        return cloneGalleryDates(cachedDates?.dates || knownDates);
       } finally {
         if (activeDateScans.get(cacheKey) === activeScan) activeDateScans.delete(cacheKey);
       }
@@ -1750,7 +1367,6 @@ export function createGalleryService(dependencies: GalleryServiceDependencies) {
   return {
     getSavedGamesGallery,
     getGalleryOperators,
-    rebuildSavedGameDaysForAllOperators,
     getGalleryDates,
     getGalleryGamesPage,
     invalidateGalleryDatesCache,
