@@ -680,7 +680,7 @@ const gameRepository = createGameRepository({
   },
   queue: {
     initConnectionMonitor,
-    processSaveQueue,
+    processSaveQueueAndWaitForGame: queueProcessor.processSaveQueueAndWaitForGame,
     updateSyncStatus,
   },
   diagnostics: {

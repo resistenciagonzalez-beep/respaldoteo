@@ -193,9 +193,7 @@ export function createOfflineFirstEngine<FirestorePayload>(
           folderPath: game.folderPath,
           timestamp: game.timestamp,
         };
-        void dependencies.gameDays.upsertSavedGame(mergedVerified).catch((error) => {
-          console.warn('Could not update saved game day index:', error);
-        });
+        await dependencies.gameDays.upsertSavedGame(mergedVerified);
         return { verified: true, remoteGame: mergedVerified };
       }
 

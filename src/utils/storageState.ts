@@ -28,6 +28,7 @@ export const storageState = {
   hasBootstrappedIndexedDB: false,
 
   syncQueueMap: new Map<string, QueuedSaveTask>(),
+  queueSyncWaiters: new Map<string, Set<(verified: boolean) => void>>(),
   isProcessingQueue: false,
   queueLockAcquiredAt: 0,
   reprocessRequested: false,

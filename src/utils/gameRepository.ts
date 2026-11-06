@@ -61,7 +61,7 @@ type GameRepositoryDependencies = {
   };
   queue: {
     initConnectionMonitor: () => void;
-    processSaveQueue: () => Promise<void>;
+    processSaveQueueAndWaitForGame: (gameId: string) => Promise<boolean>;
     updateSyncStatus: (partial: SyncStatusPatch) => void;
   };
   diagnostics: {
@@ -257,19 +257,8 @@ export function createGameRepository(dependencies: GameRepositoryDependencies) {
       }
     }
 
-    // 5. STEP 3 OF OFFLINE-FIRST: Trigger the Sequential Save Queue
-    // Wait up to 1.2s for fast cloud verification; if network is slow or offline,
-    // return immediately so "Nueva Partida" never lags while processSaveQueue continues in background.
-    const queuePromise = queue.processSaveQueue();
-    let raceTimer: ReturnType<typeof setTimeout> | null = null;
-    const fastTimeout = new Promise<void>((resolve) => {
-      raceTimer = setTimeout(resolve, 1200);
-    });
-    await Promise.race([queuePromise, fastTimeout]).finally(() => {
-      if (raceTimer !== null) clearTimeout(raceTimer);
-    });
-
-    const isAlreadySynced = !state.syncQueueMap.has(docId);
+    // 5. Wait for this game's own queue result. A verified result now includes its saved_game_days upsert.
+    const isAlreadySynced = await queue.processSaveQueueAndWaitForGame(docId);
     const latestGame = state.firestoreGamesMemoryStore.get(docId) || normalizedItem;
 
     return {

@@ -2,10 +2,11 @@ import type { GameSequenceItem } from '../types';
 import { getGameLines } from './gameNormalization';
 import {
   collection,
+  count,
   documentId,
   deleteDoc,
   doc,
-  getCountFromServer,
+  getAggregateFromServer,
   getDoc,
   getDocs,
   limit,
@@ -14,6 +15,7 @@ import {
   serverTimestamp,
   setDoc,
   startAfter,
+  sum,
   where,
 } from 'firebase/firestore';
 import type { QueryConstraint, QueryDocumentSnapshot } from 'firebase/firestore';
@@ -58,14 +60,23 @@ function getGameDayReference(operatorUid: string, dailyDate: string) {
   return doc(db, GAME_DAYS_COLLECTION, getGameDayDocumentId(operatorUid, dailyDate));
 }
 
-async function getCurrentGameDayCount(operatorUid: string, dailyDate: string): Promise<number> {
+async function getCurrentGameDaySummary(
+  operatorUid: string,
+  dailyDate: string
+): Promise<{ gamesCount: number; totalLines: number }> {
   const gameQuery = query(
     collection(db, 'saved_games'),
     where('operatorUid', '==', operatorUid),
     where('dailyDate', '==', dailyDate)
   );
-  const countSnapshot = await getCountFromServer(gameQuery);
-  return countSnapshot.data().count;
+  const summary = await getAggregateFromServer(gameQuery, {
+    gamesCount: count(),
+    totalLines: sum('totalLinesPlayed'),
+  });
+  return {
+    gamesCount: summary.data().gamesCount,
+    totalLines: summary.data().totalLines,
+  };
 }
 
 async function getLastRound(operatorUid: string, dailyDate: string): Promise<number> {
@@ -81,19 +92,26 @@ async function getLastRound(operatorUid: string, dailyDate: string): Promise<num
 }
 
 async function refreshGameDay(operatorUid: string, dailyDate: string, game?: GameSequenceItem): Promise<void> {
-  const [gamesCount, lastRound] = await Promise.all([
-    getCurrentGameDayCount(operatorUid, dailyDate),
-    getLastRound(operatorUid, dailyDate),
-  ]);
   const dayReference = getGameDayReference(operatorUid, dailyDate);
+  const [summary, lastRound, previousSnapshot] = await Promise.all([
+    getCurrentGameDaySummary(operatorUid, dailyDate),
+    getLastRound(operatorUid, dailyDate),
+    getDoc(dayReference).catch(() => undefined),
+  ]);
+  const { gamesCount, totalLines: aggregatedTotalLines } = summary;
 
   if (gamesCount <= 0) {
     await deleteDoc(dayReference).catch(() => {});
     return;
   }
 
-  const previousSnapshot = await getDoc(dayReference).catch(() => undefined);
   const previous = previousSnapshot?.exists() ? previousSnapshot.data() : {};
+  const previousGameCount = Number(previous.gamesCount) || 0;
+  const previousTotalLines = Number(previous.totalLines) || 0;
+  const totalLines = Math.max(
+    aggregatedTotalLines,
+    previousTotalLines + (game && gamesCount > previousGameCount ? getGameLines(game) : 0)
+  );
   const operatorFolder = game?.operatorFolder || previous.operatorFolder || '';
   const operatorName = game?.operatorName || previous.operatorName || operatorFolder;
   await setDoc(dayReference, {
@@ -103,6 +121,7 @@ async function refreshGameDay(operatorUid: string, dailyDate: string, game?: Gam
     operatorName,
     folderPath: game?.folderPath || previous.folderPath || `${operatorFolder}/${dailyDate}`,
     gamesCount,
+    totalLines,
     lastRound,
     updatedAt: serverTimestamp(),
   }, { merge: true });

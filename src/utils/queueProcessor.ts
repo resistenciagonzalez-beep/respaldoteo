@@ -53,6 +53,36 @@ type QueueProcessorDependencies = {
 export function createQueueProcessor(dependencies: QueueProcessorDependencies) {
   const { state } = dependencies;
 
+  function resolveGameSyncWaiters(gameId: string, verified: boolean): void {
+    const waiters = state.queueSyncWaiters.get(gameId);
+    if (!waiters) return;
+    state.queueSyncWaiters.delete(gameId);
+    waiters.forEach((resolve) => resolve(verified));
+  }
+
+  async function processSaveQueueAndWaitForGame(gameId: string): Promise<boolean> {
+    const task = state.syncQueueMap.get(gameId);
+    if (!task) return true;
+    if (task.status !== 'syncing' && task.nextRetryAt > Date.now()) return false;
+
+    let resolveCompletion: (verified: boolean) => void = () => {};
+    const completion = new Promise<boolean>((resolve) => {
+      resolveCompletion = resolve;
+    });
+    const waiters = state.queueSyncWaiters.get(gameId) || new Set<(verified: boolean) => void>();
+    waiters.add(resolveCompletion);
+    state.queueSyncWaiters.set(gameId, waiters);
+
+    processSaveQueue().then(() => {
+      const remainingTask = state.syncQueueMap.get(gameId);
+      if (!state.isProcessingQueue && remainingTask && remainingTask.status !== 'syncing') {
+        resolveGameSyncWaiters(gameId, false);
+      }
+    }, () => resolveGameSyncWaiters(gameId, false));
+
+    return completion;
+  }
+
   async function retryAllFailedAndPendingGamesNow(): Promise<void> {
     if (state.retryTimerHandle) {
       clearTimeout(state.retryTimerHandle);
@@ -176,6 +206,7 @@ export function createQueueProcessor(dependencies: QueueProcessorDependencies) {
 
         if (verified && remoteGame) {
           // Successfully verified in Firestore! Remove from queue and update IndexedDB & memory
+          resolveGameSyncWaiters(nextTask.gameId, true);
           state.syncQueueMap.delete(nextTask.gameId);
           await dependencies.storage.removeQueueTaskFromIndexedDB(nextTask.gameId);
           await dependencies.storage.saveGameToIndexedDB(remoteGame);
@@ -215,6 +246,7 @@ export function createQueueProcessor(dependencies: QueueProcessorDependencies) {
 
           state.syncQueueMap.set(nextTask.gameId, updatedTask);
           await dependencies.storage.putQueueTaskInIndexedDB(updatedTask);
+          resolveGameSyncWaiters(nextTask.gameId, false);
 
           await dependencies.diagnostics.recordDiagnosticSaveLog({
             id: `log_${Date.now()}_${nextTask.gameId}_retry_${updatedTask.retryCount}`,
@@ -257,6 +289,7 @@ export function createQueueProcessor(dependencies: QueueProcessorDependencies) {
             ...task,
             status: task.lastError ? 'error' : 'pending',
           });
+          resolveGameSyncWaiters(id, false);
         }
       }
 
@@ -291,5 +324,5 @@ export function createQueueProcessor(dependencies: QueueProcessorDependencies) {
     }
   }
 
-  return { processSaveQueue, retryAllFailedAndPendingGamesNow };
+  return { processSaveQueue, processSaveQueueAndWaitForGame, retryAllFailedAndPendingGamesNow };
 }
