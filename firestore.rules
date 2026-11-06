@@ -57,6 +57,12 @@ service cloud.firestore {
       allow delete: if isValidId(gameId);
     }
 
+    // Gallery day documents and __migration__{operatorUid} markers share this collection.
+    // Require authentication for every operation; do not expose this index publicly.
+    match /saved_game_days/{dayOrMigrationId} {
+      allow read, write: if isSignedIn() && isValidId(dayOrMigrationId);
+    }
+
     // 3. Operator Shifts collection: Shift turnos
     match /operator_shifts/{shiftId} {
       allow read: if true;
