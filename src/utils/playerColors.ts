@@ -8,9 +8,10 @@ export interface PlayerColorSpec {
 
 /**
  * Paleta de colores de fondo oscuros, intensos y saturados para los jugadores.
- * Contiene los 30 colores exactos extraídos de la cuadrícula provista, sin tonos pasteles.
+ * Contiene los 30 colores de la cuadrícula provista más negro, sin tonos pasteles.
  */
 export const VIBRANT_PLAYER_COLORS: PlayerColorSpec[] = [
+  { name: 'Negro', hex: '#000000', border: '#333333', text: '#ffffff', darkText: false },
   // --- Los 30 colores exactos de la imagen (6 filas x 5 columnas) ---
   // Fila 1:
   { name: 'Lima Amarillo Brillante', hex: '#f5f630', border: '#b0b123', text: '#000000', darkText: true },

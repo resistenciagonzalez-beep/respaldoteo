@@ -1197,8 +1197,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
 
   const [selectedPlayerId, setSelectedPlayerId] = useState<string>('');
   const [newPlayerName, setNewPlayerName] = useState<string>('');
-  const [newPlayerColor, setNewPlayerColor] = useState<string>(PRESET_COLORS[0].hex);
-  const [newPlayerTextColor, setNewPlayerTextColor] = useState<string>(FLUORESCENT_TEXT_COLORS[0].hex);
+  const [pendingBackgroundColor, setPendingBackgroundColor] = useState<string>(PRESET_COLORS[0].hex);
+  const [pendingTextColor, setPendingTextColor] = useState<string>(FLUORESCENT_TEXT_COLORS[0].hex);
   const [showNotification, setShowNotification] = useState<string | null>(null);
 
   // Confirmation modal for clearing the carton
@@ -2291,8 +2291,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     const newPlayer: BingoSheetPlayer = {
       id: `p_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       name: cleanName,
-      color: newPlayerColor,
-      textColor: newPlayerTextColor || '#000000',
+      color: pendingBackgroundColor,
+      textColor: pendingTextColor || '#000000',
       paid: false,
     };
 
@@ -2303,6 +2303,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
 
     setSelectedPlayerId(newPlayer.id);
     setNewPlayerName('');
+    setPendingBackgroundColor(PRESET_COLORS[0].hex);
+    setPendingTextColor(FLUORESCENT_TEXT_COLORS[0].hex);
     notify(`Jugador "${newPlayer.name}" agregado con éxito`);
   };
 
@@ -4270,22 +4272,6 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                         : 'px-3 py-2 text-xs rounded-xl'
                     } bg-white border border-orange-200 text-orange-950 focus:outline-none focus:border-orange-500 font-bold placeholder:text-orange-900/40`}
                   />
-                  <button
-                    type="submit"
-                    className={`${
-                      is15SheetExpanded
-                        ? 'px-2.5 py-1 text-[10.5px] rounded-lg gap-1'
-                        : 'px-3.5 py-2 text-xs rounded-xl gap-1'
-                    } bg-orange-500 hover:bg-orange-600 text-white font-bold transition-all shadow-xs active:scale-95 cursor-pointer flex items-center justify-center flex-shrink-0 whitespace-nowrap`}
-                    title="Agregar nuevo jugador"
-                  >
-                    <UserPlus
-                      className={`${
-                        is15SheetExpanded ? 'w-3 h-3' : 'w-3.5 h-3.5'
-                      } flex-shrink-0`}
-                    />
-                    <span>Agregar</span>
-                  </button>
                 </div>
 
                 {/* Paleta 1: Color de Fondo de Casilla (Más de 50 Colores Vivos) */}
@@ -4301,7 +4287,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                     </span>
                     <span
                       className="w-4 h-4 rounded-full border border-black/30 shadow-2xs"
-                      style={{ backgroundColor: newPlayerColor }}
+                      style={{ backgroundColor: pendingBackgroundColor }}
                       title="Color de fondo seleccionado"
                     />
                   </div>
@@ -4317,7 +4303,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                         key={`preset_bg_${c.hex}_${c.name}_${idx}`}
                         type="button"
                         onClick={() => {
-                          setNewPlayerColor(c.hex);
+                          setPendingBackgroundColor(c.hex);
                           if (activePlayer) {
                             handleUpdatePlayerColor(activePlayer.id, c.hex);
                           }
@@ -4325,14 +4311,14 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                         className={`${
                           is15SheetExpanded ? 'w-4 h-4' : 'w-5 h-5'
                         } rounded-full border transition-all cursor-pointer flex items-center justify-center ${
-                          newPlayerColor === c.hex
+                          pendingBackgroundColor === c.hex
                             ? 'scale-125 border-white ring-2 ring-orange-600 shadow-md z-10'
                             : 'border-black/20 hover:scale-110 opacity-80 hover:opacity-100'
                         }`}
                         style={{ backgroundColor: c.hex }}
                         title={`${c.name} (${c.hex})${activePlayer ? ` • Clic para aplicar a ${activePlayer.name}` : ''}`}
                       >
-                        {newPlayerColor === c.hex && (
+                        {pendingBackgroundColor === c.hex && (
                           <span
                             className="w-1.5 h-1.5 rounded-full"
                             style={{ backgroundColor: c.text || '#ffffff' }}
@@ -4356,7 +4342,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                     </span>
                     <span
                       className="w-4 h-4 rounded-full border border-black/30 shadow-2xs"
-                      style={{ backgroundColor: newPlayerTextColor }}
+                      style={{ backgroundColor: pendingTextColor }}
                       title="Color de letra seleccionado"
                     />
                   </div>
@@ -4372,7 +4358,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                         key={`fluor_txt_${c.hex}_${c.name}_${idx}`}
                         type="button"
                         onClick={() => {
-                          setNewPlayerTextColor(c.hex);
+                          setPendingTextColor(c.hex);
                           if (activePlayer) {
                             handleUpdatePlayerTextColor(activePlayer.id, c.hex);
                           }
@@ -4380,14 +4366,14 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                         className={`${
                           is15SheetExpanded ? 'w-4 h-4' : 'w-5 h-5'
                         } rounded-full border transition-all cursor-pointer flex items-center justify-center ${
-                          newPlayerTextColor === c.hex
+                          pendingTextColor === c.hex
                             ? 'scale-125 border-white ring-2 ring-purple-600 shadow-md z-10'
                             : 'border-black/30 hover:scale-110 opacity-85 hover:opacity-100'
                         }`}
                         style={{ backgroundColor: c.hex }}
                         title={`${c.name} (${c.hex})${activePlayer ? ` • Clic para aplicar a ${activePlayer.name}` : ''}`}
                       >
-                        {newPlayerTextColor === c.hex && (
+                        {pendingTextColor === c.hex && (
                           <span
                             className="w-1.5 h-1.5 rounded-full"
                             style={{ backgroundColor: c.hex === '#000000' ? '#ffffff' : '#000000' }}
@@ -4401,24 +4387,41 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                 {/* Vista Previa en Vivo del Texto con Fondo */}
                 <div
                   className="p-1.5 rounded-xl border-2 border-black/40 flex items-center justify-between text-center shadow-xs"
-                  style={{ backgroundColor: newPlayerColor }}
+                  style={{ backgroundColor: pendingBackgroundColor }}
                 >
-                  <span className="text-[9px] font-black uppercase opacity-70 tracking-tight" style={{ color: newPlayerTextColor }}>
+                  <span className="text-[9px] font-black uppercase opacity-70 tracking-tight" style={{ color: pendingTextColor }}>
                     Vista:
                   </span>
                   <span
                     className="font-black uppercase text-xs tracking-tight truncate max-w-[170px]"
                     style={{
-                      color: newPlayerTextColor,
-                      textShadow: newPlayerTextColor !== '#000000' ? '0 1px 2px rgba(0,0,0,0.85), 0 0 1px rgba(0,0,0,0.95)' : undefined,
+                      color: pendingTextColor,
+                      textShadow: pendingTextColor !== '#000000' ? '0 1px 2px rgba(0,0,0,0.85), 0 0 1px rgba(0,0,0,0.95)' : undefined,
                     }}
                   >
                     {newPlayerName.trim() ? newPlayerName.toUpperCase() : activePlayer ? activePlayer.name.toUpperCase() : 'NOMBRE JUGADOR'}
                   </span>
-                  <span className="text-[9px] font-mono font-bold" style={{ color: newPlayerTextColor }}>
+                  <span className="text-[9px] font-mono font-bold" style={{ color: pendingTextColor }}>
                     #1
                   </span>
                 </div>
+
+                <button
+                  type="submit"
+                  className={`${
+                    is15SheetExpanded
+                      ? 'px-2.5 py-1 text-[10.5px] rounded-lg gap-1'
+                      : 'px-3.5 py-2 text-xs rounded-xl gap-1'
+                  } bg-orange-500 hover:bg-orange-600 text-white font-bold transition-all shadow-xs active:scale-95 cursor-pointer flex items-center justify-center flex-shrink-0 whitespace-nowrap`}
+                  title="Agregar nuevo jugador"
+                >
+                  <UserPlus
+                    className={`${
+                      is15SheetExpanded ? 'w-3 h-3' : 'w-3.5 h-3.5'
+                    } flex-shrink-0`}
+                  />
+                  <span>Agregar</span>
+                </button>
               </form>
             </div>
           )}
