@@ -1,5 +1,5 @@
 import type { GameSequenceItem } from '../types';
-import { collection, deleteDoc, doc, getDocs, limit, query, startAfter, where } from 'firebase/firestore';
+import { collection, deleteDoc, doc, getDoc, getDocs, limit, query, startAfter, where } from 'firebase/firestore';
 import type { QueryConstraint } from 'firebase/firestore';
 import { db } from '../firebase';
 
@@ -33,6 +33,7 @@ type DeletionServiceDependencies = {
   getKeysByPrefix: (prefixes: string[]) => string[];
   sequence75StorageKey: string;
   sequence90StorageKey: string;
+  reconcileDeletedGames: (games: GameSequenceItem[]) => Promise<void>;
 };
 
 export function createDeletionService(dependencies: DeletionServiceDependencies) {
@@ -158,6 +159,12 @@ export function createDeletionService(dependencies: DeletionServiceDependencies)
       })
     );
 
+    try {
+      await dependencies.reconcileDeletedGames(matchingItems);
+    } catch (err) {
+      console.warn('Could not reconcile saved game day index after deletion:', err);
+    }
+
     return idsToDelete.size;
   }
 
@@ -211,6 +218,15 @@ export function createDeletionService(dependencies: DeletionServiceDependencies)
       matchingItems.forEach((g) => {
         if (g.id) idsToDelete.add(g.id);
       });
+
+      if (typeof idOrItem === 'string' && targetId && !matchingItems.some((game) => game.id === targetId)) {
+        try {
+          const snapshot = await getDoc(doc(db, 'saved_games', targetId));
+          if (snapshot.exists()) matchingItems.push({ ...snapshot.data(), id: targetId } as GameSequenceItem);
+        } catch {
+          // Continue with local deletion if the record cannot be read while offline.
+        }
+      }
 
       if (typeof idOrItem === 'object') {
         matchingItems.push(idOrItem);

@@ -90,6 +90,7 @@ import { createGameRepository } from './gameRepository';
 import { createSyncStatus } from './syncStatus';
 import { createQueueProcessor } from './queueProcessor';
 import { createOfflineFirstEngine } from './offlineFirstEngine';
+import { savedGameDaysService } from './savedGameDaysService';
 import { createGameMaintenanceService } from './gameMaintenanceService';
 
 export { getDiagnosticSaveLogs };
@@ -265,6 +266,7 @@ const deletionService = createDeletionService({
   getKeysByPrefix,
   sequence75StorageKey: STORAGE_KEY_SEQUENCE_75,
   sequence90StorageKey: STORAGE_KEY_SEQUENCE_90,
+  reconcileDeletedGames: savedGameDaysService.reconcileDeletedGames,
 });
 
 export function isCurrentSessionAdmin(): boolean {
@@ -307,6 +309,9 @@ const offlineFirstEngine = createOfflineFirstEngine({
   },
   queue: {
     processSaveQueue,
+  },
+  gameDays: {
+    upsertSavedGame: savedGameDaysService.upsertSavedGame,
   },
   firestore: {
     db,
@@ -403,6 +408,7 @@ const galleryService = createGalleryService({
   sanitizeOperatorFolderName,
   getGameNormalizedDateKey,
   getGameLines,
+  gameDays: savedGameDaysService,
 });
 
 export function subscribeToRecentSavedGames(
@@ -422,20 +428,29 @@ export function getSavedGamesGallery(): GameSequenceItem[] {
   return galleryService.getSavedGamesGallery();
 }
 
-export function getGalleryOperators(currentUser: AppUser | null | undefined, isAdmin: boolean) {
-  return galleryService.getGalleryOperators(currentUser, isAdmin);
+export function getGalleryOperators(currentUser: AppUser | null | undefined, isAdmin: boolean, forceRefresh = false) {
+  return galleryService.getGalleryOperators(currentUser, isAdmin, forceRefresh);
 }
 
-export function getGalleryDates(operator: import('./galleryService').GalleryOperator) {
-  return galleryService.getGalleryDates(operator);
+export function getGalleryDates(
+  operator: import('./galleryService').GalleryOperator,
+  onDatesUpdate?: (dates: import('./galleryService').GalleryDate[]) => void
+) {
+  return galleryService.getGalleryDates(operator, onDatesUpdate);
+}
+
+export function invalidateGalleryDatesCache(operatorUid?: string): void {
+  galleryService.invalidateGalleryDatesCache(operatorUid);
 }
 
 export function getGalleryGamesPage(
   operator: import('./galleryService').GalleryOperator,
   dateKey: string,
-  cursor?: import('./galleryService').GalleryGamesCursor | null
+  cursor?: import('./galleryService').GalleryGamesCursor | null,
+  onGamesUpdate?: (update: import('./galleryService').GalleryGamesUpdate) => void,
+  prefetchOnly?: boolean
 ) {
-  return galleryService.getGalleryGamesPage(operator, dateKey, cursor);
+  return galleryService.getGalleryGamesPage(operator, dateKey, cursor, onGamesUpdate, prefetchOnly);
 }
 
 export function subscribeToTodaySavedGames(
@@ -707,7 +722,15 @@ export async function saveGameToFirestoreAndGallery(item: GameSequenceItem): Pro
 
 /** Permanently deletes a game from IndexedDB, Save Queue, and Firestore (Admin only). */
 export async function deleteGamePermanently(idOrItem: string | GameSequenceItem): Promise<boolean> {
-  return deletionService.deleteGamePermanently(idOrItem);
+  const gameBeforeDelete = typeof idOrItem === 'string'
+    ? storageState.firestoreGamesMemoryStore.get(idOrItem)
+    : idOrItem;
+  const deleted = await deletionService.deleteGamePermanently(idOrItem);
+  if (deleted) {
+    if (gameBeforeDelete) galleryService.invalidateGalleryGamesCacheForGame(gameBeforeDelete);
+    else if (typeof idOrItem === 'string') await galleryService.invalidateGalleryGamesCacheByGameId(idOrItem);
+  }
+  return deleted;
 }
 
 /** Empties the right-hand sequence bar for today's games (works for both Operators and Admins). */
@@ -720,19 +743,24 @@ export async function clearRightSequenceBarToday(
 
 /** Permanently deletes all games of a specific operator on a specific dailyDate (YYYY-MM-DD) (Admin only). */
 export async function deleteGamesOfDay(operatorName: string, dateKey: string): Promise<number> {
-  return deletionService.deleteGamesOfDay(operatorName, dateKey);
+  const deletedCount = await deletionService.deleteGamesOfDay(operatorName, dateKey);
+  if (deletedCount > 0) await galleryService.invalidateGalleryGamesCacheForFolder(operatorName, dateKey);
+  return deletedCount;
 }
 
 /** Permanently deletes all games belonging to an operator's folder (Admin only). */
 export async function deleteGamesOfOperatorFolder(operatorName: string): Promise<number> {
-  return deletionService.deleteGamesOfOperatorFolder(operatorName);
+  const deletedCount = await deletionService.deleteGamesOfOperatorFolder(operatorName);
+  if (deletedCount > 0) await galleryService.invalidateGalleryGamesCacheForFolder(operatorName);
+  return deletedCount;
 }
 
 /** Clears saved games in IndexedDB, Save Queue, and Firestore (all or filtered by mode) (Admin only). */
 export async function clearAllSavedGamesGallery(
   filterMode?: 'all' | '75' | '90'
 ): Promise<void> {
-  return deletionService.clearAllSavedGamesGallery(filterMode);
+  await deletionService.clearAllSavedGamesGallery(filterMode);
+  await galleryService.clearGalleryCaches();
 }
 
 

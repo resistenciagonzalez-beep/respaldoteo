@@ -37,6 +37,7 @@ import {
   reorganizeAndHealAllStoredGames,
   getGalleryOperators,
   getGalleryDates,
+  invalidateGalleryDatesCache,
   getGalleryGamesPage,
 } from '../utils/savedGamesStorage';
 import type { GalleryDate, GalleryGamesCursor, GalleryOperator } from '../utils/galleryService';
@@ -113,9 +114,24 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
   const [gamesHaveMore, setGamesHaveMore] = useState(false);
   const [isLoadingGallery, setIsLoadingGallery] = useState(false);
   const gamesRequestIdRef = useRef(0);
+  const previousOperatorUidRef = useRef<string | null>(null);
+  const operatorOpenStartedAtRef = useRef<number | null>(null);
+  const operatorOpenKeyRef = useRef<string | null>(null);
+  const operatorDatesReadyKeyRef = useRef<string | null>(null);
+  const operatorOpenPerfLoggedRef = useRef(false);
+  const selectedDatePerfRef = useRef<{ key: string; startedAt: number; ready: boolean; logged: boolean } | null>(null);
+  const loadedGamesKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      operatorOpenStartedAtRef.current = null;
+      operatorOpenKeyRef.current = null;
+      operatorDatesReadyKeyRef.current = null;
+      operatorOpenPerfLoggedRef.current = false;
+      selectedDatePerfRef.current = null;
+      loadedGamesKeyRef.current = null;
+      return;
+    }
     let cancelled = false;
     setIsLoadingGallery(true);
     getGalleryOperators(currentUser, isAdmin)
@@ -193,6 +209,9 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
       const uid = currentUser.id || currentUser.uid || '';
       const ownOperator = galleryOperators.find((operator) => operator.operatorUid === uid);
       if (ownOperator && selectedFolderOperator !== ownOperator.key) {
+        operatorOpenKeyRef.current = ownOperator.key;
+        operatorOpenStartedAtRef.current = performance.now();
+        operatorOpenPerfLoggedRef.current = false;
         setSelectedFolderOperator(ownOperator.key);
         setSelectedFolderDay(null);
       }
@@ -207,38 +226,70 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
   const selectedOperatorName = selectedOperatorFolder?.operatorName || (currentUser?.name || 'Operadora Principal').trim();
 
   useEffect(() => {
+    const operatorUid = selectedOperatorFolder?.operatorUid || null;
+    const previousOperatorUid = previousOperatorUidRef.current;
+    if (previousOperatorUid && previousOperatorUid !== operatorUid) {
+      invalidateGalleryDatesCache(previousOperatorUid);
+    }
+    previousOperatorUidRef.current = operatorUid;
+  }, [selectedOperatorFolder?.operatorUid]);
+
+  useEffect(() => {
     if (!isOpen || !selectedOperatorFolder) {
       setOperatorDates([]);
       return;
+    }
+    if (operatorOpenKeyRef.current !== selectedOperatorFolder.key || operatorOpenStartedAtRef.current === null) {
+      operatorOpenKeyRef.current = selectedOperatorFolder.key;
+      operatorOpenStartedAtRef.current = performance.now();
+      operatorOpenPerfLoggedRef.current = false;
     }
     let cancelled = false;
     setIsLoadingGallery(true);
     setGamesCursor(null);
     setGamesHaveMore(false);
+    const formatDatesForDisplay = (dates: GalleryDate[]) => {
+      const todayKey = getCurrentLocalDateKey();
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yesterdayKey = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`;
+      return dates.map((date) => ({
+        ...date,
+        displayDate: `${date.dateKey === todayKey ? 'Hoy - ' : date.dateKey === yesterdayKey ? 'Ayer - ' : ''}${date.displayDate}`,
+      }));
+    };
     getGalleryDates({
       key: selectedOperatorFolder.key,
       operatorUid: selectedOperatorFolder.operatorUid,
       operatorName: selectedOperatorFolder.operatorName,
       operatorFolder: selectedOperatorFolder.operatorFolder,
-    }).then((dates) => {
+    }, (dates) => {
       if (cancelled) return;
-      const todayKey = getCurrentLocalDateKey();
-      const yesterday = new Date();
-      yesterday.setDate(yesterday.getDate() - 1);
-      const yesterdayKey = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`;
-      const datesForState = dates.map((date) => ({
-        ...date,
-        displayDate: `${date.dateKey === todayKey ? 'Hoy - ' : date.dateKey === yesterdayKey ? 'Ayer - ' : ''}${date.displayDate}`,
-      }));
-      setOperatorDates(datesForState);
+      operatorDatesReadyKeyRef.current = selectedOperatorFolder.key;
+      setOperatorDates(formatDatesForDisplay(dates));
     }).catch((error) => {
       console.error('Could not load operator game dates:', error);
-      if (!cancelled) setOperatorDates([]);
     }).finally(() => {
       if (!cancelled) setIsLoadingGallery(false);
     });
     return () => { cancelled = true; };
   }, [isOpen, selectedOperatorFolder]);
+
+  useEffect(() => {
+    if (!isOpen || !selectedOperatorFolder) return;
+    if (operatorDatesReadyKeyRef.current !== selectedOperatorFolder.key || operatorOpenPerfLoggedRef.current) return;
+    const startedAt = operatorOpenStartedAtRef.current;
+    if (startedAt === null) return;
+    operatorOpenPerfLoggedRef.current = true;
+    console.log(`[PERF] Tiempo abrir operadora: ${(performance.now() - startedAt).toFixed(1)} ms`);
+  }, [isOpen, selectedOperatorFolder, operatorDates, isLoadingGallery]);
+
+  useEffect(() => {
+    const measurement = selectedDatePerfRef.current;
+    if (!isOpen || !measurement || !measurement.ready || measurement.logged) return;
+    measurement.logged = true;
+    console.log(`[PERF] Tiempo total hasta render: ${(performance.now() - measurement.startedAt).toFixed(1)} ms`);
+  }, [isOpen, loadedGames, isLoadingGallery]);
 
   useEffect(() => {
     const requestId = ++gamesRequestIdRef.current;
@@ -263,6 +314,13 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
       operatorFolder: selectedOperatorFolder.operatorFolder,
     };
     const loadSelectedGames = async () => {
+      const datePerfKey = `${selectedOperatorFolder.key}:${selectedFolderDay}`;
+      if (!selectedDatePerfRef.current || selectedDatePerfRef.current.key !== datePerfKey) {
+        selectedDatePerfRef.current = { key: datePerfKey, startedAt: performance.now(), ready: false, logged: false };
+      } else {
+        selectedDatePerfRef.current.ready = false;
+        selectedDatePerfRef.current.logged = false;
+      }
       if (selectedFolderDay === 'all') {
         const allGames = new Map<string, GameSequenceItem>();
         for (const date of operatorDates) {
@@ -277,14 +335,37 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
           }
         }
         const allGamesForState = Array.from(allGames.values());
-        if (isCurrentRequest()) setLoadedGames(allGamesForState);
+        if (isCurrentRequest()) {
+          if (selectedDatePerfRef.current) selectedDatePerfRef.current.ready = true;
+          loadedGamesKeyRef.current = datePerfKey;
+          setLoadedGames(allGamesForState);
+        }
         return;
       }
-      const page = await getGalleryGamesPage(operator, selectedFolderDay);
+      let backgroundUpdateReceived = false;
+      const page = await getGalleryGamesPage(operator, selectedFolderDay, null, (update) => {
+        if (!isCurrentRequest()) return;
+        backgroundUpdateReceived = true;
+        if (selectedDatePerfRef.current) selectedDatePerfRef.current.ready = true;
+        const sameLoadedDate = loadedGamesKeyRef.current === datePerfKey;
+        setLoadedGames((previous) => {
+          const baseGames = sameLoadedDate ? previous : [];
+          const merged = new Map(baseGames.map((game) => [game.id || `${game.round}-${game.timestamp}`, game]));
+          update.games.forEach((game) => merged.set(game.id || `${game.round}-${game.timestamp}`, game));
+          return Array.from(merged.values());
+        });
+        loadedGamesKeyRef.current = datePerfKey;
+        setGamesCursor(update.cursor);
+        setGamesHaveMore(update.hasMore);
+      });
       if (!isCurrentRequest()) return;
-      setLoadedGames(page.games);
-      setGamesCursor(page.cursor);
-      setGamesHaveMore(page.hasMore);
+      if (!backgroundUpdateReceived) {
+        if (selectedDatePerfRef.current) selectedDatePerfRef.current.ready = true;
+        loadedGamesKeyRef.current = datePerfKey;
+        setLoadedGames(page.games);
+        setGamesCursor(page.cursor);
+        setGamesHaveMore(page.hasMore);
+      }
     };
     loadSelectedGames().catch((error) => {
       console.error('Could not load games for selected date:', error);
@@ -295,7 +376,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
       cancelled = true;
       if (gamesRequestIdRef.current === requestId) gamesRequestIdRef.current += 1;
     };
-  }, [isOpen, selectedOperatorFolder, selectedFolderDay]);
+  }, [isOpen, selectedOperatorFolder, selectedFolderDay, selectedFolderDay === 'all' ? operatorDates : null]);
 
   const loadMoreGames = async () => {
     if (!selectedOperatorFolder || !selectedFolderDay || selectedFolderDay === 'all' || !gamesCursor || isLoadingGallery) return;
@@ -929,6 +1010,9 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                       <div
                         key={folder.key}
         onClick={() => {
+          operatorOpenKeyRef.current = folder.key;
+          operatorOpenStartedAtRef.current = performance.now();
+          operatorOpenPerfLoggedRef.current = false;
           setSelectedFolderOperator(folder.key);
           setSelectedFolderDay(null);
         }}
@@ -1063,7 +1147,15 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                       return (
                         <div
                           key={dayFolder.dateKey}
-                          onClick={() => setSelectedFolderDay(dayFolder.dateKey)}
+                          onClick={() => {
+                            selectedDatePerfRef.current = {
+                              key: `${selectedOperatorFolder?.key || selectedFolderOperator}:${dayFolder.dateKey}`,
+                              startedAt: performance.now(),
+                              ready: false,
+                              logged: false,
+                            };
+                            setSelectedFolderDay(dayFolder.dateKey);
+                          }}
                           className={`bg-white border-2 ${isToday ? 'border-amber-400 ring-2 ring-amber-200' : 'border-amber-200 hover:border-orange-500'} rounded-3xl p-4 shadow-sm hover:shadow-md transition-all cursor-pointer relative group flex flex-col justify-between overflow-hidden`}
                         >
                           <div>

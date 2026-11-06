@@ -29,6 +29,9 @@ type OfflineFirstEngineDependencies<FirestorePayload> = {
   queue: {
     processSaveQueue: () => Promise<void>;
   };
+  gameDays: {
+    upsertSavedGame: (game: GameSequenceItem) => Promise<void>;
+  };
   firestore: {
     db: any;
     doc: FirestoreApi['doc'];
@@ -190,6 +193,9 @@ export function createOfflineFirstEngine<FirestorePayload>(
           folderPath: game.folderPath,
           timestamp: game.timestamp,
         };
+        void dependencies.gameDays.upsertSavedGame(mergedVerified).catch((error) => {
+          console.warn('Could not update saved game day index:', error);
+        });
         return { verified: true, remoteGame: mergedVerified };
       }
 

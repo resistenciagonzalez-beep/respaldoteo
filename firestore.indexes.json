@@ -439,6 +439,20 @@
           "order": "DESCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "saved_game_days",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "operatorUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "dailyDate",
+          "order": "DESCENDING"
+        }
+      ]
     }
   ],
   "fieldOverrides": []
