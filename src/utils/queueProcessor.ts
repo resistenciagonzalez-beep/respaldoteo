@@ -34,7 +34,10 @@ type QueueProcessorDependencies = {
     putQueueTaskInIndexedDB: (task: QueuedSaveTask) => Promise<void>;
   };
   gallery: {
-    saveGameToGalleryCache: (game: GameSequenceItem) => void;
+    saveGameToGalleryCache: (game: GameSequenceItem) => Promise<void>;
+  };
+  history: {
+    upsertSavedGameForMismos: (game: GameSequenceItem) => void;
   };
   diagnostics: {
     recordDiagnosticSaveLog: (entry: DiagnosticSaveLog) => Promise<void>;
@@ -206,11 +209,17 @@ export function createQueueProcessor(dependencies: QueueProcessorDependencies) {
 
         if (verified && remoteGame) {
           // Successfully verified in Firestore! Remove from queue and update IndexedDB & memory
-          resolveGameSyncWaiters(nextTask.gameId, true);
-          state.syncQueueMap.delete(nextTask.gameId);
-          await dependencies.storage.removeQueueTaskFromIndexedDB(nextTask.gameId);
-          await dependencies.storage.saveGameToIndexedDB(remoteGame);
-          dependencies.gallery.saveGameToGalleryCache(remoteGame);
+          try {
+            state.syncQueueMap.delete(nextTask.gameId);
+            await dependencies.storage.removeQueueTaskFromIndexedDB(nextTask.gameId);
+            await dependencies.storage.saveGameToIndexedDB(remoteGame);
+            await dependencies.gallery.saveGameToGalleryCache(remoteGame);
+            dependencies.history.upsertSavedGameForMismos(remoteGame);
+            resolveGameSyncWaiters(nextTask.gameId, true);
+          } catch (finalizeError) {
+            resolveGameSyncWaiters(nextTask.gameId, false);
+            throw finalizeError;
+          }
 
           await dependencies.diagnostics.recordDiagnosticSaveLog({
             id: `log_${Date.now()}_${nextTask.gameId}`,

@@ -92,6 +92,7 @@ import { createQueueProcessor } from './queueProcessor';
 import { createOfflineFirstEngine } from './offlineFirstEngine';
 import { savedGameDaysService } from './savedGameDaysService';
 import { createGameMaintenanceService } from './gameMaintenanceService';
+import { removeSavedGamesFromMismosHistory, upsertSavedGameHistoryForMismos } from './gameHistoryRepository';
 
 export { getDiagnosticSaveLogs };
 export { subscribeToActivityLogsCentralized, subscribeToUsersCentralized };
@@ -211,6 +212,9 @@ const gameMaintenanceService = createGameMaintenanceService({
   cache: {
     syncTemporaryLocalCache,
   },
+  history: {
+    removeGamesFromMismosHistory: removeSavedGamesFromMismosHistory,
+  },
 });
 
 function syncTemporaryLocalCache(games: GameSequenceItem[]): void {
@@ -267,6 +271,7 @@ const deletionService = createDeletionService({
   sequence75StorageKey: STORAGE_KEY_SEQUENCE_75,
   sequence90StorageKey: STORAGE_KEY_SEQUENCE_90,
   reconcileDeletedGames: savedGameDaysService.reconcileDeletedGames,
+  removeGamesFromMismosHistory: removeSavedGamesFromMismosHistory,
 });
 
 export function isCurrentSessionAdmin(): boolean {
@@ -467,7 +472,7 @@ export function subscribeToTodaySavedGames(
 }
 
 export function saveGameToGalleryCache(normalizedItem: GameSequenceItem): void {
-  galleryService.saveGameToGalleryCache(normalizedItem);
+  galleryService.saveGameToGalleryCache(normalizedItem).catch(() => {});
 }
 
 
@@ -637,7 +642,10 @@ const queueProcessor = createQueueProcessor({
     putQueueTaskInIndexedDB,
   },
   gallery: {
-    saveGameToGalleryCache,
+    saveGameToGalleryCache: galleryService.saveGameToGalleryCache,
+  },
+  history: {
+    upsertSavedGameForMismos: upsertSavedGameHistoryForMismos,
   },
   diagnostics: {
     recordDiagnosticSaveLog,
@@ -678,6 +686,9 @@ const gameRepository = createGameRepository({
     getSavedGamesGallery,
     saveGameToGalleryCache,
   },
+  history: {
+    upsertSavedGameForMismos: upsertSavedGameHistoryForMismos,
+  },
   queue: {
     initConnectionMonitor,
     processSaveQueueAndWaitForGame: queueProcessor.processSaveQueueAndWaitForGame,
@@ -687,7 +698,10 @@ const gameRepository = createGameRepository({
     recordDiagnosticSaveLog,
   },
   firestore: {
-    deleteDuplicateGameDocument: (gameId) => deleteDoc(doc(db, 'saved_games', gameId)),
+    deleteDuplicateGameDocument: async (gameId) => {
+      await deleteDoc(doc(db, 'saved_games', gameId));
+      removeSavedGamesFromMismosHistory([gameId]);
+    },
   },
 });
 

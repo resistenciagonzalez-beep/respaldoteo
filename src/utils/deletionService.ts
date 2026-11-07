@@ -34,6 +34,7 @@ type DeletionServiceDependencies = {
   sequence75StorageKey: string;
   sequence90StorageKey: string;
   reconcileDeletedGames: (games: GameSequenceItem[]) => Promise<void>;
+  removeGamesFromMismosHistory: (gameIds: string[]) => void;
 };
 
 export function createDeletionService(dependencies: DeletionServiceDependencies) {
@@ -114,6 +115,7 @@ export function createDeletionService(dependencies: DeletionServiceDependencies)
       state.syncQueueMap.delete(docId);
       state.firestoreGamesMemoryStore.delete(docId);
     }
+    dependencies.removeGamesFromMismosHistory(Array.from(idsToDelete));
     dependencies.persistDeletedGameIds();
 
     // 2. Purge from local sequence bars and notify all UI subscribers in 0ms

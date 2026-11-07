@@ -59,6 +59,9 @@ type GameRepositoryDependencies = {
     getSavedGamesGallery: () => GameSequenceItem[];
     saveGameToGalleryCache: (game: GameSequenceItem) => void;
   };
+  history: {
+    upsertSavedGameForMismos: (game: GameSequenceItem) => void;
+  };
   queue: {
     initConnectionMonitor: () => void;
     processSaveQueueAndWaitForGame: (gameId: string) => Promise<boolean>;
@@ -218,6 +221,7 @@ export function createGameRepository(dependencies: GameRepositoryDependencies) {
     }
     await storage.saveGameToIndexedDB(normalizedItem);
     gallery.saveGameToGalleryCache(normalizedItem);
+    dependencies.history.upsertSavedGameForMismos(normalizedItem);
 
     void diagnostics.recordDiagnosticSaveLog({
       id: `log_local_${Date.now()}_${docId}`,

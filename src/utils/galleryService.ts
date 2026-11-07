@@ -439,11 +439,13 @@ export function createGalleryService(dependencies: GalleryServiceDependencies) {
     }
   }
 
-  function markGalleryDatesCacheStale(cacheKey: string): void {
+  async function markGalleryDatesCacheStale(cacheKey: string): Promise<void> {
     const cached = galleryDatesCache.get(cacheKey);
+    galleryDatesCache.delete(cacheKey);
     if (cached) {
-      cached.lastLoaded = 0;
-      cached.fullyScanned = false;
+      galleryOperatorsCache.forEach((entry) => {
+        if (cached.operatorUid in entry.dateCounts) entry.dateCounts[cached.operatorUid] = 0;
+      });
     }
     const active = activeDateScans.get(cacheKey);
     if (active) {
@@ -451,9 +453,7 @@ export function createGalleryService(dependencies: GalleryServiceDependencies) {
       activeDateScans.delete(cacheKey);
       console.log('[PERF] cancelled_request', cacheKey);
     }
-    void galleryCacheDB.getDates(cacheKey).then((record) => {
-      if (record) return galleryCacheDB.putDates({ ...record, lastLoaded: 0, fullyScanned: false });
-    }).catch(() => {});
+    await galleryCacheDB.deleteDates(cacheKey).catch(() => {});
   }
 
   function invalidateGalleryDatesCache(operatorUid?: string): void {
@@ -1350,7 +1350,7 @@ export function createGalleryService(dependencies: GalleryServiceDependencies) {
     });
   }
 
-  function saveGameToGalleryCache(normalizedItem: GameSequenceItem): void {
+  async function saveGameToGalleryCache(normalizedItem: GameSequenceItem): Promise<void> {
     if (!normalizedItem) return;
     const { normalizedGame } = dependencies.normalizeGameFolderMetadata(normalizedItem, normalizedItem.id);
     if (!normalizedGame.id) return;
@@ -1359,7 +1359,7 @@ export function createGalleryService(dependencies: GalleryServiceDependencies) {
     const dateCacheKey = normalizedGame.operatorUid && normalizedGame.operatorUid !== 'anon'
       ? `uid:${normalizedGame.operatorUid}`
       : `folder:${normalizedGame.operatorFolder || normalizedGame.operatorName}`;
-    markGalleryDatesCacheStale(dateCacheKey);
+    await markGalleryDatesCacheStale(dateCacheKey);
     publishLocalGalleryUpdate(normalizedGame);
     void dependencies.saveGameToIndexedDB(normalizedGame);
   }

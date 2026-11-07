@@ -26,6 +26,9 @@ type GameMaintenanceDependencies = {
   cache: {
     syncTemporaryLocalCache: (games: GameSequenceItem[]) => void;
   };
+  history: {
+    removeGamesFromMismosHistory: (gameIds: string[]) => void;
+  };
 };
 
 export function createGameMaintenanceService(dependencies: GameMaintenanceDependencies) {
@@ -34,6 +37,7 @@ export function createGameMaintenanceService(dependencies: GameMaintenanceDepend
   const { deleteGameFromIndexedDB, saveGameToIndexedDB } = dependencies.storage;
   const { normalizeGameFolderMetadata, sortGamesChronologicallyDesc } = dependencies.normalization;
   const { syncTemporaryLocalCache } = dependencies.cache;
+  const { removeGamesFromMismosHistory } = dependencies.history;
 
   async function reorganizeAndHealAllStoredGames(): Promise<{
     totalChecked: number;
@@ -58,6 +62,7 @@ export function createGameMaintenanceService(dependencies: GameMaintenanceDepend
         if (state.deletedGameIdsSet.has(docKey) || (rawData.id && state.deletedGameIdsSet.has(rawData.id))) {
           state.firestoreGamesMemoryStore.delete(docKey);
           void deleteGameFromIndexedDB(docKey);
+          removeGamesFromMismosHistory([docKey]);
           deleteDoc(doc(db, 'saved_games', docKey)).catch(() => {});
           continue;
         }
