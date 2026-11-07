@@ -9,7 +9,10 @@ import {
 import { getContrastTextColor, VIBRANT_PLAYER_COLORS } from './playerColors';
 import { getCurrentLocalDateKey, getOperatorStorageKey, isGameOfOperator } from './gameNormalization';
 import { safeGetItem } from './safeStorage';
-import { getSavedGamesHistoryForMismos } from './gameHistoryRepository';
+import {
+  getSavedGamesHistoryForMismos,
+  getSavedGamesHistoryFromMemoryForMismos,
+} from './gameHistoryRepository';
 
 export interface MismosPlayerReport {
   playerId: string;
@@ -118,17 +121,13 @@ export async function getImmediatelyPrecedingSheet75(
     return overrideSheet;
   }
 
-  let history: GameSequenceItem[] = [];
-  try {
-    history = await getSavedGamesHistoryForMismos(currentUser);
-  } catch (error) {
-    console.error('Could not read saved game history for Mismos:', error);
-  }
+  const memoryHistory = getSavedGamesHistoryFromMemoryForMismos(currentUser);
+  let history: GameSequenceItem[] = memoryHistory?.fullyLoaded ? memoryHistory.games : [];
   const localToday = getCurrentLocalDateKey();
 
-  // 1. Search Firestore-backed saved games belonging to current operator (most recent dailyDate & round first)
+  // 1. Search the in-memory history belonging to the current operator first.
   if (currentUser) {
-    for (const game of history) {
+    for (const game of memoryHistory?.games || []) {
       if (
         currentMatchRound !== undefined &&
         game.round !== undefined &&
@@ -141,6 +140,16 @@ export async function getImmediatelyPrecedingSheet75(
       if (game.sheet75Snapshot && sheetHasPlayerCells(game.sheet75Snapshot, targetPlayerIdOrName)) {
         return game.sheet75Snapshot;
       }
+    }
+  }
+
+  // Load Firestore history only when the required game was not found in memory
+  // and the in-memory history is not already complete.
+  if (!memoryHistory?.fullyLoaded) {
+    try {
+      history = await getSavedGamesHistoryForMismos(currentUser);
+    } catch (error) {
+      console.error('Could not read saved game history for Mismos:', error);
     }
   }
 

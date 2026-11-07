@@ -27,6 +27,11 @@ type MismosHistoryCacheEntry = {
   sortedGames: GameSequenceItem[];
 };
 
+export type MismosHistoryMemorySnapshot = {
+  games: GameSequenceItem[];
+  fullyLoaded: boolean;
+};
+
 const mismosHistoryCache = new Map<string, MismosHistoryCacheEntry>();
 const locallySavedGames = new Map<string, GameSequenceItem>();
 const locallyDeletedGameIds = new Set<string>();
@@ -56,6 +61,23 @@ export function upsertSavedGameHistoryForMismos(game: GameSequenceItem): void {
     entry.gamesById.set(game.id, game);
     if (entry.loaded) sortMismosHistoryEntry(entry);
   }
+}
+
+/** Returns the currently available Mismos history without starting a Firestore read. */
+export function getSavedGamesHistoryFromMemoryForMismos(
+  user?: AppUser | null
+): MismosHistoryMemorySnapshot | null {
+  const cacheKey = getMismosHistoryCacheKey(user);
+  const cached = mismosHistoryCache.get(cacheKey);
+  if (cached?.loaded) {
+    return { games: cached.sortedGames, fullyLoaded: true };
+  }
+
+  const isAdmin = user?.role === 'admin';
+  const games = Array.from(locallySavedGames.values()).filter(
+    (game) => !user || isAdmin || isGameOfOperator(game, user)
+  );
+  return games.length > 0 ? { games, fullyLoaded: false } : null;
 }
 
 /** Removes deleted games from every Mismos history and prevents an in-flight read from restoring them. */

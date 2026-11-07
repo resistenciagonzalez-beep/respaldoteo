@@ -264,6 +264,7 @@ export function createGameRepository(dependencies: GameRepositoryDependencies) {
     // 5. Wait for this game's own queue result. A verified result now includes its saved_game_days upsert.
     const isAlreadySynced = await queue.processSaveQueueAndWaitForGame(docId);
     const latestGame = state.firestoreGamesMemoryStore.get(docId) || normalizedItem;
+    dependencies.history.upsertSavedGameForMismos(latestGame);
 
     return {
       success: true,
