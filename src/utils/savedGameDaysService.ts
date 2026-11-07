@@ -1,5 +1,5 @@
 import type { GameSequenceItem } from '../types';
-import { getGameLines } from './gameNormalization';
+import { getGameLines, parseDateStringToDateKey } from './gameNormalization';
 import {
   collection,
   count,
@@ -36,7 +36,70 @@ export interface SavedGameDay {
 const GAME_DAYS_COLLECTION = 'saved_game_days';
 
 function getGameDate(game: GameSequenceItem): string {
-  return game.dailyDate || game.subfolderDay || game.folderPath?.split('/').pop() || '';
+  const gameWithFallbackDates = game as GameSequenceItem & {
+    savedAt?: unknown;
+  };
+  const dateCandidates: unknown[] = [
+    game.dailyDate,
+    game.subfolderDay,
+    game.folderPath?.split('/').pop(),
+    game.createdAt,
+    gameWithFallbackDates.savedAt,
+    (game as GameSequenceItem & { createdAtISO?: unknown }).createdAtISO,
+    (game as GameSequenceItem & { savedAtISO?: unknown }).savedAtISO,
+    game.timestamp,
+  ];
+
+  for (const candidate of dateCandidates) {
+    try {
+      let dateValue: unknown = candidate;
+      if (candidate instanceof Date) {
+        dateValue = candidate.toISOString();
+      } else if (typeof candidate === 'number' && Number.isFinite(candidate)) {
+        const timestampMs = Math.abs(candidate) < 1_000_000_000_000 ? candidate * 1000 : candidate;
+        dateValue = new Date(timestampMs).toISOString();
+      } else if (candidate && typeof candidate === 'object') {
+        const timestamp = candidate as { toDate?: () => Date; seconds?: number };
+        if (typeof timestamp.toDate === 'function') {
+          dateValue = timestamp.toDate().toISOString();
+        } else if (typeof timestamp.seconds === 'number') {
+          dateValue = new Date(timestamp.seconds * 1000).toISOString();
+        }
+      }
+
+      const parsedDate = parseDateStringToDateKey(
+        typeof dateValue === 'string' ? dateValue : null
+      );
+      if (!parsedDate || !/^\d{4}-\d{2}-\d{2}$/.test(parsedDate)) continue;
+
+      const [year, month, day] = parsedDate.split('-').map(Number);
+      const validationDate = new Date(year, month - 1, day);
+      if (
+        validationDate.getFullYear() === year &&
+        validationDate.getMonth() === month - 1 &&
+        validationDate.getDate() === day
+      ) {
+        return parsedDate;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  const documentDate = game.id?.match(/(\d{4}-\d{2}-\d{2})/)?.[1];
+  if (documentDate) {
+    const [year, month, day] = documentDate.split('-').map(Number);
+    const validationDate = new Date(year, month - 1, day);
+    if (
+      validationDate.getFullYear() === year &&
+      validationDate.getMonth() === month - 1 &&
+      validationDate.getDate() === day
+    ) {
+      return documentDate;
+    }
+  }
+
+  return '';
 }
 
 function getGameDayDocumentId(operatorUid: string, dailyDate: string): string {
@@ -114,17 +177,29 @@ async function refreshGameDay(operatorUid: string, dailyDate: string, game?: Gam
   );
   const operatorFolder = game?.operatorFolder || previous.operatorFolder || '';
   const operatorName = game?.operatorName || previous.operatorName || operatorFolder;
+  const folderPath = game?.folderPath || previous.folderPath || `${operatorFolder}/${dailyDate}`;
+  const docId = getGameDayDocumentId(operatorUid, dailyDate);
+  console.log('[UPSERT_WRITE]', {
+    operatorUid,
+    dailyDate,
+    operatorFolder,
+    folderPath,
+    gamesCount,
+    totalLines,
+    lastRound,
+  });
   await setDoc(dayReference, {
     operatorUid,
     dailyDate,
     operatorFolder,
     operatorName,
-    folderPath: game?.folderPath || previous.folderPath || `${operatorFolder}/${dailyDate}`,
+    folderPath,
     gamesCount,
     totalLines,
     lastRound,
     updatedAt: serverTimestamp(),
   }, { merge: true });
+  console.log('[UPSERT_OK]', docId);
 }
 
 export const savedGameDaysService = {
@@ -253,10 +328,42 @@ export const savedGameDaysService = {
   },
 
   async upsertSavedGame(game: GameSequenceItem): Promise<void> {
+    const gameId = game.id;
     const operatorUid = game.operatorUid || 'anon';
-    const dailyDate = getGameDate(game);
-    if (!operatorUid || !dailyDate) return;
-    await refreshGameDay(operatorUid, dailyDate, game);
+    const extractedDate = getGameDate(game);
+    const dailyDate = extractedDate;
+    const resolvedDate = dailyDate;
+    console.log('[UPSERT]', {
+      gameId,
+      operatorUid,
+      dailyDate,
+      subfolderDay: game.subfolderDay,
+      folderPath: game.folderPath,
+      extractedDate,
+      operatorFolder: game.operatorFolder,
+      operatorName: game.operatorName,
+      round: game.round,
+    });
+    if (!operatorUid || !resolvedDate) {
+      if (!resolvedDate) {
+        const error = new Error(`Cannot index saved game ${gameId || '(no id)'}: no valid date found.`);
+        console.error('[UPSERT_ABORT_NO_DATE]', {
+          gameId,
+          dailyDate,
+          subfolderDay: game.subfolderDay,
+          folderPath: game.folderPath,
+          error,
+        });
+        throw error;
+      }
+      return;
+    }
+    try {
+      await refreshGameDay(operatorUid, resolvedDate, game);
+    } catch (error) {
+      console.error('[UPSERT_ERROR]', error);
+      throw error;
+    }
   },
 
   async reconcileDeletedGames(games: GameSequenceItem[]): Promise<void> {
