@@ -394,65 +394,74 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
   const handleAssignSameRowsFromPreviousGame = (player: BingoSheetPlayer) => {
     const prevRows = getPreviousPlayerRows90(player.id, player.name, currentUser);
     if (!prevRows || prevRows.length === 0) {
-      notify(`No hay filas previas guardadas para ${player.name}`);
+      notify('No hay filas de la partida anterior para ' + player.name);
       return;
     }
-
     pushUndoSnapshot90();
 
+    const prev = sheetData;
+    const currentList = prev.tables && prev.tables.length > 0 ? prev.tables : [prev.table1, prev.table2].filter(Boolean);
+    const pNameLower = (player.name || '').toLowerCase().trim();
+    const updatedTables = currentList.map((tbl) => ({ ...tbl, rows: [...tbl.rows] }));
+    const usedSlots = new Set<string>();
+
+    const isMineRow = (row?: { playerId?: string; playerName?: string }) =>
+      Boolean(row) &&
+      (row!.playerId === player.id || Boolean(row!.playerName && row!.playerName.toLowerCase().trim() === pNameLower));
+    const isFreeRow = (row?: { playerId?: string; playerName?: string }) =>
+      Boolean(row) && !row!.playerId && !row!.playerName;
+
     let assigned = 0;
+    let mismosAlreadyHad = 0;
     let skipped = 0;
 
-    setSheetData((prev) => {
-      const currentList = prev.tables && prev.tables.length > 0 ? prev.tables : [prev.table1, prev.table2];
-      const pNameLower = player.name.toLowerCase().trim();
+    prevRows.forEach((item) => {
+      const rIdx = item.rowNumber - 1;
+      // Primero la misma tabla de la partida anterior; si está ocupada, el mismo número en otra tabla
+      const order = updatedTables
+        .map((tbl, tIdx) => ({ tIdx, isSame: (tbl.tableNumber || tIdx + 1) === item.table }))
+        .sort((a, b) => Number(b.isSame) - Number(a.isSame))
+        .map((o) => o.tIdx);
 
-      const updatedTables = currentList.map((tbl, tIdx) => {
-        const tableNum = tbl.tableNumber || tIdx + 1;
-        const newRows = [...tbl.rows];
-        prevRows.forEach((item) => {
-          if (item.table === tableNum && newRows[item.rowNumber - 1]) {
-            const existingRow = newRows[item.rowNumber - 1];
-            const isMine =
-              existingRow.playerId === player.id ||
-              (existingRow.playerName && existingRow.playerName.toLowerCase().trim() === pNameLower);
-            const isAvailable = (!existingRow.playerId && !existingRow.playerName) || isMine;
+      const ownIdx = order.find((tIdx) => !usedSlots.has(tIdx + ':' + rIdx) && isMineRow(updatedTables[tIdx].rows[rIdx]));
+      if (ownIdx !== undefined) {
+        usedSlots.add(ownIdx + ':' + rIdx);
+        mismosAlreadyHad++;
+        return;
+      }
 
-            if (isAvailable) {
-              newRows[item.rowNumber - 1] = {
-                ...existingRow,
-                playerId: player.id,
-                playerName: player.name,
-                color: player.color,
-                textColor: player.textColor || '#000000',
-                paid: false,
-              };
-              assigned++;
-            } else {
-              skipped++;
-            }
-          }
-        });
-        return { ...tbl, rows: newRows };
-      });
+      const freeIdx = order.find((tIdx) => isFreeRow(updatedTables[tIdx].rows[rIdx]));
+      if (freeIdx !== undefined) {
+        const existingRow = updatedTables[freeIdx].rows[rIdx];
+        updatedTables[freeIdx].rows[rIdx] = {
+          ...existingRow,
+          playerId: player.id,
+          playerName: player.name,
+          color: player.color,
+          textColor: player.textColor || '#000000',
+          paid: false,
+        };
+        usedSlots.add(freeIdx + ':' + rIdx);
+        assigned++;
+        return;
+      }
 
-      return {
-        ...prev,
-        tables: updatedTables,
-        table1: updatedTables[0] || prev.table1,
-        table2: updatedTables[1] || prev.table2,
-      };
+      skipped++;
     });
 
-    if (skipped > 0) {
-      notify(`Se anotaron ${assigned} filas disponibles para ${player.name} (${skipped} ocupadas por otros)`);
-    } else {
-      notify(`Se anotaron ${assigned} filas de la partida anterior para ${player.name}`);
-    }
+    setSheetData({
+      ...prev,
+      tables: updatedTables,
+      table1: updatedTables[0] || prev.table1,
+      table2: updatedTables[1] || prev.table2,
+    });
+
+    let msg = 'Mismos de ' + player.name + ': ' + assigned + ' fila(s) anotada(s)';
+    if (mismosAlreadyHad > 0) msg += ', ' + mismosAlreadyHad + ' ya las tenía';
+    if (skipped > 0) msg += ', ' + skipped + ' sin espacio (ocupadas en todas las tablas)';
+    notify(msg + '.');
   };
 
-  // "Mismos a Todos": Anotar automáticamente las mismas filas para todos los jugadores
-  // Regla: No quitar filas a otros jugadores; solo anotar las que estén disponibles
   const handleAssignSameRowsForAllPlayers = () => {
     if (players.length === 0) {
       notify('No hay jugadores registrados');
