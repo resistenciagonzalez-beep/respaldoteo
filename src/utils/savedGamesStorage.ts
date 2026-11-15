@@ -1282,9 +1282,22 @@ function ingestRemoteGameDoc(docKey: string, rawData: GameSequenceItem): number 
 
   // Solo se ordena en memoria (ya no se escriben correcciones en Firestore desde cada dispositivo)
   const { normalizedGame } = normalizeGameFolderMetadata({ ...rawData, id: docKey }, docKey);
+  const previous = firestoreGamesMemoryStore.get(docKey);
+  const previousMs = previous ? timestampToMs((previous as unknown as { updatedAt?: unknown }).updatedAt) : -1;
   firestoreGamesMemoryStore.set(docKey, normalizedGame);
-  void saveGameToIndexedDB(normalizedGame);
+  // Solo se guarda en el dispositivo si la partida es nueva o cambió (y de una en una, para no saturarlo)
+  if (!previous || updatedMs === 0 || previousMs !== updatedMs) {
+    queueIndexedDBWrite(normalizedGame);
+  }
   return updatedMs;
+}
+
+let idbWriteChain: Promise<void> = Promise.resolve();
+function queueIndexedDBWrite(game: GameSequenceItem): void {
+  idbWriteChain = idbWriteChain
+    .then(() => saveGameToIndexedDB(game))
+    .then(() => undefined)
+    .catch(() => undefined);
 }
 
 function removeGameLocally(docKey: string): void {
