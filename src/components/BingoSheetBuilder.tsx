@@ -4717,20 +4717,20 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
             <div className={`relative z-10 ${is15SheetExpanded ? 'h-full flex flex-col min-h-0' : ''}`}>
               {/* Encabezado: Les atiende, título y Yappy (letras grandes, sin precios ni cuadro dorado) */}
               <div
-                className={'flex items-center justify-between border-b-[2px] border-black gap-2 sm:gap-3 select-none flex-shrink-0 ' + (is15SheetExpanded ? 'pb-1 mb-1' : 'pb-1.5 mb-1.5')}
+                className={'flex items-center justify-between border-b-[2px] border-black gap-2 sm:gap-3 select-none flex-shrink-0 ' + (is15SheetExpanded ? 'pb-0.5 mb-1' : 'pb-1 mb-1.5')}
                 style={{ containerType: 'inline-size' }}
               >
                 {/* Izquierda: Les atiende */}
                 <div className="border-[2px] border-black rounded-md bg-white flex items-center px-1.5 sm:px-2 py-0.5 gap-1 sm:gap-1.5 flex-shrink-0">
                   <span
                     className="font-black text-black uppercase tracking-tight whitespace-nowrap leading-none"
-                    style={{ fontSize: 'clamp(10px, 1.5cqw, 15px)' }}
+                    style={{ fontSize: 'clamp(10px, 1.6cqw, 17px)' }}
                   >
                     LES ATIENDE:
                   </span>
                   <span
                     className="font-black tracking-wide text-black uppercase truncate max-w-[140px] sm:max-w-[240px] leading-none"
-                    style={{ fontSize: 'clamp(11px, 1.8cqw, 18px)' }}
+                    style={{ fontSize: 'clamp(12px, 2cqw, 21px)' }}
                     title={sheet.hostName || 'LES ATIENDE'}
                   >
                     {(sheet.hostName || 'ADMINISTRACIÓN').toUpperCase()}
@@ -4740,8 +4740,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                 {/* Centro: título grande ocupando todo el espacio disponible */}
                 <div className="min-w-0 flex-1 px-1 flex items-center justify-center overflow-hidden">
                   <span
-                    className="block w-full text-center font-black uppercase text-black tracking-wide leading-none truncate"
-                    style={{ fontSize: 'clamp(13px, 2.3cqw, 24px)' }}
+                    className="block w-full text-center font-black uppercase text-black tracking-wide truncate"
+                    style={{ fontSize: 'clamp(16px, 3.4cqw, 36px)', lineHeight: 1.05 }}
                     title={(sheet.title && sheet.title !== 'PLANILLA OFICIAL') ? sheet.title.toUpperCase() : 'BIENVENIDOS A LA FAMILIA TEOO'}
                   >
                     {(sheet.title && sheet.title !== 'PLANILLA OFICIAL') ? sheet.title.toUpperCase() : 'BIENVENIDOS A LA FAMILIA TEOO'}
@@ -4752,13 +4752,13 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                 <div className="border-[2px] border-black rounded-md bg-white flex items-center px-1.5 sm:px-2 py-0.5 gap-1 sm:gap-1.5 flex-shrink-0">
                   <span
                     className="font-black text-black uppercase tracking-tight whitespace-nowrap leading-none"
-                    style={{ fontSize: 'clamp(10px, 1.5cqw, 15px)' }}
+                    style={{ fontSize: 'clamp(10px, 1.6cqw, 17px)' }}
                   >
                     YAPPY:
                   </span>
                   <span
                     className="font-black tracking-wider text-black uppercase whitespace-nowrap leading-none"
-                    style={{ fontSize: 'clamp(11px, 1.8cqw, 18px)' }}
+                    style={{ fontSize: 'clamp(12px, 2cqw, 21px)' }}
                     title={sheet.hostPhone || 'YAPPY'}
                   >
                     {sheet.hostPhone || '6341-9199'}
