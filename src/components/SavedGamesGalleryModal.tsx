@@ -242,6 +242,8 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
       }
     > = {};
 
+    // Fecha más reciente real de cada carpeta (para "Última actividad")
+    const lastKeyByOp: Record<string, string> = {};
     filteredItems.forEach((game) => {
       const opName = (game.operatorName || 'Operadora Principal').trim();
       const opKey = sanitizeOperatorFolderName(game.operatorFolder || opName);
@@ -257,6 +259,11 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
         };
       }
       groups[opKey].games.push(game);
+      const gameDateKey = getGameNormalizedDateKey(game);
+      if (!lastKeyByOp[opKey] || gameDateKey > lastKeyByOp[opKey]) {
+        lastKeyByOp[opKey] = gameDateKey;
+        groups[opKey].lastDate = game.dateFormatted || game.dailyDate || gameDateKey;
+      }
       // Exact lines played: suma del valor/multiplicador de cada columna (ej: 4 columnas X2 = 8 líneas)
       const lines = getGameLines(game);
       groups[opKey].totalLines += lines;
