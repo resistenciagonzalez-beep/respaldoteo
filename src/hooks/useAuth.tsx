@@ -6,6 +6,7 @@ import {
   signOut,
   onAuthStateChanged,
   updateProfile,
+  sendEmailVerification,
 } from 'firebase/auth';
 import {
   doc,
@@ -19,13 +20,15 @@ import {
   addDoc,
   serverTimestamp,
   onSnapshot,
+  deleteField,
 } from 'firebase/firestore';
 import { auth, db } from '../firebase';
 import { AppUser, ActivityLogItem, BingoMode } from '../types';
 import { safeSetItem, safeGetItem, safeRemoveItem, cleanupLocalStorageForQuota } from '../utils/safeStorage';
-import { getStoredUsers, saveStoredUsers } from '../utils/userStorage';
-import { hashPassword, verifyPassword, sanitizeInput, stripSensitiveUserData } from '../utils/security';
-import { getCurrentLocalDateKey } from '../utils/savedGamesStorage';
+import { USERS_STORAGE_KEY } from '../utils/userStorage';
+import { verifyLegacyPassword, sanitizeInput } from '../utils/security';
+import { getCurrentLocalDateKey, setStorageSessionContext } from '../utils/savedGamesStorage';
+import { setShiftsSessionContext } from '../utils/shiftsStorage';
 
 interface AuthErrorLike {
   code?: string | number;
@@ -49,702 +52,508 @@ interface AuthContextType {
 
 export const AuthContext = createContext<AuthContextType | null>(null);
 
+// Correos que pueden recibir el rango de administrador automáticamente.
+// Por seguridad, solo funciona cuando el correo está VERIFICADO en Firebase.
 const ADMIN_EMAILS = [
-  'admin@bolillerobingo.com',
   'resistenciagonzalez@gmail.com',
   'genesis.vargas0619@gmail.com',
   'bingoteteoo@gmail.com',
 ];
 
-export function useAuthProvider(): AuthContextType {
-  const [currentUser, setCurrentUser] = useState<AppUser | null>(() => {
-    try {
-      const saved = safeGetItem('bingo_current_user_session');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed && typeof parsed === 'object') {
-          const emailLower = typeof parsed.email === 'string' ? parsed.email.trim().toLowerCase() : '';
-          if (emailLower && ADMIN_EMAILS.includes(emailLower)) {
-            parsed.role = 'admin';
-            parsed.assignedMode = 'all';
-            parsed.avatarColor = parsed.avatarColor || '#f59e0b';
-          }
-          return stripSensitiveUserData(parsed) as AppUser;
-        }
-      }
-    } catch (err) {
-      console.warn('Error reading stored user session:', err);
+const SESSION_CACHE_KEY = 'bingo_current_user_session';
+
+// Limpieza: versiones anteriores guardaban en el navegador una lista de usuarios con sus contraseñas.
+try {
+  safeRemoveItem(USERS_STORAGE_KEY);
+} catch {
+  // ignore
+}
+
+type FirestoreData = Record<string, any>;
+
+function normalizeEmail(email?: string | null): string {
+  return (email || '').trim().toLowerCase();
+}
+
+function buildProfile(uid: string, data: FirestoreData | null | undefined, fbUser: FirebaseUser | null): AppUser {
+  const role: 'admin' | 'operator' = data && data.role === 'admin' ? 'admin' : 'operator';
+  const email = normalizeEmail((data && data.email) || (fbUser && fbUser.email) || '');
+  const mode: '75' | '90' = data && data.assignedMode === '90' ? '90' : '75';
+  return {
+    id: uid,
+    uid,
+    name: (data && data.name) || (fbUser && fbUser.displayName) || (email ? email.split('@')[0] : 'Operador'),
+    email,
+    role,
+    status: data && data.status === 'suspended' ? 'suspended' : 'active',
+    joinedDate: (data && data.joinedDate) || getCurrentLocalDateKey(),
+    createdAt: data ? data.createdAt : undefined,
+    lastActive: (data && data.lastActive) || 'En línea',
+    gamesPlayed: (data && data.gamesPlayed) || 0,
+    notes: (data && data.notes) || '',
+    avatarColor: (data && data.avatarColor) || (role === 'admin' ? '#f59e0b' : '#10b981'),
+    assignedMode: role === 'admin' ? 'all' : mode,
+  };
+}
+
+function applySessionContext(user: AppUser | null): void {
+  const ctx = user
+    ? { uid: user.id, isAdmin: user.role === 'admin', email: user.email, name: user.name }
+    : null;
+  try {
+    setStorageSessionContext(ctx);
+  } catch (e) {
+    console.warn('Contexto de sesión (partidas):', e);
+  }
+  try {
+    setShiftsSessionContext(ctx);
+  } catch (e) {
+    console.warn('Contexto de sesión (turnos):', e);
+  }
+}
+
+function readCachedProfile(uid: string): AppUser | null {
+  try {
+    const raw = safeGetItem(SESSION_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && parsed.id === uid) {
+      return parsed as AppUser;
     }
-    return null;
-  });
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function errorCode(err: unknown): string {
+  const e = err as AuthErrorLike | null;
+  return String((e && e.code) || '');
+}
+
+function friendlyAuthError(err: unknown, fallback: string): string {
+  const e = err as AuthErrorLike | null;
+  const code = errorCode(err);
+  const message = String((e && e.message) || '');
+  if (code === 'auth/invalid-email') return 'El correo electrónico no es válido.';
+  if (code === 'auth/too-many-requests') return 'Demasiados intentos seguidos. Espera unos minutos e inténtalo de nuevo.';
+  if (code === 'auth/network-request-failed') return 'Sin conexión a internet. Revisa tu red e inténtalo de nuevo.';
+  if (code === 'auth/operation-not-allowed') {
+    return 'El acceso con correo y contraseña está desactivado en Firebase. Un administrador debe activarlo en Firebase > Authentication > Método de acceso > Correo electrónico/contraseña.';
+  }
+  if (code === 'auth/weak-password') return 'La contraseña debe tener al menos 6 caracteres.';
+  if (code === 'auth/user-disabled') return 'Esta cuenta fue desactivada.';
+  if (code === 'permission-denied' || message.includes('PERMISSION_DENIED')) {
+    return 'No tienes permiso para realizar esta acción.';
+  }
+  if (e && (e.name === 'QuotaExceededError' || message.toLowerCase().includes('quota'))) {
+    cleanupLocalStorageForQuota();
+    return 'El almacenamiento del navegador estaba lleno. Se liberó espacio; inténtalo de nuevo.';
+  }
+  return fallback;
+}
+
+const INVALID_CREDENTIAL_CODES = [
+  'auth/invalid-credential',
+  'auth/user-not-found',
+  'auth/wrong-password',
+  'auth/invalid-login-credentials',
+];
+
+/**
+ * Busca una cuenta antigua (creada antes de usar Firebase Authentication) con el mismo correo
+ * y verifica que la contraseña escrita coincida con la que tenía guardada.
+ */
+async function findLegacyAccount(
+  email: string,
+  uid: string,
+  pass: string
+): Promise<{ id: string; data: FirestoreData } | null> {
+  const snap = await getDocs(query(collection(db, 'users'), where('email', '==', email)));
+  for (const d of snap.docs) {
+    if (d.id === uid) continue;
+    const data = d.data();
+    if (data.status === 'deleted') continue;
+    const ok = await verifyLegacyPassword(pass, data.passwordHash, data.password);
+    if (ok) return { id: d.id, data };
+  }
+  return null;
+}
+
+/**
+ * Crea el perfil del usuario en Firestore si todavía no existe.
+ * Las cuentas nuevas siempre empiezan como operadoras; el rango de administrador
+ * solo lo puede dar otro administrador (o un correo de la lista, ya verificado).
+ */
+async function ensureProfileDocument(
+  fbUser: FirebaseUser,
+  opts: { name?: string; assignedMode?: '75' | '90'; legacy?: { id: string; data: FirestoreData } | null } | null
+): Promise<void> {
+  const ref = doc(db, 'users', fbUser.uid);
+  const existing = await getDoc(ref);
+  if (existing.exists()) return;
+
+  const legacyData = opts && opts.legacy ? opts.legacy.data : null;
+  const fallbackName = normalizeEmail(fbUser.email).split('@')[0] || 'Operador';
+  const name = sanitizeInput(
+    (opts && opts.name) || (legacyData && legacyData.name) || fbUser.displayName || fallbackName,
+    50
+  );
+  const mode: '75' | '90' =
+    (opts && opts.assignedMode) || (legacyData && legacyData.assignedMode === '90' ? '90' : '75');
+
+  const record: FirestoreData = {
+    id: fbUser.uid,
+    uid: fbUser.uid,
+    name,
+    email: fbUser.email || '',
+    role: 'operator',
+    status: 'active',
+    assignedMode: mode,
+    joinedDate: (legacyData && legacyData.joinedDate) || getCurrentLocalDateKey(),
+    createdAt: (legacyData && legacyData.createdAt) || new Date().toISOString(),
+    createdAtTimestamp: serverTimestamp(),
+    lastActive: 'Hoy, hace un momento',
+    gamesPlayed: (legacyData && legacyData.gamesPlayed) || 0,
+    notes: (legacyData && legacyData.notes) || 'Operador de Bingo ' + mode + ' Bolas',
+    avatarColor: (legacyData && legacyData.avatarColor) || '#10b981',
+  };
+  if (opts && opts.legacy) {
+    record.legacyIds = [opts.legacy.id];
+  }
+  await setDoc(ref, record);
+}
+
+async function writeActivityLog(
+  uid: string,
+  name: string,
+  email: string,
+  action: string,
+  actionType: ActivityLogItem['actionType'],
+  details: string,
+  mode?: BingoMode
+): Promise<void> {
+  if (actionType === 'draw_ball') return;
+  try {
+    const writeLog = addDoc(collection(db, 'activity_logs'), {
+      operatorUid: uid,
+      operatorName: sanitizeInput(name || 'Operador', 60),
+      operatorEmail: sanitizeInput(email || '', 100),
+      action: sanitizeInput(action, 80),
+      actionType,
+      details: sanitizeInput(details || '', 500),
+      timestamp: new Date().toISOString(),
+      createdAt: serverTimestamp(),
+      mode: mode || '75',
+    });
+    await Promise.race([
+      writeLog,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Activity log timeout')), 4000)),
+    ]);
+  } catch (e) {
+    console.warn('No se pudo registrar la actividad:', e);
+  }
+}
+
+export function useAuthProvider(): AuthContextType {
+  const [currentUser, setCurrentUserState] = useState<AppUser | null>(null);
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
-  const currentUserRef = useRef<AppUser | null>(currentUser);
-  currentUserRef.current = currentUser;
+  const currentUserRef = useRef<AppUser | null>(null);
+  const profileSetupInProgressRef = useRef<boolean>(false);
+  const verificationSentRef = useRef<boolean>(false);
 
-  const currentUserId = currentUser?.id;
-
-  // Real-time Firestore sync with the current user's document
-  useEffect(() => {
-    // Safety timeout: Never keep the user stuck on the loading splash for more than 1.2 seconds
-    const safetyTimer = setTimeout(() => {
-      setLoading(false);
-    }, 1200);
-
-    if (!currentUserId) {
-      setLoading(false);
-      clearTimeout(safetyTimer);
-      return;
+  const setCurrentUser = useCallback((user: AppUser | null) => {
+    // El contexto se aplica ANTES de actualizar React para que la galería y los turnos
+    // carguen solo los datos permitidos para este usuario.
+    applySessionContext(user);
+    currentUserRef.current = user;
+    setCurrentUserState(user);
+    if (user) {
+      safeSetItem(SESSION_CACHE_KEY, JSON.stringify(user));
+    } else {
+      safeRemoveItem(SESSION_CACHE_KEY);
     }
+  }, []);
 
-    const userDocRef = doc(db, 'users', currentUserId);
-    const unsubscribeDoc = onSnapshot(
-      userDocRef,
-      (snap) => {
-        if (snap.exists()) {
-          const data = snap.data();
-          const fallbackUser = currentUserRef.current;
-          const resolvedEmail = (data.email || fallbackUser?.email || '').trim().toLowerCase();
-          const isEmailAdmin = Boolean(resolvedEmail && ADMIN_EMAILS.includes(resolvedEmail));
-          const resolvedRole: 'admin' | 'operator' =
-            isEmailAdmin || data.role === 'admin' ? 'admin' : 'operator';
-
-          if (isEmailAdmin && data.role !== 'admin') {
-            updateDoc(userDocRef, { role: 'admin', assignedMode: 'all' }).catch(() => {});
-          }
-
-          const updatedUser: AppUser = {
-            id: snap.id,
-            uid: snap.id,
-            name: data.name || fallbackUser?.name || (isEmailAdmin ? 'Administrador' : 'Operador'),
-            email: data.email || fallbackUser?.email || '',
-            role: resolvedRole,
-            status: data.status === 'suspended' ? 'suspended' : 'active',
-            joinedDate: data.joinedDate || fallbackUser?.joinedDate || getCurrentLocalDateKey(),
-            createdAt: data.createdAt,
-            lastActive: data.lastActive || 'En línea',
-            gamesPlayed: data.gamesPlayed || 0,
-            notes: data.notes || '',
-            avatarColor: data.avatarColor || (resolvedRole === 'admin' ? '#f59e0b' : '#10b981'),
-            assignedMode: resolvedRole === 'admin' ? 'all' : (data.assignedMode || '75'),
-          };
-
-          if (updatedUser.status === 'suspended' && !isEmailAdmin) {
-            setCurrentUser(null);
-            safeRemoveItem('bingo_current_user_session');
-            setError('Esta cuenta ha sido suspendida por un administrador.');
-          } else {
-            const cleanUser = stripSensitiveUserData(updatedUser) as AppUser;
-            setCurrentUser(cleanUser);
-            safeSetItem('bingo_current_user_session', JSON.stringify(cleanUser));
-          }
-        }
-        setLoading(false);
-      },
-      (err) => {
-        console.warn('Real-time user snapshot listener:', err);
-        setLoading(false);
-      }
-    );
-
-    return () => {
-      clearTimeout(safetyTimer);
-      unsubscribeDoc();
-    };
-  }, [currentUserId]);
-
-  // Firebase Auth state listener (registered once on mount)
+  // Sesión de Firebase Authentication + perfil en tiempo real
   useEffect(() => {
-    const unsubscribeAuth = onAuthStateChanged(auth, async (fbUser) => {
+    let unsubscribeProfile: (() => void) | null = null;
+    const fallbackTimer = setTimeout(() => setLoading(false), 8000);
+
+    const unsubscribeAuth = onAuthStateChanged(auth, (fbUser) => {
       setFirebaseUser(fbUser);
-      if (fbUser && !currentUserRef.current) {
-        try {
-          const userRef = doc(db, 'users', fbUser.uid);
-          const snap = await getDoc(userRef);
-          if (snap.exists()) {
-            const data = snap.data();
-            const resolvedEmail = (data.email || fbUser.email || '').trim().toLowerCase();
-            const isEmailAdmin = Boolean(resolvedEmail && ADMIN_EMAILS.includes(resolvedEmail));
-            const resolvedRole: 'admin' | 'operator' =
-              isEmailAdmin || data.role === 'admin' ? 'admin' : 'operator';
+      if (unsubscribeProfile) {
+        unsubscribeProfile();
+        unsubscribeProfile = null;
+      }
 
-            if (isEmailAdmin && data.role !== 'admin') {
-              updateDoc(userRef, { role: 'admin', assignedMode: 'all' }).catch(() => {});
-            }
+      if (!fbUser) {
+        setCurrentUser(null);
+        setLoading(false);
+        return;
+      }
 
-            const profile: AppUser = {
-              id: fbUser.uid,
-              uid: fbUser.uid,
-              name: data.name || fbUser.displayName || (isEmailAdmin ? 'Administrador' : 'Operador'),
-              email: data.email || fbUser.email || '',
-              role: resolvedRole,
-              status: data.status === 'suspended' ? 'suspended' : 'active',
-              joinedDate: data.joinedDate || getCurrentLocalDateKey(),
-              createdAt: data.createdAt,
-              lastActive: 'En línea',
-              gamesPlayed: data.gamesPlayed || 0,
-              notes: data.notes || '',
-              avatarColor: data.avatarColor || (resolvedRole === 'admin' ? '#f59e0b' : '#10b981'),
-              assignedMode: resolvedRole === 'admin' ? 'all' : (data.assignedMode || '75'),
-            };
-            if (profile.status !== 'suspended' || isEmailAdmin) {
-              const cleanProfile = stripSensitiveUserData(profile) as AppUser;
-              setCurrentUser(cleanProfile);
-              safeSetItem('bingo_current_user_session', JSON.stringify(cleanProfile));
+      const userRef = doc(db, 'users', fbUser.uid);
+      unsubscribeProfile = onSnapshot(
+        userRef,
+        (snap) => {
+          if (!snap.exists()) {
+            // El inicio de sesión o el registro están creando el perfil en este momento
+            if (profileSetupInProgressRef.current) return;
+            profileSetupInProgressRef.current = true;
+            ensureProfileDocument(fbUser, null)
+              .catch((e) => {
+                console.warn('No se pudo crear el perfil:', e);
+                setCurrentUser(readCachedProfile(fbUser.uid) || buildProfile(fbUser.uid, null, fbUser));
+                setLoading(false);
+              })
+              .finally(() => {
+                profileSetupInProgressRef.current = false;
+              });
+            return;
+          }
+
+          const data = snap.data();
+          if (data.status === 'deleted' || data.status === 'suspended') {
+            setError(
+              data.status === 'deleted'
+                ? 'Esta cuenta fue eliminada por un administrador.'
+                : 'Esta cuenta ha sido suspendida por un administrador.'
+            );
+            signOut(auth).catch(() => {});
+            setCurrentUser(null);
+            setLoading(false);
+            return;
+          }
+
+          // Rango de administrador automático SOLO para correos de la lista y verificados
+          const email = normalizeEmail(fbUser.email);
+          if (ADMIN_EMAILS.includes(email) && data.role !== 'admin') {
+            if (fbUser.emailVerified) {
+              updateDoc(userRef, { role: 'admin', assignedMode: 'all' }).catch((e) =>
+                console.warn('No se pudo asignar el rango de administrador:', e)
+              );
+            } else if (!verificationSentRef.current) {
+              verificationSentRef.current = true;
+              sendEmailVerification(fbUser)
+                .then(() => {
+                  setError(
+                    'Te enviamos un correo para confirmar tu cuenta de administradora. Ábrelo, confirma y vuelve a iniciar sesión.'
+                  );
+                })
+                .catch(() => {});
             }
           }
-        } catch (e) {
-          console.warn('Could not fetch user doc for firebaseUser:', e);
+
+          setCurrentUser(buildProfile(snap.id, data, fbUser));
+          setLoading(false);
+        },
+        (err) => {
+          // Sin conexión: se usa el último perfil conocido (los permisos reales los controla el servidor)
+          console.warn('Perfil de usuario no disponible por ahora:', err);
+          setCurrentUser(readCachedProfile(fbUser.uid) || buildProfile(fbUser.uid, null, fbUser));
+          setLoading(false);
         }
-      }
-      setLoading(false);
+      );
     });
 
-    return () => unsubscribeAuth();
-  }, []);
+    return () => {
+      clearTimeout(fallbackTimer);
+      unsubscribeAuth();
+      if (unsubscribeProfile) unsubscribeProfile();
+    };
+  }, [setCurrentUser]);
 
   const clearError = useCallback(() => setError(null), []);
 
   const logActivity = useCallback(
-    async (
-      action: string,
-      actionType: ActivityLogItem['actionType'],
-      details?: string,
-      mode?: BingoMode
-    ) => {
-      // STRICT COST PROTECTION: Never write individual ball extractions to Firestore!
-      if (actionType === 'draw_ball') {
-        return;
-      }
-
-      void (async () => {
-        try {
-          const operatorUid = currentUser?.id || auth.currentUser?.uid || 'anon';
-          const operatorName = sanitizeInput(currentUser?.name || auth.currentUser?.displayName || 'Operador', 60);
-          const operatorEmail = sanitizeInput(currentUser?.email || auth.currentUser?.email || '', 100);
-          const safeAction = sanitizeInput(action, 80);
-          const safeDetails = sanitizeInput(details || '', 500);
-
-          const writeLog = addDoc(collection(db, 'activity_logs'), {
-            operatorUid,
-            operatorName,
-            operatorEmail,
-            action: safeAction,
-            actionType,
-            details: safeDetails,
-            timestamp: new Date().toISOString(),
-            createdAt: serverTimestamp(),
-            mode: mode || '75',
-          });
-          await Promise.race([
-            writeLog,
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Activity log timeout')), 4000)),
-          ]);
-        } catch (e) {
-          console.warn('Could not record activity log in Firestore:', e);
-        }
-      })();
+    async (action: string, actionType: ActivityLogItem['actionType'], details?: string, mode?: BingoMode) => {
+      const fb = auth.currentUser;
+      if (!fb) return;
+      const u = currentUserRef.current;
+      void writeActivityLog(
+        fb.uid,
+        (u && u.name) || fb.displayName || 'Operador',
+        (u && u.email) || fb.email || '',
+        action,
+        actionType,
+        details || '',
+        mode
+      );
     },
-    [currentUser]
+    []
   );
+
+  const fail = useCallback((msg: string) => {
+    setError(msg);
+    return { success: false, error: msg };
+  }, []);
 
   const login = useCallback(
     async (emailOrUsername: string, pass: string) => {
       setError(null);
-      cleanupLocalStorageForQuota();
-      const rawInput = (emailOrUsername || '').trim();
-      const cleanInput = sanitizeInput(rawInput).toLowerCase();
+      const email = normalizeEmail(sanitizeInput(emailOrUsername, 120));
 
-      if (!cleanInput) {
-        const msg = 'Por favor ingresa tu correo electrónico o nombre de usuario.';
-        setError(msg);
-        return { success: false, error: msg };
+      if (!email) return fail('Por favor ingresa tu correo electrónico.');
+      if (!email.includes('@')) {
+        return fail('Ingresa tu correo electrónico. Por seguridad ya no se puede entrar solo con el nombre de usuario.');
       }
-      if (!pass) {
-        const msg = 'Por favor ingresa tu contraseña.';
-        setError(msg);
-        return { success: false, error: msg };
-      }
+      if (!pass) return fail('Por favor ingresa tu contraseña.');
 
-      // Quick Local Check: Check registered/cached users first to allow instant login
-      const localUsers = getStoredUsers();
-      for (const u of localUsers) {
-        const emailMatch = u.email?.toLowerCase() === cleanInput;
-        const nameMatch = u.name?.trim().toLowerCase() === cleanInput;
-        if (emailMatch || nameMatch) {
-          const isValidPass = await verifyPassword(pass, u.passwordHash || u.password);
-          if (isValidPass) {
-            const isEmailAdmin = Boolean(
-              (u.email && ADMIN_EMAILS.includes(u.email.trim().toLowerCase())) ||
-              ADMIN_EMAILS.includes(cleanInput)
-            );
-            const effectiveRole: 'admin' | 'operator' =
-              isEmailAdmin || u.role === 'admin' ? 'admin' : 'operator';
-
-            if (u.status === 'suspended' && !isEmailAdmin) {
-              const msg = 'Esta cuenta ha sido suspendida. Contacte a un administrador.';
-              setError(msg);
-              return { success: false, error: msg };
-            }
-            // Auto-upgrade plaintext to hash if needed
-            if (u.password && !u.passwordHash) {
-              const newHash = await hashPassword(pass);
-              u.passwordHash = newHash;
-              delete u.password;
-            }
-            u.role = effectiveRole;
-            if (effectiveRole === 'admin') {
-              u.assignedMode = 'all';
-              u.avatarColor = u.avatarColor || '#f59e0b';
-            }
-            saveStoredUsers(localUsers);
-
-            if (u.id && isEmailAdmin) {
-              updateDoc(doc(db, 'users', u.id), { role: 'admin', assignedMode: 'all' }).catch(() => {});
-            }
-
-            const cleanProfile = stripSensitiveUserData({
-              ...u,
-              role: effectiveRole,
-              assignedMode: effectiveRole === 'admin' ? 'all' : (u.assignedMode || '75'),
-              lastActive: 'Hoy, hace un momento',
-            }) as AppUser;
-            setCurrentUser(cleanProfile);
-            safeSetItem('bingo_current_user_session', JSON.stringify(cleanProfile));
-            return { success: true };
-          }
-        }
-      }
-
-      // Try Firebase Authentication (if input is an email)
-      if (cleanInput.includes('@')) {
-        try {
-          const userCredential = await signInWithEmailAndPassword(auth, cleanInput, pass);
-          const uid = userCredential.user.uid;
-          const userDocRef = doc(db, 'users', uid);
-          let userDoc = await getDoc(userDocRef);
-          let data: Record<string, any> | null | undefined = userDoc.exists() ? userDoc.data() : null;
-
-          // If document doesn't exist by uid, check if it was stored by email or custom ID
-          if (!data) {
-            try {
-              const emailSnap = await getDocs(query(collection(db, 'users'), where('email', '==', cleanInput)));
-              if (!emailSnap.empty) {
-                userDoc = emailSnap.docs[0];
-                data = userDoc.data();
-              }
-            } catch (e) {
-              console.warn('Could not query user by email:', e);
-            }
-          }
-
-          const isEmailAdmin = ADMIN_EMAILS.includes(cleanInput.toLowerCase());
-          const assignedRole = (isEmailAdmin || (data && data.role === 'admin')) ? 'admin' : 'operator';
-
-          if (data && data.status === 'suspended') {
-            await signOut(auth);
-            const msg = 'Esta cuenta ha sido suspendida. Contacte a un administrador.';
-            setError(msg);
-            return { success: false, error: msg };
-          }
-
-          const profile: AppUser = {
-            id: userDoc.exists() ? userDoc.id : uid,
-            uid,
-            name: data?.name || userCredential.user.displayName || (isEmailAdmin ? 'Administrador' : 'Operador'),
-            email: cleanInput,
-            role: assignedRole,
-            status: 'active',
-            joinedDate: data?.joinedDate || getCurrentLocalDateKey(),
-            createdAt: data?.createdAt || new Date().toISOString(),
-            lastActive: 'Hoy, hace un momento',
-            gamesPlayed: data?.gamesPlayed || 0,
-            notes: data?.notes || (isEmailAdmin ? 'Administrador del sistema' : ''),
-            avatarColor: data?.avatarColor || (assignedRole === 'admin' ? '#f59e0b' : '#10b981'),
-            assignedMode: data?.assignedMode || (assignedRole === 'admin' ? 'all' : '75'),
-          };
-
-          try {
-            if (userDoc.exists()) {
-              await updateDoc(doc(db, 'users', userDoc.id), {
-                lastActive: 'Hoy, hace un momento',
-                lastActiveTimestamp: serverTimestamp(),
-              });
-            } else {
-              await setDoc(userDocRef, {
-                ...profile,
-                createdAtTimestamp: serverTimestamp(),
-              });
-            }
-          } catch (updErr) {
-            console.warn('Could not update lastActive timestamp:', updErr);
-          }
-
-          const cleanProfile = stripSensitiveUserData(profile) as AppUser;
-          setCurrentUser(cleanProfile);
-          safeSetItem('bingo_current_user_session', JSON.stringify(cleanProfile));
-          saveStoredUsers([...localUsers.filter((u) => u.id !== profile.id), cleanProfile]);
-          return { success: true };
-        } catch (authErr) {
-          // If admin email, try creating account in Firebase Auth if it doesn't exist yet
-          const authErrCode = (authErr as AuthErrorLike)?.code;
-          if (
-            ADMIN_EMAILS.includes(cleanInput) &&
-            (authErrCode === 'auth/user-not-found' || authErrCode === 'auth/invalid-credential')
-          ) {
-            try {
-              const newCred = await createUserWithEmailAndPassword(auth, cleanInput, pass);
-              const newUid = newCred.user.uid;
-              const adminProfile: AppUser = {
-                id: newUid,
-                uid: newUid,
-                name: cleanInput.includes('genesis') ? 'Génesis Vargas' : 'Administrador',
-                email: cleanInput,
-                role: 'admin',
-                status: 'active',
-                joinedDate: getCurrentLocalDateKey(),
-                createdAt: new Date().toISOString(),
-                lastActive: 'En línea',
-                gamesPlayed: 0,
-                notes: 'Administrador del sistema',
-                avatarColor: '#f59e0b',
-                assignedMode: 'all',
-              };
-              await setDoc(doc(db, 'users', newUid), {
-                ...adminProfile,
-                createdAtTimestamp: serverTimestamp(),
-              });
-              const cleanProfile = stripSensitiveUserData(adminProfile) as AppUser;
-              setCurrentUser(cleanProfile);
-              safeSetItem('bingo_current_user_session', JSON.stringify(cleanProfile));
-              saveStoredUsers([...localUsers.filter((u) => u.email !== cleanInput), adminProfile]);
-              return { success: true };
-            } catch {
-              // Proceed to Firestore validation fallback
-            }
-          }
-        }
-      }
-
-      // Fallback: Validate credentials against Cloud Firestore `users` collection
+      profileSetupInProgressRef.current = true;
       try {
-        const usersRef = collection(db, 'users');
-        const initialSnapshot = cleanInput.includes('@')
-          ? await getDocs(query(usersRef, where('email', '==', cleanInput)))
-          : await getDocs(query(usersRef, where('name', '==', rawInput)));
-
-        let matchedUserDoc = initialSnapshot.empty ? undefined : initialSnapshot.docs[0];
-
-        if (!matchedUserDoc && !cleanInput.includes('@')) {
-          const allDocs = await getDocs(usersRef);
-          matchedUserDoc = allDocs.docs.find((d) => {
-            const dat = d.data();
-            return (
-              dat.name?.trim().toLowerCase() === cleanInput ||
-              dat.email?.toLowerCase() === cleanInput
-            );
-          });
-        }
-
-        if (matchedUserDoc) {
-          const userDoc = matchedUserDoc;
-          const data = userDoc.data();
-
-          if (data.status === 'suspended') {
-            const msg = 'Esta cuenta ha sido suspendida. Contacte a un administrador.';
-            setError(msg);
-            return { success: false, error: msg };
+        let fbUser: FirebaseUser;
+        try {
+          const cred = await signInWithEmailAndPassword(auth, email, pass);
+          fbUser = cred.user;
+        } catch (signInErr) {
+          if (!INVALID_CREDENTIAL_CODES.includes(errorCode(signInErr))) {
+            return fail(friendlyAuthError(signInErr, 'No se pudo iniciar sesión. Inténtalo de nuevo.'));
           }
 
-          const storedHashOrPass = data.passwordHash || data.password;
-          const isPasswordValid = await verifyPassword(pass, storedHashOrPass);
-
-          if (!isPasswordValid) {
-            const msg = 'Correo electrónico / usuario o contraseña incorrectos.';
-            setError(msg);
-            return { success: false, error: msg };
-          }
-
-          // Auto-upgrade plaintext in Firestore to secure hash
-          if (data.password && !data.passwordHash) {
-            try {
-              const newHash = await hashPassword(pass);
-              await updateDoc(doc(db, 'users', userDoc.id), {
-                passwordHash: newHash,
-                password: null,
-              });
-            } catch (upgradeErr) {
-              console.warn('Could not update Firestore password hash:', upgradeErr);
-            }
-          }
-
-          const resolvedEmail = data.email || cleanInput;
-          const isEmailAdmin = ADMIN_EMAILS.includes(resolvedEmail.toLowerCase());
-          const assignedRole = (isEmailAdmin || data.role === 'admin') ? 'admin' : 'operator';
-
-          const profile: AppUser = {
-            id: userDoc.id,
-            uid: userDoc.id,
-            name: data.name || (isEmailAdmin ? 'Administrador' : 'Operador'),
-            email: resolvedEmail,
-            role: assignedRole,
-            status: 'active',
-            joinedDate: data.joinedDate || getCurrentLocalDateKey(),
-            createdAt: data.createdAt,
-            lastActive: 'Hoy, hace un momento',
-            gamesPlayed: data.gamesPlayed || 0,
-            notes: data.notes || (assignedRole === 'admin' ? 'Administrador del sistema' : ''),
-            avatarColor: data.avatarColor || (assignedRole === 'admin' ? '#f59e0b' : '#10b981'),
-            assignedMode: data.assignedMode || (assignedRole === 'admin' ? 'all' : '75'),
-          };
-
+          // Puede ser una cuenta antigua (anterior a Firebase Authentication): se migra de forma segura
+          let createdUser: FirebaseUser;
           try {
-            await updateDoc(doc(db, 'users', userDoc.id), {
-              role: assignedRole,
-              lastActive: 'Hoy, hace un momento',
-              lastActiveTimestamp: serverTimestamp(),
-            });
-          } catch (updErr) {
-            console.warn('Could not update user lastActive in Firestore:', updErr);
-          }
-
-          const cleanProfile = stripSensitiveUserData(profile) as AppUser;
-          setCurrentUser(cleanProfile);
-          safeSetItem('bingo_current_user_session', JSON.stringify(cleanProfile));
-          saveStoredUsers([...localUsers.filter((u) => u.id !== profile.id), cleanProfile]);
-          return { success: true };
-        }
-
-        // Initial First-Time Provisioning for designated admin email (if no record exists anywhere yet)
-        if (ADMIN_EMAILS.includes(cleanInput)) {
-          const userAlreadyStored = localUsers.some((u) => u.email?.toLowerCase() === cleanInput);
-          if (!userAlreadyStored) {
-            const newAdminDocId = `admin_${cleanInput.replace(/[^a-zA-Z0-9]/g, '_')}`;
-            const hashedPassword = await hashPassword(pass);
-            const adminProfile: AppUser = {
-              id: newAdminDocId,
-              uid: newAdminDocId,
-              name: cleanInput.includes('genesis') ? 'Génesis Vargas' : 'Administrador',
-              email: cleanInput,
-              passwordHash: hashedPassword,
-              role: 'admin',
-              status: 'active',
-              joinedDate: getCurrentLocalDateKey(),
-              createdAt: new Date().toISOString(),
-              lastActive: 'En línea',
-              gamesPlayed: 0,
-              notes: 'Administrador del sistema',
-              avatarColor: '#f59e0b',
-              assignedMode: 'all',
-            };
-            try {
-              await setDoc(doc(db, 'users', newAdminDocId), {
-                ...adminProfile,
-                createdAtTimestamp: serverTimestamp(),
-              });
-            } catch (setAdminErr) {
-              console.warn('Could not persist initial admin doc to Firestore:', setAdminErr);
+            const created = await createUserWithEmailAndPassword(auth, email, pass);
+            createdUser = created.user;
+          } catch (createErr) {
+            const cc = errorCode(createErr);
+            if (cc === 'auth/email-already-in-use' || cc === 'auth/weak-password') {
+              return fail('Correo electrónico o contraseña incorrectos.');
             }
-            const cleanProfile = stripSensitiveUserData(adminProfile) as AppUser;
-            setCurrentUser(cleanProfile);
-            safeSetItem('bingo_current_user_session', JSON.stringify(cleanProfile));
-            saveStoredUsers([...localUsers.filter((u) => u.email !== cleanInput), adminProfile]);
-            return { success: true };
+            return fail(friendlyAuthError(createErr, 'Correo electrónico o contraseña incorrectos.'));
           }
+
+          let legacy: { id: string; data: FirestoreData } | null = null;
+          try {
+            legacy = await findLegacyAccount(email, createdUser.uid, pass);
+          } catch (lookupErr) {
+            console.warn('No se pudo revisar la cuenta antigua:', lookupErr);
+          }
+
+          if (!legacy) {
+            // No era una cuenta antigua válida: se deshace la cuenta recién creada
+            await createdUser.delete().catch(() => signOut(auth).catch(() => {}));
+            return fail('Correo electrónico o contraseña incorrectos.');
+          }
+
+          await ensureProfileDocument(createdUser, { legacy });
+          fbUser = createdUser;
         }
 
-        const msg = 'Usuario o contraseña incorrectos.';
-        setError(msg);
-        return { success: false, error: msg };
-      } catch (err: unknown) {
-        const errObj = err as AuthErrorLike | null;
+        // Perfil: crear si falta y limpiar contraseñas antiguas guardadas en la base de datos
+        const ref = doc(db, 'users', fbUser.uid);
+        const snap = await getDoc(ref);
+        if (!snap.exists()) {
+          let legacy: { id: string; data: FirestoreData } | null = null;
+          try {
+            legacy = await findLegacyAccount(email, fbUser.uid, pass);
+          } catch {
+            legacy = null;
+          }
+          await ensureProfileDocument(fbUser, { legacy });
+        } else {
+          const data = snap.data();
+          if (data.status === 'deleted' || data.status === 'suspended') {
+            await signOut(auth).catch(() => {});
+            return fail(
+              data.status === 'deleted'
+                ? 'Esta cuenta fue eliminada por un administrador.'
+                : 'Esta cuenta ha sido suspendida. Contacte a un administrador.'
+            );
+          }
+          const patch: FirestoreData = {
+            lastActive: 'Hoy, hace un momento',
+            lastActiveTimestamp: serverTimestamp(),
+          };
+          if ('passwordHash' in data) patch.passwordHash = deleteField();
+          if ('password' in data) patch.password = deleteField();
+          updateDoc(ref, patch).catch((e) => console.warn('No se pudo actualizar la última conexión:', e));
+        }
+
+        void writeActivityLog(
+          fbUser.uid,
+          fbUser.displayName || email.split('@')[0],
+          email,
+          'Inicio de sesión',
+          'login',
+          'Inicio de sesión de ' + email
+        );
+        return { success: true };
+      } catch (err) {
         console.error('Login error:', err);
-        cleanupLocalStorageForQuota();
-
-        // Local emergency fallback if network is down
-        for (const u of localUsers) {
-          if (u.email?.toLowerCase() === cleanInput || u.name?.trim().toLowerCase() === cleanInput) {
-            const isValid = await verifyPassword(pass, u.passwordHash || u.password);
-            if (isValid) {
-              const cleanProfile = stripSensitiveUserData({
-                ...u,
-                lastActive: 'Hoy, en sesión local',
-              }) as AppUser;
-              setCurrentUser(cleanProfile);
-              safeSetItem('bingo_current_user_session', JSON.stringify(cleanProfile));
-              return { success: true };
-            }
-          }
-        }
-
-        let msg = errObj?.message || 'Error al conectar con el servidor.';
-        if (
-          errObj?.name === 'QuotaExceededError' ||
-          errObj?.code === 22 ||
-          errObj?.code === 1014 ||
-          String(errObj?.message || '').toLowerCase().includes('quota')
-        ) {
-          msg = 'El almacenamiento del navegador estaba saturado. Se ha liberado espacio automáticamente; por favor intenta presionar Iniciar Sesión de nuevo.';
-        } else if (errObj?.code === 'auth/too-many-requests') {
-          msg = 'Demasiados intentos fallidos seguidos. Por seguridad, la cuenta está en espera temporal. Intenta de nuevo en unos momentos.';
-        } else if (errObj?.code === 'resource-exhausted' || String(errObj?.message || '').includes('RESOURCE_EXHAUSTED')) {
-          msg = 'Límite temporal de consultas del servidor alcanzado. Espera unos instantes e inténtalo nuevamente.';
-        } else if (String(errObj?.message || '').includes('billing') || String(errObj?.message || '').includes('closed') || String(errObj?.message || '').includes('PERMISSION_DENIED')) {
-          msg = 'Comprueba tu conexión a la red o credenciales de acceso.';
-        }
-        setError(msg);
-        return { success: false, error: msg };
+        return fail(friendlyAuthError(err, 'No se pudo iniciar sesión. Inténtalo de nuevo.'));
+      } finally {
+        profileSetupInProgressRef.current = false;
       }
     },
-    []
+    [fail]
   );
 
   const register = useCallback(
     async (name: string, email: string, pass: string, assignedMode: '75' | '90' = '75') => {
       setError(null);
       const cleanName = sanitizeInput(name, 50);
-      const cleanEmail = sanitizeInput(email, 100).toLowerCase();
+      const cleanEmail = normalizeEmail(sanitizeInput(email, 120));
 
-      if (!cleanName) {
-        const msg = 'Por favor ingresa tu nombre de usuario.';
-        setError(msg);
-        return { success: false, error: msg };
-      }
-      if (!cleanEmail || !cleanEmail.includes('@')) {
-        const msg = 'Por favor ingresa un correo electrónico válido.';
-        setError(msg);
-        return { success: false, error: msg };
-      }
-      if (pass.length < 6) {
-        const msg = 'La contraseña debe tener al menos 6 caracteres.';
-        setError(msg);
-        return { success: false, error: msg };
-      }
+      if (!cleanName) return fail('Por favor ingresa tu nombre de usuario.');
+      if (!cleanEmail || !cleanEmail.includes('@')) return fail('Por favor ingresa un correo electrónico válido.');
+      if (!pass || pass.length < 6) return fail('La contraseña debe tener al menos 6 caracteres.');
 
-      const isInitialAdmin = ADMIN_EMAILS.includes(cleanEmail);
-      let userUid = '';
-      const hashedPassword = await hashPassword(pass);
-
-      // 1. Try Firebase Authentication (if enabled)
+      profileSetupInProgressRef.current = true;
       try {
-        const userCredential = await createUserWithEmailAndPassword(auth, cleanEmail, pass);
-        const user = userCredential.user;
-        await updateProfile(user, { displayName: cleanName });
-        userUid = user.uid;
-      } catch (authErr: unknown) {
-        const errObj = authErr as AuthErrorLike | null;
-
-        if (errObj?.code === 'auth/email-already-in-use') {
-          const msg = 'Ya existe una cuenta registrada con este correo electrónico.';
-          setError(msg);
-          return { success: false, error: msg };
-        }
-
-        userUid = `user_${cleanEmail.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now().toString(36)}`;
-      }
-
-      // 2. Check if user already exists in Firestore `users` collection
-      try {
-        const usersRef = collection(db, 'users');
-        const q = query(usersRef, where('email', '==', cleanEmail));
-        const existingDocs = await getDocs(q);
-
-        if (!existingDocs.empty) {
-          const msg = 'Ya existe una cuenta registrada con este correo electrónico.';
-          setError(msg);
-          return { success: false, error: msg };
-        }
-
-        // 3. Register user profile in Cloud Firestore
-        // Role is strictly 'operator' unless in designated ADMIN_EMAILS list
-        const chosenMode: '75' | '90' | 'all' = isInitialAdmin ? 'all' : (assignedMode === '90' ? '90' : '75');
-
-        const userRecord: AppUser = {
-          id: userUid,
-          uid: userUid,
+        const cred = await createUserWithEmailAndPassword(auth, cleanEmail, pass);
+        await updateProfile(cred.user, { displayName: cleanName }).catch(() => {});
+        await ensureProfileDocument(cred.user, {
           name: cleanName,
-          email: cleanEmail,
-          passwordHash: hashedPassword,
-          role: isInitialAdmin ? 'admin' : 'operator',
-          assignedMode: chosenMode,
-          status: 'active',
-          joinedDate: getCurrentLocalDateKey(),
-          createdAt: new Date().toISOString(),
-          lastActive: 'Recién registrado',
-          gamesPlayed: 0,
-          notes: isInitialAdmin ? 'Administrador del sistema' : `Operador de Bingo ${chosenMode} Bolas`,
-          avatarColor: isInitialAdmin ? '#f59e0b' : '#10b981',
-        };
+          assignedMode: assignedMode === '90' ? '90' : '75',
+        });
 
-        try {
-          await setDoc(doc(db, 'users', userUid), {
-            ...userRecord,
-            createdAtTimestamp: serverTimestamp(),
-          });
-        } catch (fsSaveErr) {
-          console.warn('Firestore setDoc user warning (saved locally):', fsSaveErr);
+        if (ADMIN_EMAILS.includes(cleanEmail) && !verificationSentRef.current) {
+          verificationSentRef.current = true;
+          sendEmailVerification(cred.user).catch(() => {});
         }
 
-        // Always persist locally in user list and active session without exposing plaintext
-        const currentStored = getStoredUsers();
-        saveStoredUsers([...currentStored.filter((u) => u.email !== cleanEmail && u.id !== userUid), userRecord]);
-
-        const sessionUser = stripSensitiveUserData(userRecord) as AppUser;
-        setCurrentUser(sessionUser);
-        safeSetItem('bingo_current_user_session', JSON.stringify(sessionUser));
-
-        await logActivity(
+        void writeActivityLog(
+          cred.user.uid,
+          cleanName,
+          cleanEmail,
           'Nuevo registro de operador',
           'register',
-          `El usuario "${cleanName}" (${cleanEmail}) se registró con rol de Operador.`
+          'El usuario "' + cleanName + '" (' + cleanEmail + ') se registró con rol de Operador.'
         );
-
         return { success: true };
-      } catch (err: unknown) {
-        const errObj = err as AuthErrorLike | null;
+      } catch (err) {
         console.error('User register error:', err);
-        cleanupLocalStorageForQuota();
-        let msg = errObj?.message || 'Error al completar el registro.';
-        if (
-          errObj?.name === 'QuotaExceededError' ||
-          errObj?.code === 22 ||
-          errObj?.code === 1014 ||
-          String(errObj?.message || '').toLowerCase().includes('quota')
-        ) {
-          msg = 'El almacenamiento del navegador estaba lleno. Se ha liberado espacio automáticamente; por favor intenta de nuevo.';
-        } else if (errObj?.code === 'auth/email-already-in-use') {
-          msg = 'Este correo electrónico ya está registrado. Por favor selecciona Iniciar Sesión.';
+        if (errorCode(err) === 'auth/email-already-in-use') {
+          return fail('Ya existe una cuenta con este correo electrónico. Usa "Iniciar Sesión".');
         }
-        setError(msg);
-        return { success: false, error: msg };
+        return fail(friendlyAuthError(err, 'Error al completar el registro.'));
+      } finally {
+        profileSetupInProgressRef.current = false;
       }
     },
-    [logActivity]
+    [fail]
   );
 
   const logout = useCallback(async () => {
-    try {
-      if (currentUser) {
-        await logActivity('Cierre de sesión', 'login', `Operador ${currentUser.name} cerró sesión`);
-      }
-      try {
-        await signOut(auth);
-      } catch (signOutErr) {
-        console.warn('Firebase signOut notice:', signOutErr);
-      }
-      setCurrentUser(null);
-      safeRemoveItem('bingo_current_user_session');
-    } catch (e) {
-      console.error('Logout error:', e);
+    const u = currentUserRef.current;
+    const fb = auth.currentUser;
+    if (u && fb) {
+      await writeActivityLog(fb.uid, u.name, u.email, 'Cierre de sesión', 'login', 'Operador ' + u.name + ' cerró sesión');
     }
-  }, [currentUser, logActivity]);
+    try {
+      await signOut(auth);
+    } catch (signOutErr) {
+      console.warn('Firebase signOut notice:', signOutErr);
+    }
+    setCurrentUser(null);
+  }, [setCurrentUser]);
 
-  const isAdmin = Boolean(
-    currentUser?.role === 'admin' ||
-      (currentUser?.email && ADMIN_EMAILS.includes(currentUser.email.trim().toLowerCase()))
-  );
+  const isAdmin = Boolean(currentUser && currentUser.role === 'admin');
   const isOperator = Boolean(currentUser && !isAdmin);
 
   return useMemo(
@@ -761,19 +570,7 @@ export function useAuthProvider(): AuthContextType {
       logActivity,
       clearError,
     }),
-    [
-      currentUser,
-      firebaseUser,
-      loading,
-      error,
-      isAdmin,
-      isOperator,
-      login,
-      register,
-      logout,
-      logActivity,
-      clearError,
-    ]
+    [currentUser, firebaseUser, loading, error, isAdmin, isOperator, login, register, logout, logActivity, clearError]
   );
 }
 
