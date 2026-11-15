@@ -1,20 +1,20 @@
 /**
  * Security & Data Sanitization Utilities
- * Protects against XSS, injection attacks, credential leaks, and privilege spoofing.
+ * Protege contra XSS, inyecciones y filtraciones de credenciales.
+ *
+ * IMPORTANTE: las contraseñas ya NO se guardan en Firestore ni en el navegador.
+ * El inicio de sesión usa exclusivamente Firebase Authentication.
+ * Las funciones de hash solo existen para migrar cuentas antiguas una única vez.
  */
 
-const PASSWORD_SALT = 'bingo_bolillero_secure_salt_2026_';
+const LEGACY_PASSWORD_SALT = 'bingo_bolillero_secure_salt_2026_';
 
-/**
- * Computes a secure SHA-256 hash of a password with application salt.
- * Ensures plaintext passwords are NEVER stored in Firestore or localStorage.
- */
-export async function hashPassword(password: string): Promise<string> {
+async function computeLegacyHash(password: string): Promise<string> {
   if (!password) return '';
   try {
     if (typeof window !== 'undefined' && window.crypto?.subtle) {
       const encoder = new TextEncoder();
-      const data = encoder.encode(PASSWORD_SALT + password);
+      const data = encoder.encode(LEGACY_PASSWORD_SALT + password);
       const hashBuffer = await window.crypto.subtle.digest('SHA-256', data);
       const hashArray = Array.from(new Uint8Array(hashBuffer));
       return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -23,46 +23,66 @@ export async function hashPassword(password: string): Promise<string> {
     console.warn('Crypto subtle fallback:', e);
   }
 
-  // Fallback simple deterministic hash if crypto.subtle is not supported
   let hash = 0;
-  const str = PASSWORD_SALT + password;
+  const str = LEGACY_PASSWORD_SALT + password;
   for (let i = 0; i < str.length; i++) {
     const char = str.charCodeAt(i);
     hash = (hash << 5) - hash + char;
     hash |= 0;
   }
-  return `h_${Math.abs(hash).toString(16)}`;
+  return 'h_' + Math.abs(hash).toString(16);
 }
 
 /**
- * Verifies a plaintext password against a stored password hash (or legacy plaintext during migration).
+ * Solo para compatibilidad con código antiguo. No se usa para guardar contraseñas nuevas.
  */
-export async function verifyPassword(providedPass: string, storedHashOrPass?: string): Promise<boolean> {
-  if (!storedHashOrPass || !providedPass) return false;
-  // If stored in legacy plaintext format:
-  if (storedHashOrPass === providedPass) return true;
-  // If stored as hash:
-  const computedHash = await hashPassword(providedPass);
-  return computedHash === storedHashOrPass;
+export async function hashPassword(password: string): Promise<string> {
+  return computeLegacyHash(password);
+}
+
+/**
+ * Verifica la contraseña de una cuenta ANTIGUA (creada antes de usar Firebase Authentication).
+ * - Si la cuenta guardó un hash, SOLO se compara el hash calculado (nunca el texto escrito contra el hash).
+ * - Solo si la cuenta antigua guardó la contraseña en texto plano se compara directamente.
+ */
+export async function verifyLegacyPassword(
+  providedPass: string,
+  storedHash?: string | null,
+  storedPlain?: string | null
+): Promise<boolean> {
+  if (!providedPass) return false;
+  if (typeof storedHash === 'string' && storedHash.length > 0) {
+    const computed = await computeLegacyHash(providedPass);
+    return computed === storedHash;
+  }
+  if (typeof storedPlain === 'string' && storedPlain.length > 0) {
+    return storedPlain === providedPass;
+  }
+  return false;
+}
+
+/**
+ * Compatibilidad: verifica únicamente contra un hash (ya no acepta el hash como contraseña).
+ */
+export async function verifyPassword(providedPass: string, storedHash?: string): Promise<boolean> {
+  return verifyLegacyPassword(providedPass, storedHash, null);
 }
 
 /**
  * Sanitizes generic user text input to prevent XSS and HTML injection.
- * Strips dangerous HTML tags, javascript URLs, and trims to specified length.
  */
 export function sanitizeInput(text?: string | null, maxLength = 200): string {
   if (!text) return '';
   return text
-    .replace(/[<>]/g, '') // remove HTML angle brackets
+    .replace(/[<>]/g, '')
     .replace(/javascript:/gi, '')
-    .replace(/on\w+=/gi, '') // remove inline event handlers like onclick=
+    .replace(/on\w+=/gi, '')
     .trim()
     .slice(0, maxLength);
 }
 
 /**
  * Sanitizes player names entered in sheet builder or cells.
- * Removes dangerous characters while allowing accents, spaces, and numbers.
  */
 export function sanitizePlayerName(name?: string | null): string {
   if (!name) return '';
@@ -73,8 +93,7 @@ export function sanitizePlayerName(name?: string | null): string {
 }
 
 /**
- * Strips password and sensitive credentials from an AppUser object
- * before exposing to other components, logs, or exports.
+ * Strips password and sensitive credentials from an AppUser object.
  */
 export function stripSensitiveUserData<T extends { password?: string; passwordHash?: string }>(user: T): Omit<T, 'password' | 'passwordHash'> {
   const copy = { ...user };
@@ -82,4 +101,3 @@ export function stripSensitiveUserData<T extends { password?: string; passwordHa
   delete copy.passwordHash;
   return copy;
 }
-
