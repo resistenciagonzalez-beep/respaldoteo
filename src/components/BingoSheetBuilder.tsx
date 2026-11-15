@@ -4715,56 +4715,49 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
 
             {/* Inner Content Layer */}
             <div className={`relative z-10 ${is15SheetExpanded ? 'h-full flex flex-col min-h-0' : ''}`}>
-              {/* Header: Host, Title, and Yappy (Compact, Single-Line, Clean) */}
+              {/* Encabezado: Les atiende, título y Yappy (letras grandes, sin precios ni cuadro dorado) */}
               <div
-                className={`flex items-center justify-between border-b-[2px] border-black gap-2 select-none flex-shrink-0 ${
-                  is15SheetExpanded ? 'pb-1 mb-1' : 'pb-1.5 mb-1.5'
-                }`}
+                className={'flex items-center justify-between border-b-[2px] border-black gap-2 sm:gap-3 select-none flex-shrink-0 ' + (is15SheetExpanded ? 'pb-1 mb-1' : 'pb-1.5 mb-1.5')}
               >
-                {/* Left: Host Name badge */}
-                <div className="border-[1.5px] border-black rounded bg-white flex items-center px-1.5 sm:px-2 py-0.5 gap-1 sm:gap-1.5 shadow-2xs flex-shrink-0">
-                  <span className="text-[9.5px] sm:text-xs font-black text-black uppercase tracking-tight whitespace-nowrap">
+                {/* Izquierda: Les atiende */}
+                <div className="border-[2px] border-black rounded-md bg-white flex items-center px-2 sm:px-3 py-1 gap-1.5 sm:gap-2 flex-shrink-0">
+                  <span
+                    className="font-black text-black uppercase tracking-tight whitespace-nowrap leading-none"
+                    style={{ fontSize: 'clamp(11px, 1.25vw, 18px)' }}
+                  >
                     LES ATIENDE:
                   </span>
                   <span
-                    className="text-[11px] sm:text-xs md:text-sm font-black tracking-wide text-black uppercase truncate max-w-[100px] sm:max-w-[160px]"
+                    className="font-black tracking-wide text-black uppercase truncate max-w-[140px] sm:max-w-[240px] leading-none"
+                    style={{ fontSize: 'clamp(13px, 1.6vw, 24px)' }}
                     title={sheet.hostName || 'LES ATIENDE'}
                   >
                     {(sheet.hostName || 'ADMINISTRACIÓN').toUpperCase()}
                   </span>
                 </div>
 
-                {/* Center: Title & Compact Prize Badges - Banner Styling */}
-                <div className="min-w-0 flex-1 px-1 flex items-center justify-center gap-1 sm:gap-1.5 overflow-hidden">
-                  <div className="bg-gradient-to-r from-amber-400 via-yellow-300 to-amber-400 text-black font-black uppercase tracking-wider px-3 sm:px-4 py-0.5 rounded-md border border-amber-500 shadow-2xs flex items-center justify-center text-center truncate max-w-full">
-                    <span className="text-[11px] sm:text-xs md:text-sm font-black uppercase text-black tracking-wide truncate drop-shadow-xs">
-                      {(sheet.title && sheet.title !== 'PLANILLA OFICIAL') ? sheet.title.toUpperCase() : 'BIENVENIDOS A LA FAMILIA TEOO'}
-                    </span>
-                  </div>
-
-                  {(isAmboActive || isTernaActive) && (
-                    <div className="hidden sm:flex items-center gap-1 flex-shrink-0">
-                      {isAmboActive && (
-                        <span className="bg-sky-200 text-sky-950 px-1.5 py-0.5 rounded border border-black font-black text-[10px] uppercase">
-                          ${(sheet.baseAmboPrize ?? 0.25).toFixed(2)} AMBO
-                        </span>
-                      )}
-                      {isTernaActive && (
-                        <span className="bg-emerald-200 text-emerald-950 px-1.5 py-0.5 rounded border border-black font-black text-[10px] uppercase">
-                          ${(sheet.baseTernaPrize ?? 0.50).toFixed(2)} TERNA
-                        </span>
-                      )}
-                    </div>
-                  )}
+                {/* Centro: título grande ocupando todo el espacio disponible */}
+                <div className="min-w-0 flex-1 px-1 flex items-center justify-center overflow-hidden">
+                  <span
+                    className="block w-full text-center font-black uppercase text-black tracking-wide leading-none truncate"
+                    style={{ fontSize: 'clamp(15px, 2.4vw, 34px)' }}
+                    title={(sheet.title && sheet.title !== 'PLANILLA OFICIAL') ? sheet.title.toUpperCase() : 'BIENVENIDOS A LA FAMILIA TEOO'}
+                  >
+                    {(sheet.title && sheet.title !== 'PLANILLA OFICIAL') ? sheet.title.toUpperCase() : 'BIENVENIDOS A LA FAMILIA TEOO'}
+                  </span>
                 </div>
 
-                {/* Right: Yappy box */}
-                <div className="border-[1.5px] border-black rounded bg-white flex items-center px-1.5 sm:px-2 py-0.5 gap-1 sm:gap-1.5 shadow-2xs flex-shrink-0">
-                  <span className="text-[9.5px] sm:text-xs font-black text-black uppercase tracking-tight whitespace-nowrap">
+                {/* Derecha: Yappy */}
+                <div className="border-[2px] border-black rounded-md bg-white flex items-center px-2 sm:px-3 py-1 gap-1.5 sm:gap-2 flex-shrink-0">
+                  <span
+                    className="font-black text-black uppercase tracking-tight whitespace-nowrap leading-none"
+                    style={{ fontSize: 'clamp(11px, 1.25vw, 18px)' }}
+                  >
                     YAPPY:
                   </span>
                   <span
-                    className="text-[11px] sm:text-xs md:text-sm font-black tracking-wider text-black uppercase whitespace-nowrap"
+                    className="font-black tracking-wider text-black uppercase whitespace-nowrap leading-none"
+                    style={{ fontSize: 'clamp(13px, 1.6vw, 24px)' }}
                     title={sheet.hostPhone || 'YAPPY'}
                   >
                     {sheet.hostPhone || '6341-9199'}
