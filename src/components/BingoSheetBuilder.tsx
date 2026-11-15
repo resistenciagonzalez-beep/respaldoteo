@@ -322,6 +322,59 @@ const getCanonicalPlayerKey = (id?: string, name?: string): string => {
 
 const STORAGE_KEY = 'bingo_custom_sheet_data_v5';
 
+/**
+ * Título del encabezado de la planilla: usa el tamaño más grande posible
+ * sin cortarse, según el espacio disponible.
+ */
+const SheetHeaderFitTitle: React.FC<{ text: string; maxPx?: number; minPx?: number }> = ({
+  text,
+  maxPx = 32,
+  minPx = 11,
+}) => {
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const textRef = useRef<HTMLSpanElement | null>(null);
+  const [fontPx, setFontPx] = useState<number>(maxPx);
+
+  React.useLayoutEffect(() => {
+    const box = boxRef.current;
+    const span = textRef.current;
+    if (!box || !span) return;
+
+    const fit = () => {
+      const available = box.clientWidth - 8;
+      if (available <= 0) return;
+      span.style.fontSize = maxPx + 'px';
+      const needed = span.scrollWidth;
+      const next = needed > available ? Math.max(minPx, Math.floor((maxPx * available) / needed)) : maxPx;
+      span.style.fontSize = next + 'px';
+      setFontPx(next);
+    };
+
+    fit();
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(() => fit());
+      observer.observe(box);
+    }
+    return () => {
+      if (observer) observer.disconnect();
+    };
+  }, [text, maxPx, minPx]);
+
+  return (
+    <div ref={boxRef} className="min-w-0 flex-1 px-1 flex items-center justify-center overflow-hidden">
+      <span
+        ref={textRef}
+        className="inline-block whitespace-nowrap text-center font-black uppercase text-black tracking-wide"
+        style={{ fontSize: fontPx + 'px', lineHeight: 1.05 }}
+        title={text}
+      >
+        {text}
+      </span>
+    </div>
+  );
+};
+
 export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
   onBackToGame,
   currentUser,
@@ -4737,16 +4790,10 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                   </span>
                 </div>
 
-                {/* Centro: título grande ocupando todo el espacio disponible */}
-                <div className="min-w-0 flex-1 px-1 flex items-center justify-center overflow-hidden">
-                  <span
-                    className="block w-full text-center font-black uppercase text-black tracking-wide truncate"
-                    style={{ fontSize: 'clamp(16px, 3.4cqw, 36px)', lineHeight: 1.05 }}
-                    title={(sheet.title && sheet.title !== 'PLANILLA OFICIAL') ? sheet.title.toUpperCase() : 'BIENVENIDOS A LA FAMILIA TEOO'}
-                  >
-                    {(sheet.title && sheet.title !== 'PLANILLA OFICIAL') ? sheet.title.toUpperCase() : 'BIENVENIDOS A LA FAMILIA TEOO'}
-                  </span>
-                </div>
+                {/* Centro: título que se ajusta solo para verse completo */}
+                <SheetHeaderFitTitle
+                  text={(sheet.title && sheet.title !== 'PLANILLA OFICIAL') ? sheet.title.toUpperCase() : 'BIENVENIDOS A LA FAMILIA TEOO'}
+                />
 
                 {/* Derecha: Yappy */}
                 <div className="border-[2px] border-black rounded-md bg-white flex items-center px-1.5 sm:px-2 py-0.5 gap-1 sm:gap-1.5 flex-shrink-0">
