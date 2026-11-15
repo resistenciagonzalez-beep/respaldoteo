@@ -2,6 +2,17 @@ import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
 import { GameSequenceItem } from '../types';
 
+// Evita que un nombre con código HTML se ejecute dentro del reporte
+function escapeReportHtml(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+
 /**
  * Capture any HTML element and trigger download as high-quality JPG image
  */
@@ -158,7 +169,7 @@ export function buildGameDocumentHtml(item: GameSequenceItem): string {
                       return `<td style="padding: 4px; border: 1px solid #fed7aa; color: ${
                         pName ? '#1e293b' : '#94a3b8'
                       }; font-size: 9.5px;">
-                        ${pName || '-'}
+                        ${escapeReportHtml(pName || '-')}
                       </td>`;
                     })
                     .join('')}
@@ -214,9 +225,7 @@ export function buildGameDocumentHtml(item: GameSequenceItem): string {
                               <td style="padding: 3px; border: 1px solid #fed7aa; text-align: center; font-family: monospace;">[${r.numbers.join(
                                 ', '
                               )}]</td>
-                              <td style="padding: 3px; border: 1px solid #fed7aa;">${
-                                r.playerName || '-'
-                              }</td>
+                              <td style="padding: 3px; border: 1px solid #fed7aa;">${escapeReportHtml(r.playerName || '-')}</td>
                             </tr>
                           `;
                         })
@@ -249,7 +258,7 @@ export function buildGameDocumentHtml(item: GameSequenceItem): string {
           </div>
           <h1 style="margin: 0; font-size: 24px; font-weight: 900; color: #9a3412;">PARTIDA #${item.round}</h1>
           <p style="margin: 4px 0 0; font-size: 13px; color: #431407;">
-            Operadora: <strong>${item.operatorName || 'Operadora'}</strong> | Modo: <strong>${
+            Operadora: <strong>${escapeReportHtml(item.operatorName || 'Operadora')}</strong> | Modo: <strong>${
     item.mode === '90' ? 'Bingo 90 Triples' : 'Bingo 75 Multiplicadores'
   }</strong>
           </p>
@@ -289,7 +298,7 @@ export function buildGameDocumentHtml(item: GameSequenceItem): string {
       {/* Financial Bar */}
       <div style="background: #ffffff; border: 1px solid #fed7aa; border-radius: 8px; padding: 12px; margin-bottom: 16px;">
         <div style="display: flex; justify-content: space-between; font-weight: bold; font-size: 13px; align-items: center;">
-          <span>Ganador: <strong style="color: #9a3412;">${item.winningPlayerName || 'Sin asignar'}</strong></span>
+          <span>Ganador: <strong style="color: #9a3412;">${escapeReportHtml(item.winningPlayerName || 'Sin asignar')}</strong></span>
           <span>Recaudado: <span style="color: #047857;">$${Number(item.totalCollected || 0).toFixed(2)}</span></span>
           <span>Premios: <span style="color: #b91c1c;">$${Number(item.totalPrizesPaid || 0).toFixed(2)}</span></span>
           <span>Ganancia Neta: <span style="color: #0284c7;">$${Number(item.netProfit || 0).toFixed(2)}</span></span>
@@ -313,7 +322,7 @@ export function buildGameDocumentHtml(item: GameSequenceItem): string {
       </div>
 
       <div style="text-align: center; border-top: 1px solid #fed7aa; padding-top: 8px; font-size: 9px; color: #7c2d12;">
-        Documento y captura oficial generada por el Sistema de Bingo • Control de Operadora: ${item.operatorName || 'Operadora'}
+        Documento y captura oficial generada por el Sistema de Bingo • Control de Operadora: ${escapeReportHtml(item.operatorName || 'Operadora')}
       </div>
     </div>
   `;
@@ -330,7 +339,7 @@ export async function downloadGameDirectJpg(item: GameSequenceItem): Promise<voi
   if (container) {
     await exportElementAsJpg(
       container,
-      `Partida_${item.round}_${item.operatorName || 'Operadora'}_${item.dailyDate || 'fecha'}.jpg`
+      `Partida_${item.round}_${escapeReportHtml(item.operatorName || 'Operadora')}_${item.dailyDate || 'fecha'}.jpg`
     );
     return;
   }
@@ -351,7 +360,7 @@ export async function downloadGameDirectJpg(item: GameSequenceItem): Promise<voi
   try {
     await exportElementAsJpg(
       tempDiv,
-      `Partida_${item.round}_${item.operatorName || 'Operadora'}_${item.dailyDate || 'fecha'}.jpg`
+      `Partida_${item.round}_${escapeReportHtml(item.operatorName || 'Operadora')}_${item.dailyDate || 'fecha'}.jpg`
     );
   } finally {
     document.body.removeChild(tempDiv);
@@ -369,7 +378,7 @@ export async function downloadGameDirectPdf(item: GameSequenceItem): Promise<voi
   if (container) {
     await exportElementAsPdf(
       container,
-      `Partida_${item.round}_${item.operatorName || 'Operadora'}_${item.dailyDate || 'fecha'}.pdf`,
+      `Partida_${item.round}_${escapeReportHtml(item.operatorName || 'Operadora')}_${item.dailyDate || 'fecha'}.pdf`,
       {
         round: item.round,
         operator: item.operatorName || 'Operadora',
@@ -395,7 +404,7 @@ export async function downloadGameDirectPdf(item: GameSequenceItem): Promise<voi
   try {
     await exportElementAsPdf(
       tempDiv,
-      `Partida_${item.round}_${item.operatorName || 'Operadora'}_${item.dailyDate || 'fecha'}.pdf`,
+      `Partida_${item.round}_${escapeReportHtml(item.operatorName || 'Operadora')}_${item.dailyDate || 'fecha'}.pdf`,
       {
         round: item.round,
         operator: item.operatorName || 'Operadora',

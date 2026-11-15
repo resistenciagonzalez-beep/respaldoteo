@@ -66,17 +66,8 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
   currentUser,
   isAdmin: isAdminProp = false,
 }) => {
-  const isAdmin = Boolean(
-    isAdminProp ||
-      currentUser?.role === 'admin' ||
-      (currentUser?.email &&
-        [
-          'admin@bolillerobingo.com',
-          'resistenciagonzalez@gmail.com',
-          'genesis.vargas0619@gmail.com',
-          'bingoteteoo@gmail.com',
-        ].includes(currentUser.email.trim().toLowerCase()))
-  );
+  // El rango sale del perfil verificado en Firestore (no de una lista de correos en el navegador)
+  const isAdmin = Boolean(isAdminProp || currentUser?.role === 'admin');
 
   const [filterMode, setFilterMode] = useState<'all' | '75' | '90'>('all');
   const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');

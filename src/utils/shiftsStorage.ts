@@ -1,7 +1,7 @@
 import { OperatorShift, GameSequenceItem } from '../types';
-import { doc, setDoc, serverTimestamp, collection, onSnapshot } from 'firebase/firestore';
+import { doc, setDoc, serverTimestamp, collection, onSnapshot, query, where, orderBy, limit } from 'firebase/firestore';
 import { db } from '../firebase';
-import { safeSetItem, safeGetItem } from './safeStorage';
+import { safeSetItem, safeGetItem, safeRemoveItem } from './safeStorage';
 
 export const STORAGE_KEY_OPERATOR_SHIFTS = 'bingo_operator_shifts_v1';
 
@@ -9,12 +9,63 @@ const firestoreShiftsMemoryStore = new Map<string, OperatorShift>();
 let hasSyncedShiftsWithFirestore = false;
 let shiftsUnsubscribe: (() => void) | null = null;
 
+interface ShiftsSessionContext {
+  uid: string;
+  isAdmin: boolean;
+  email?: string;
+  name?: string;
+}
+
+let shiftsSession: ShiftsSessionContext | null = null;
+
+function shiftsSessionKey(ctx: ShiftsSessionContext | null): string {
+  return ctx ? (ctx.isAdmin ? 'a:' : 'o:') + ctx.uid : '';
+}
+
+/**
+ * Lo llama useAuth cuando cambia el usuario.
+ * - Operadoras: solo escuchan SUS turnos.
+ * - Administradores: escuchan los turnos más recientes de todas.
+ */
+export function setShiftsSessionContext(ctx: ShiftsSessionContext | null): void {
+  const prevKey = shiftsSessionKey(shiftsSession);
+  const nextKey = shiftsSessionKey(ctx);
+  shiftsSession = ctx ? { ...ctx } : null;
+  if (prevKey === nextKey) return;
+
+  if (shiftsUnsubscribe) {
+    try {
+      shiftsUnsubscribe();
+    } catch {
+      // ignore
+    }
+    shiftsUnsubscribe = null;
+  }
+  firestoreShiftsMemoryStore.clear();
+  hasSyncedShiftsWithFirestore = false;
+  if (prevKey) {
+    try {
+      safeRemoveItem(STORAGE_KEY_OPERATOR_SHIFTS);
+    } catch {
+      // ignore
+    }
+  }
+  if (ctx) ensureShiftsSubscription();
+}
+
 function ensureShiftsSubscription(): void {
-  if (typeof window === 'undefined' || shiftsUnsubscribe) return;
+  if (typeof window === 'undefined' || shiftsUnsubscribe || !shiftsSession) return;
+  const session = shiftsSession;
+  const subscribedKey = shiftsSessionKey(session);
   try {
+    const shiftsRef = collection(db, 'operator_shifts');
+    const shiftsQuery = session.isAdmin
+      ? query(shiftsRef, orderBy('timestampISO', 'desc'), limit(300))
+      : query(shiftsRef, where('ownerUid', '==', session.uid));
     shiftsUnsubscribe = onSnapshot(
-      collection(db, 'operator_shifts'),
+      shiftsQuery,
       (snapshot) => {
+        if (shiftsSessionKey(shiftsSession) !== subscribedKey) return;
         firestoreShiftsMemoryStore.clear();
         snapshot.forEach((docSnap) => {
           const data = docSnap.data() as OperatorShift;
@@ -25,7 +76,7 @@ function ensureShiftsSubscription(): void {
         saveShiftsToLocalCache(Array.from(firestoreShiftsMemoryStore.values()));
       },
       (err) => {
-        console.warn('Firestore operator_shifts subscription notice:', err);
+        console.warn('Turnos: sincronización pendiente:', err);
       }
     );
   } catch (err) {
@@ -43,6 +94,7 @@ function getCanonicalOpKey(operatorUid?: string, operatorName?: string): string 
  * Get all stored shifts from Firestore-backed memory store (with IndexedDB cache fallback on boot)
  */
 export function getAllShifts(): OperatorShift[] {
+  if (!shiftsSession) return [];
   ensureShiftsSubscription();
   if (hasSyncedShiftsWithFirestore || firestoreShiftsMemoryStore.size > 0) {
     return Array.from(firestoreShiftsMemoryStore.values());
@@ -107,6 +159,7 @@ export function getActiveShift(
     netProfit: 0,
     status: 'active',
     gameIds: [],
+    ownerUid: shiftsSession ? shiftsSession.uid : '',
   };
 
   firestoreShiftsMemoryStore.set(newShift.id, newShift);
@@ -219,6 +272,7 @@ export async function recordGameToActiveShift(
       netProfit: 0,
       status: 'active',
       gameIds: [],
+      ownerUid: shiftsSession ? shiftsSession.uid : '',
     };
   }
 
@@ -266,6 +320,7 @@ export async function recordGameToActiveShift(
       netProfit: 0,
       status: 'active',
       gameIds: [],
+      ownerUid: shiftsSession ? shiftsSession.uid : '',
     };
   }
 

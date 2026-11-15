@@ -244,28 +244,25 @@ export function getPreviousPlayerRows90(
     return anyFound;
   };
 
-  // 1. Try primary sheet
+  // 1. Planilla de la partida anterior archivada en este dispositivo al pulsar "Nueva partida".
+  //    Si existe, se usa SOLO esa (aunque el jugador no estuviera en ella).
   const prevSheet = getPreviousGameSheet90(user);
-  if (extractRows(prevSheet)) {
+  if (prevSheet) {
+    extractRows(prevSheet);
     return found;
   }
 
-  // 2. Deep search in authoritative Firestore-backed saved games gallery
+  // 2. Respaldo: la última partida de Bingo 90 guardada por ESTA operadora (nunca de otra operadora)
   const gallery = getSavedGamesGallery();
-  if (user) {
-    for (const g of gallery) {
-      if (!isGameOfOperator(g, user)) continue;
-      if (g.sheet90Snapshot && extractRows(g.sheet90Snapshot)) {
-        return found;
-      }
-    }
+  const lastOwnGame90 = gallery.find(
+    (g) =>
+      Boolean(g && g.sheet90Snapshot) &&
+      (g.mode === '90' || g.sheetType === 'traditional-90') &&
+      (!user || isGameOfOperator(g, user))
+  );
+  if (lastOwnGame90) {
+    extractRows(lastOwnGame90.sheet90Snapshot);
   }
-  for (const g of gallery) {
-    if (g.sheet90Snapshot && extractRows(g.sheet90Snapshot)) {
-      return found;
-    }
-  }
-
   return found;
 }
 

@@ -136,6 +136,28 @@ export function findCompletedBingoRows(drawnSet: Set<number>, mode: BingoMode): 
   return result;
 }
 
+// Número al azar SEGURO (criptográfico) entre 0 y max-1, sin sesgo. Se usa para sacar las bolas.
+function secureRandomInt(max: number): number {
+  if (!max || max <= 1) return 0;
+  try {
+    const cryptoObj = typeof window !== 'undefined' ? window.crypto : undefined;
+    if (cryptoObj && typeof cryptoObj.getRandomValues === 'function') {
+      const range = 0x100000000;
+      const limit = range - (range % max);
+      const buf = new Uint32Array(1);
+      let value = 0;
+      do {
+        cryptoObj.getRandomValues(buf);
+        value = buf[0];
+      } while (value >= limit);
+      return value % max;
+    }
+  } catch {
+    // Si el navegador no lo permite, se usa el método normal
+  }
+  return Math.floor(Math.random() * max);
+}
+
 export default function App() {
   // Game Settings State
   const [settings, setSettings] = useState<GameSettings>({
@@ -1169,7 +1191,7 @@ export default function App() {
       // Pre-shuffle pool using Fisher-Yates if drawOrder is random
       if (drawOrderRef.current === 'random') {
         for (let i = pool.length - 1; i > 0; i--) {
-          const j = Math.floor(Math.random() * (i + 1));
+          const j = secureRandomInt(i + 1);
           [pool[i], pool[j]] = [pool[j], pool[i]];
         }
       }
@@ -1234,7 +1256,7 @@ export default function App() {
         newRemaining = sorted.slice(1);
       } else {
         // Strict random selection with Math.floor(Math.random() * length) and atomic splice
-        const randomIndex = Math.floor(Math.random() * prevRemaining.length);
+        const randomIndex = secureRandomInt(prevRemaining.length);
         chosenNumber = prevRemaining[randomIndex];
         newRemaining = [...prevRemaining];
         newRemaining.splice(randomIndex, 1);

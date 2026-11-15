@@ -25,6 +25,8 @@ import {
   limit,
   startAfter,
   documentId,
+  Timestamp,
+  writeBatch,
   FieldValue,
   QueryDocumentSnapshot,
   QuerySnapshot,
@@ -322,7 +324,7 @@ function initConnectionMonitor(): void {
   }, 5000);
 
   // Bootstrap persisted IndexedDB games and pending Save Queue on startup
-  void bootstrapOfflineFirstEngine();
+  bootstrapPromise = bootstrapOfflineFirstEngine();
 }
 
 const STORAGE_KEY_DELETED_GAME_IDS = 'bingo_admin_deleted_game_ids_v2';
@@ -386,26 +388,140 @@ function persistClearedSequenceBarIds(): void {
   }
 }
 
+// ============================================================================
+// SESIÓN ACTUAL (la define useAuth con Firebase Authentication + perfil de Firestore)
+// ============================================================================
+
+export interface StorageSessionContext {
+  uid: string;
+  isAdmin: boolean;
+  email?: string;
+  name?: string;
+}
+
+let sessionCtx: StorageSessionContext | null = null;
+let bootstrapPromise: Promise<void> = Promise.resolve();
+const CACHE_OWNER_KEY = 'bingo_games_cache_owner_v3';
+const SYNC_META_KEY_PREFIX = 'bingo_games_sync_meta_v3_';
+
+function getCacheOwnerKey(ctx: StorageSessionContext | null): string {
+  if (!ctx) return '';
+  return (ctx.isAdmin ? 'admin_' : 'op_') + ctx.uid;
+}
+
+export function getStorageSessionContext(): StorageSessionContext | null {
+  return sessionCtx;
+}
+
+/**
+ * Solo sirve para mostrar u ocultar botones. La protección real la hacen las reglas de Firestore.
+ */
 export function isCurrentSessionAdmin(): boolean {
-  if (typeof window === 'undefined') return false;
+  return Boolean(sessionCtx && sessionCtx.isAdmin);
+}
+
+function isGameVisibleForSession(game: Partial<GameSequenceItem> | null | undefined): boolean {
+  if (!game || !sessionCtx) return false;
+  if (sessionCtx.isAdmin) return true;
+  const owner = (game as GameSequenceItem).ownerUid;
+  if (owner) return owner === sessionCtx.uid;
+  return isGameOfOperator(game as GameSequenceItem, {
+    id: sessionCtx.uid,
+    uid: sessionCtx.uid,
+    name: sessionCtx.name || '',
+    email: sessionCtx.email || '',
+    role: 'operator',
+    status: 'active',
+  } as AppUser);
+}
+
+function isTaskForCurrentSession(task: QueuedSaveTask): boolean {
+  if (!sessionCtx || !task || !task.game) return false;
+  if (sessionCtx.isAdmin) return true;
+  return !task.game.ownerUid || task.game.ownerUid === sessionCtx.uid;
+}
+
+/**
+ * Lo llama useAuth cada vez que cambia el usuario (o su rango).
+ * Las operadoras solo cargan sus partidas; los administradores cargan todas.
+ */
+export function setStorageSessionContext(ctx: StorageSessionContext | null): void {
+  const prevKey = getCacheOwnerKey(sessionCtx);
+  const nextKey = getCacheOwnerKey(ctx);
+  sessionCtx = ctx ? { ...ctx } : null;
+  if (prevKey === nextKey) return;
+
+  // Cambió el usuario: se detiene la sincronización anterior y se aíslan los datos
+  stopRemoteSync();
+  firestoreGamesMemoryStore.clear();
+  hasSyncedWithFirestore = false;
   try {
-    const saved = safeGetItem('bingo_current_user_session');
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      if (parsed && typeof parsed === 'object') {
-        if (parsed.role === 'admin') return true;
-        if (
-          typeof parsed.email === 'string' &&
-          ADMIN_EMAILS_LIST.includes(parsed.email.trim().toLowerCase())
-        ) {
-          return true;
-        }
-      }
-    }
+    safeRemoveItem(STORAGE_KEY_SAVED_GAMES_GALLERY);
   } catch {
     // ignore
   }
-  return false;
+  notifySavedGamesSubscribers(true);
+
+  if (!ctx) return;
+  void (async () => {
+    await prepareLocalCacheForSession(nextKey);
+    if (getCacheOwnerKey(sessionCtx) !== nextKey) return;
+    if (savedGamesSubscribers.size > 0) {
+      startRemoteSync();
+    }
+    if (syncQueueMap.size > 0) {
+      void processSaveQueue();
+    }
+  })();
+}
+
+async function prepareLocalCacheForSession(ownerKey: string): Promise<void> {
+  try {
+    await bootstrapPromise;
+  } catch {
+    // ignore
+  }
+  if (getCacheOwnerKey(sessionCtx) !== ownerKey) return;
+
+  let previousOwner = '';
+  try {
+    previousOwner = safeGetItem(CACHE_OWNER_KEY) || '';
+  } catch {
+    previousOwner = '';
+  }
+
+  try {
+    const localGames = await getAllGamesFromIndexedDB();
+    if (previousOwner !== ownerKey) {
+      // Otra cuenta (o la versión anterior) usó este dispositivo: se borra solo la copia LOCAL
+      for (const g of localGames) {
+        if (g && g.id && !syncQueueMap.has(g.id)) {
+          await deleteGameFromIndexedDB(g.id);
+        }
+      }
+      safeRemoveItem(SYNC_META_KEY_PREFIX + ownerKey);
+      safeSetItem(CACHE_OWNER_KEY, ownerKey);
+    } else {
+      for (const g of localGames) {
+        if (!g || !g.id || deletedGameIdsSet.has(g.id)) continue;
+        if (!isGameVisibleForSession(g)) continue;
+        const { normalizedGame } = normalizeGameFolderMetadata(g, g.id);
+        if (!firestoreGamesMemoryStore.has(normalizedGame.id!)) {
+          firestoreGamesMemoryStore.set(normalizedGame.id!, normalizedGame);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[OFFLINE_ENGINE] Copia local no disponible:', err);
+  }
+
+  if (getCacheOwnerKey(sessionCtx) !== ownerKey) return;
+  syncQueueMap.forEach((task, id) => {
+    if (task && task.game && isGameVisibleForSession(task.game)) {
+      firestoreGamesMemoryStore.set(id, normalizeGameFolderMetadata(task.game, id).normalizedGame);
+    }
+  });
+  notifySavedGamesSubscribers(false);
 }
 
 async function bootstrapOfflineFirstEngine(): Promise<void> {
@@ -440,37 +556,7 @@ async function bootstrapOfflineFirstEngine(): Promise<void> {
       // ignore
     }
 
-    // 1. Load all locally saved games from IndexedDB into memory store immediately
-    const localGames = await getAllGamesFromIndexedDB();
-    for (const g of localGames) {
-      if (g && g.id) {
-        if (deletedGameIdsSet.has(g.id)) {
-          void deleteGameFromIndexedDB(g.id);
-          continue;
-        }
-        const { normalizedGame } = normalizeGameFolderMetadata(g, g.id);
-        if (deletedGameIdsSet.has(normalizedGame.id!)) {
-          void deleteGameFromIndexedDB(normalizedGame.id!);
-          continue;
-        }
-        if (!firestoreGamesMemoryStore.has(normalizedGame.id!)) {
-          firestoreGamesMemoryStore.set(normalizedGame.id!, normalizedGame);
-        }
-      }
-    }
-
-    if (localGames.length > 0) {
-      cachedSortedGames = sortGamesChronologicallyDesc(
-        Array.from(firestoreGamesMemoryStore.values())
-      );
-      savedGamesSubscribers.forEach((sub) => {
-        try {
-          sub(cachedSortedGames);
-        } catch {
-          // ignore
-        }
-      });
-    }
+    // 1. Las partidas locales se cargan cuando se conoce el usuario (prepareLocalCacheForSession)
 
     // 2. Load any pending tasks from IndexedDB Save Queue and resume processing
     const pendingTasks = await getAllQueueTasksFromIndexedDB();
@@ -482,7 +568,9 @@ async function bootstrapOfflineFirstEngine(): Promise<void> {
           nextRetryAt: Date.now(),
         });
         const { normalizedGame } = normalizeGameFolderMetadata(task.game, task.gameId);
-        firestoreGamesMemoryStore.set(task.gameId, normalizedGame);
+        if (isGameVisibleForSession(normalizedGame)) {
+          firestoreGamesMemoryStore.set(task.gameId, normalizedGame);
+        }
       }
     }
 
@@ -1064,223 +1152,83 @@ let activeFirestoreUnsubscribe: (() => void) | null = null;
 let cachedSortedGames: GameSequenceItem[] = [];
 let activeHistoricalHydrationPromise: Promise<void> | null = null;
 
-/**
- * Generates recent YYYY-MM-DD date keys (today and the past N-1 days) in chunks of 10
- * for Firestore `where('dailyDate', 'in', chunk)` queries.
- */
-function buildRecentDateChunks(totalDays = 60, chunkSize = 10): string[][] {
-  const keys: string[] = [];
-  const base = new Date();
-  for (let i = 0; i < totalDays; i++) {
-    const d = new Date(base);
-    d.setDate(base.getDate() - i);
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    keys.push(`${y}-${m}-${day}`);
-  }
-  const chunks: string[][] = [];
-  for (let i = 0; i < keys.length; i += chunkSize) {
-    chunks.push(keys.slice(i, i + chunkSize));
-  }
-  return chunks;
+// ============================================================================
+// SINCRONIZACIÓN EFICIENTE CON FIRESTORE
+// - Administradores: reciben TODAS las partidas de todas las operadoras.
+// - Operadoras: reciben SOLO sus partidas (campo ownerUid).
+// - La primera vez en cada dispositivo se descarga el historial por páginas y se guarda en el
+//   dispositivo (IndexedDB). Después solo se descargan las partidas nuevas o modificadas,
+//   y en vivo solo se escuchan las partidas de HOY. Así se ahorran lecturas y datos.
+// ============================================================================
+
+const SYNC_PAGE_SIZE = 150;
+const SYNC_OVERLAP_MS = 2 * 60 * 1000;
+const OPERATOR_FULL_RESYNC_MS = 7 * 24 * 60 * 60 * 1000;
+
+interface GamesSyncMeta {
+  lastFullSyncAt: number;
+  lastServerUpdateMs: number;
+  lastDeletionMs: number;
+  lastDeltaDay: string;
+  lastHintMs: number;
 }
 
-/**
- * Fetches all documents from `saved_games` using selective `where(...)` partitions
- * so Firestore Enterprise's `$match` pipeline stage filters documents BEFORE the in-memory `$sort` stage.
- * This guarantees no query ever hits the 128.00 MiB query memory limit while retrieving 100% of
- * all operator folders, date subfolders, and historical games up to the present date.
- */
-async function fetchAllSavedGamesDocsPaginated(
-  _pageSize = 60,
-  onPageLoaded?: (docs: QueryDocumentSnapshot<DocumentData>[]) => void
-): Promise<QueryDocumentSnapshot<DocumentData>[]> {
-  const allDocs: QueryDocumentSnapshot<DocumentData>[] = [];
-  const seenDocIds = new Set<string>();
-  const colRef = collection(db, 'saved_games');
+const EMPTY_SYNC_META: GamesSyncMeta = {
+  lastFullSyncAt: 0,
+  lastServerUpdateMs: 0,
+  lastDeletionMs: 0,
+  lastDeltaDay: '',
+  lastHintMs: 0,
+};
 
-  const collectSnapshotDocs = (docs: QueryDocumentSnapshot<DocumentData>[]) => {
-    const fresh: QueryDocumentSnapshot<DocumentData>[] = [];
-    for (const docSnap of docs) {
-      if (!seenDocIds.has(docSnap.id)) {
-        seenDocIds.add(docSnap.id);
-        allDocs.push(docSnap);
-        fresh.push(docSnap);
-      }
+function readSyncMeta(): GamesSyncMeta {
+  if (!sessionCtx) return { ...EMPTY_SYNC_META };
+  try {
+    const raw = safeGetItem(SYNC_META_KEY_PREFIX + getCacheOwnerKey(sessionCtx));
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') return { ...EMPTY_SYNC_META, ...parsed };
     }
-    if (fresh.length > 0 && onPageLoaded) {
-      onPageLoaded(fresh);
-    }
-  };
+  } catch {
+    // ignore
+  }
+  return { ...EMPTY_SYNC_META };
+}
 
-  // Helper to fetch a round range with automatic binary splitting if a range ever exceeds memory limits
-  const fetchRoundRange = async (minR: number, maxR: number): Promise<void> => {
+function writeSyncMeta(patch: Partial<GamesSyncMeta>): void {
+  if (!sessionCtx) return;
+  try {
+    const next = { ...readSyncMeta(), ...patch };
+    safeSetItem(SYNC_META_KEY_PREFIX + getCacheOwnerKey(sessionCtx), JSON.stringify(next));
+  } catch {
+    // ignore
+  }
+}
+
+function timestampToMs(value: unknown): number {
+  if (!value) return 0;
+  if (typeof value === 'number') return value;
+  const v = value as { toMillis?: () => number; seconds?: number };
+  if (typeof v.toMillis === 'function') {
     try {
-      const q: Query<DocumentData> =
-        minR === maxR
-          ? query(colRef, where('round', '==', minR))
-          : query(colRef, where('round', '>=', minR), where('round', '<=', maxR));
-      const snap: QuerySnapshot<DocumentData> = await getDocs(q);
-      if (!snap.empty) {
-        collectSnapshotDocs(snap.docs);
-      }
-    } catch (err) {
-      if (minR < maxR) {
-        const mid = Math.floor((minR + maxR) / 2);
-        await fetchRoundRange(minR, mid);
-        await fetchRoundRange(mid + 1, maxR);
-      } else {
-        // Fallback split by mode ('75' / '90') if a single round number ever exceeds memory
-        try {
-          const [snap75, snap90] = await Promise.all([
-            getDocs(query(colRef, where('round', '==', minR), where('mode', '==', '75'))),
-            getDocs(query(colRef, where('round', '==', minR), where('mode', '==', '90'))),
-          ]);
-          collectSnapshotDocs([...snap75.docs, ...snap90.docs]);
-        } catch (innerErr) {
-          console.warn(`[PARTITION_FETCH] Notice for round ${minR}:`, innerErr);
-        }
-      }
+      return v.toMillis();
+    } catch {
+      return 0;
     }
-  };
-
-  // 1. Fast pass by recent 60 calendar days (in 10-day `in` chunks) so recent subfolders appear immediately
-  const dateChunks = buildRecentDateChunks(60, 10);
-  for (let i = 0; i < dateChunks.length; i += 2) {
-    const batch = dateChunks.slice(i, i + 2);
-    await Promise.all(
-      batch.map(async (chunk) => {
-        try {
-          const snap: QuerySnapshot<DocumentData> = await getDocs(
-            query(colRef, where('dailyDate', 'in', chunk))
-          );
-          if (!snap.empty) {
-            collectSnapshotDocs(snap.docs);
-          }
-        } catch {
-          // If a 10-day chunk is large, fetch day-by-day
-          for (const dayKey of chunk) {
-            try {
-              const daySnap: QuerySnapshot<DocumentData> = await getDocs(
-                query(colRef, where('dailyDate', '==', dayKey))
-              );
-              if (!daySnap.empty) {
-                collectSnapshotDocs(daySnap.docs);
-              }
-            } catch {
-              // Handled by full round partition sweep below
-            }
-          }
-        }
-      })
-    );
   }
-
-  // 2. Complete mathematical partition sweep across ALL `round` values (-∞ to +∞)
-  // Covers 100% of all historical games from every date and every operator
-  const roundPartitions: Array<[number, number]> = [
-    [1, 1],
-    [2, 2],
-    [3, 3],
-    [4, 4],
-    [5, 5],
-    [6, 6],
-    [7, 7],
-    [8, 8],
-    [9, 9],
-    [10, 10],
-    [11, 12],
-    [13, 14],
-    [15, 16],
-    [17, 19],
-    [20, 22],
-    [23, 26],
-    [27, 31],
-    [32, 38],
-    [39, 48],
-    [49, 65],
-    [66, 95],
-    [96, 150],
-    [151, 300],
-  ];
-
-  for (let i = 0; i < roundPartitions.length; i += 3) {
-    const batch = roundPartitions.slice(i, i + 3);
-    await Promise.all(batch.map(([minR, maxR]) => fetchRoundRange(minR, maxR)));
-  }
-
-  // Also cover boundary rounds (<= 0 and > 300)
-  await Promise.all([
-    getDocs(query(colRef, where('round', '<=', 0)))
-      .then((s) => {
-        if (!s.empty) collectSnapshotDocs(s.docs);
-      })
-      .catch(() => {}),
-    getDocs(query(colRef, where('round', '>', 300)))
-      .then((s) => {
-        if (!s.empty) collectSnapshotDocs(s.docs);
-      })
-      .catch(() => {}),
-  ]);
-
-  return allDocs;
+  if (typeof v.seconds === 'number') return v.seconds * 1000;
+  return 0;
 }
 
-function ingestRemoteGameDoc(docKey: string, rawData: GameSequenceItem): void {
-  if (deletedGameIdsSet.has(docKey) || (rawData.id && deletedGameIdsSet.has(rawData.id))) {
-    firestoreGamesMemoryStore.delete(docKey);
-    void deleteGameFromIndexedDB(docKey);
-    return;
-  }
+let activeTodayUnsubscribe: (() => void) | null = null;
+let activeTodayKey = '';
+let dayWatchTimer: ReturnType<typeof setInterval> | null = null;
+let pendingStopTimer: ReturnType<typeof setTimeout> | null = null;
+let activeSyncRun: Promise<void> | null = null;
+let syncGeneration = 0;
 
-  const pendingTask = syncQueueMap.get(docKey);
-  if (pendingTask && pendingTask.status !== 'synced') {
-    firestoreGamesMemoryStore.set(docKey, pendingTask.game);
-    return;
-  }
-
-  const { normalizedGame, isMisplaced, reason } = normalizeGameFolderMetadata(
-    { ...rawData, id: docKey },
-    docKey
-  );
-
-  if (isMisplaced && !inFlightAutoHealIds.has(docKey)) {
-    inFlightAutoHealIds.add(docKey);
-    console.log(
-      `[AUTO-CORRECTION] ${reason || 'Reorganización de subcarpeta'}. Partida ID: ${docKey}, Fecha exacta: ${normalizedGame.dailyDate}, Subcarpeta: ${normalizedGame.subfolderDay}, Ruta: ${normalizedGame.folderPath}`
-    );
-    setDoc(
-      doc(db, 'saved_games', docKey),
-      {
-        id: docKey,
-        dailyDate: normalizedGame.dailyDate,
-        subfolderDay: normalizedGame.subfolderDay,
-        folderPath: normalizedGame.folderPath,
-        operatorFolder: normalizedGame.operatorFolder,
-        operatorName: normalizedGame.operatorName,
-        dateFormatted: normalizedGame.dateFormatted,
-      },
-      { merge: true }
-    )
-      .catch((err) => {
-        console.warn(`[AUTO-CORRECTION] Error syncing auto-healed game ${docKey}:`, err);
-      })
-      .finally(() => {
-        setTimeout(() => inFlightAutoHealIds.delete(docKey), 3000);
-      });
-  }
-
-  firestoreGamesMemoryStore.set(docKey, normalizedGame);
-  void saveGameToIndexedDB(normalizedGame);
-}
-
-function broadcastMemoryStoreToSubscribers(): void {
-  hasSyncedWithFirestore = true;
-  cachedSortedGames = sortGamesChronologicallyDesc(
-    Array.from(firestoreGamesMemoryStore.values())
-  );
-
+function notifySavedGamesSubscribers(emitWindowEvent: boolean): void {
+  cachedSortedGames = sortGamesChronologicallyDesc(Array.from(firestoreGamesMemoryStore.values()));
   syncTemporaryLocalCache(cachedSortedGames);
   savedGamesSubscribers.forEach((sub) => {
     try {
@@ -1289,70 +1237,389 @@ function broadcastMemoryStoreToSubscribers(): void {
       console.warn('Error in saved_games subscriber callback:', cbErr);
     }
   });
+  if (emitWindowEvent && typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent('bingo_saved_games_updated', { detail: { total: cachedSortedGames.length } })
+    );
+  }
 }
 
-export async function hydrateAllHistoricalGamesInPages(): Promise<void> {
-  if (typeof window === 'undefined') return;
-  if (activeHistoricalHydrationPromise) {
-    return activeHistoricalHydrationPromise;
+function stopRemoteSync(): void {
+  syncGeneration++;
+  if (pendingStopTimer) {
+    clearTimeout(pendingStopTimer);
+    pendingStopTimer = null;
   }
-  activeHistoricalHydrationPromise = (async () => {
+  if (activeTodayUnsubscribe) {
     try {
-      await fetchAllSavedGamesDocsPaginated(60, (pageDocs) => {
-        updateSyncStatus({ isFirestoreReachable: true });
-        for (const docSnap of pageDocs) {
-          ingestRemoteGameDoc(docSnap.id, docSnap.data() as GameSequenceItem);
+      activeTodayUnsubscribe();
+    } catch {
+      // ignore
+    }
+    activeTodayUnsubscribe = null;
+  }
+  activeTodayKey = '';
+  if (dayWatchTimer) {
+    clearInterval(dayWatchTimer);
+    dayWatchTimer = null;
+  }
+  activeSyncRun = null;
+}
+
+function ingestRemoteGameDoc(docKey: string, rawData: GameSequenceItem): number {
+  const updatedMs = timestampToMs((rawData as unknown as { updatedAt?: unknown }).updatedAt);
+  if (deletedGameIdsSet.has(docKey) || (rawData.id && deletedGameIdsSet.has(rawData.id))) {
+    firestoreGamesMemoryStore.delete(docKey);
+    void deleteGameFromIndexedDB(docKey);
+    return updatedMs;
+  }
+
+  const pendingTask = syncQueueMap.get(docKey);
+  if (pendingTask && pendingTask.status !== 'synced') {
+    firestoreGamesMemoryStore.set(docKey, pendingTask.game);
+    return updatedMs;
+  }
+
+  // Solo se ordena en memoria (ya no se escriben correcciones en Firestore desde cada dispositivo)
+  const { normalizedGame } = normalizeGameFolderMetadata({ ...rawData, id: docKey }, docKey);
+  firestoreGamesMemoryStore.set(docKey, normalizedGame);
+  void saveGameToIndexedDB(normalizedGame);
+  return updatedMs;
+}
+
+function removeGameLocally(docKey: string): void {
+  if (syncQueueMap.has(docKey)) return;
+  firestoreGamesMemoryStore.delete(docKey);
+  void deleteGameFromIndexedDB(docKey);
+}
+
+function broadcastMemoryStoreToSubscribers(): void {
+  hasSyncedWithFirestore = true;
+  notifySavedGamesSubscribers(false);
+}
+
+async function fetchVisibleGamesPage(afterId: string | null): Promise<QuerySnapshot<DocumentData>> {
+  const ctx = sessionCtx!;
+  const colRef = collection(db, 'saved_games');
+  const constraints: any[] = [];
+  if (!ctx.isAdmin) constraints.push(where('ownerUid', '==', ctx.uid));
+  constraints.push(orderBy(documentId()));
+  if (afterId) constraints.push(startAfter(afterId));
+  constraints.push(limit(SYNC_PAGE_SIZE));
+  return getDocs(query(colRef, ...constraints));
+}
+
+/**
+ * Descarga completa (solo la primera vez en cada dispositivo, o cuando un administrador lo pide).
+ */
+async function runFullSync(generation: number, hintMs: number): Promise<void> {
+  if (!sessionCtx) return;
+  const meta = readSyncMeta();
+  const seen = new Set<string>();
+  let maxUpdated = 0;
+  let pages = 0;
+  let afterId: string | null = null;
+
+  const ingestDocs = (docs: QueryDocumentSnapshot<DocumentData>[]) => {
+    docs.forEach((d) => {
+      seen.add(d.id);
+      const ms = ingestRemoteGameDoc(d.id, d.data() as GameSequenceItem);
+      if (ms > maxUpdated) maxUpdated = ms;
+    });
+  };
+
+  try {
+    while (pages < 500) {
+      const snap = await fetchVisibleGamesPage(afterId);
+      if (generation !== syncGeneration) return;
+      updateSyncStatus({ isFirestoreReachable: true });
+      ingestDocs(snap.docs);
+      pages++;
+      broadcastMemoryStoreToSubscribers();
+      if (snap.docs.length < SYNC_PAGE_SIZE) break;
+      afterId = snap.docs[snap.docs.length - 1].id;
+    }
+  } catch (pageErr) {
+    if (pages > 0 || generation !== syncGeneration || !sessionCtx || sessionCtx.isAdmin) throw pageErr;
+    // Respaldo para operadoras: una sola consulta sin paginar
+    const snap = await getDocs(query(collection(db, 'saved_games'), where('ownerUid', '==', sessionCtx.uid)));
+    if (generation !== syncGeneration) return;
+    ingestDocs(snap.docs);
+  }
+
+  if (generation !== syncGeneration) return;
+
+  // Las partidas que ya no existen en la nube (borradas por un administrador) se quitan del dispositivo
+  for (const id of Array.from(firestoreGamesMemoryStore.keys())) {
+    if (!seen.has(id)) removeGameLocally(id);
+  }
+
+  writeSyncMeta({
+    lastFullSyncAt: Date.now(),
+    lastServerUpdateMs: Math.max(maxUpdated, meta.lastServerUpdateMs),
+    lastDeletionMs: Math.max(meta.lastDeletionMs, maxUpdated),
+    lastDeltaDay: getCurrentLocalDateKey(),
+    lastHintMs: Math.max(hintMs, meta.lastHintMs || 0),
+  });
+  broadcastMemoryStoreToSubscribers();
+}
+
+async function applyRemoteDeletions(sinceMs: number, generation: number): Promise<number> {
+  try {
+    return await applyRemoteDeletionsUnsafe(sinceMs, generation);
+  } catch (err) {
+    // Si el registro de borrados aún no está disponible (por ejemplo, reglas sin publicar), se sigue sin él
+    const code = err && typeof err === 'object' && 'code' in err ? String((err as { code?: unknown }).code) : String(err);
+    console.info('[SYNC] Registro de borrados no disponible por ahora:', code);
+    return sinceMs;
+  }
+}
+
+async function applyRemoteDeletionsUnsafe(sinceMs: number, generation: number): Promise<number> {
+  const since = Math.max(0, sinceMs - SYNC_OVERLAP_MS);
+  const snap = await getDocs(
+    query(collection(db, 'deleted_games'), where('deletedAt', '>', Timestamp.fromMillis(since)))
+  );
+  if (generation !== syncGeneration) return sinceMs;
+  let maxMs = sinceMs;
+  snap.docs.forEach((d) => {
+    const data = d.data();
+    const id = (data && typeof data.gameId === 'string' && data.gameId) || d.id;
+    const ms = timestampToMs(data && data.deletedAt);
+    if (ms > maxMs) maxMs = ms;
+    if (syncQueueMap.has(id)) return;
+    deletedGameIdsSet.add(id);
+    removeGameLocally(id);
+  });
+  if (!snap.empty) persistDeletedGameIds();
+  return maxMs;
+}
+
+/**
+ * Administradores: solo se descargan las partidas creadas o modificadas desde la última vez.
+ */
+async function runAdminDeltaSync(generation: number): Promise<void> {
+  const meta = readSyncMeta();
+  const since = Math.max(0, meta.lastServerUpdateMs - SYNC_OVERLAP_MS);
+  const snap = await getDocs(
+    query(collection(db, 'saved_games'), where('updatedAt', '>', Timestamp.fromMillis(since)))
+  );
+  if (generation !== syncGeneration) return;
+  updateSyncStatus({ isFirestoreReachable: true });
+  let maxUpdated = meta.lastServerUpdateMs;
+  snap.docs.forEach((d) => {
+    const ms = ingestRemoteGameDoc(d.id, d.data() as GameSequenceItem);
+    if (ms > maxUpdated) maxUpdated = ms;
+  });
+  const deletionMs = await applyRemoteDeletions(meta.lastDeletionMs, generation);
+  if (generation !== syncGeneration) return;
+  writeSyncMeta({
+    lastServerUpdateMs: maxUpdated,
+    lastDeletionMs: deletionMs,
+    lastDeltaDay: getCurrentLocalDateKey(),
+  });
+}
+
+function dayKeysBetween(fromDay: string, toDay: string, maxDays: number): string[] {
+  const keys: string[] = [];
+  const end = new Date(toDay + 'T12:00:00');
+  let start = fromDay ? new Date(fromDay + 'T12:00:00') : new Date(end.getTime());
+  if (isNaN(start.getTime())) start = new Date(end.getTime());
+  start.setDate(start.getDate() - 1); // también el día anterior (turnos de noche)
+  const cursor = new Date(end.getTime());
+  while (cursor.getTime() >= start.getTime() && keys.length < maxDays) {
+    const y = cursor.getFullYear();
+    const m = String(cursor.getMonth() + 1).padStart(2, '0');
+    const dd = String(cursor.getDate()).padStart(2, '0');
+    keys.push(y + '-' + m + '-' + dd);
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return keys;
+}
+
+/**
+ * Operadoras: se revisan solo los días recientes de SUS partidas.
+ */
+async function runOperatorDeltaSync(generation: number): Promise<void> {
+  const ctx = sessionCtx!;
+  const meta = readSyncMeta();
+  const today = getCurrentLocalDateKey();
+  const days = dayKeysBetween(meta.lastDeltaDay, today, 8);
+  const colRef = collection(db, 'saved_games');
+  for (const day of days) {
+    const snap = await getDocs(query(colRef, where('ownerUid', '==', ctx.uid), where('dailyDate', '==', day)));
+    if (generation !== syncGeneration) return;
+    updateSyncStatus({ isFirestoreReachable: true });
+    const serverIds = new Set<string>();
+    snap.docs.forEach((d) => {
+      serverIds.add(d.id);
+      ingestRemoteGameDoc(d.id, d.data() as GameSequenceItem);
+    });
+    firestoreGamesMemoryStore.forEach((g, id) => {
+      if (!serverIds.has(id) && g && g.ownerUid === ctx.uid && getGameNormalizedDateKey(g) === day) {
+        removeGameLocally(id);
+      }
+    });
+  }
+  const deletionMs = await applyRemoteDeletions(meta.lastDeletionMs, generation);
+  if (generation !== syncGeneration) return;
+  writeSyncMeta({ lastDeletionMs: deletionMs, lastDeltaDay: today });
+}
+
+async function runSyncCycle(): Promise<void> {
+  if (!sessionCtx || typeof window === 'undefined') return;
+  if (activeSyncRun) return activeSyncRun;
+  const generation = syncGeneration;
+
+  const run = (async () => {
+    try {
+      const meta = readSyncMeta();
+      if (sessionCtx!.isAdmin) {
+        if (!meta.lastFullSyncAt) {
+          await runFullSync(generation, 0);
+        } else {
+          await runAdminDeltaSync(generation);
         }
-        broadcastMemoryStoreToSubscribers();
-      });
+      } else {
+        let hintMs = 0;
+        try {
+          const hint = await getDoc(doc(db, 'sync_hints', sessionCtx!.uid));
+          if (hint.exists()) hintMs = timestampToMs(hint.data().fullResyncAt);
+        } catch {
+          hintMs = 0;
+        }
+        if (generation !== syncGeneration) return;
+        const needsFull =
+          !meta.lastFullSyncAt ||
+          Date.now() - meta.lastFullSyncAt > OPERATOR_FULL_RESYNC_MS ||
+          hintMs > (meta.lastHintMs || 0);
+        if (needsFull) {
+          await runFullSync(generation, hintMs);
+        } else {
+          try {
+            await runOperatorDeltaSync(generation);
+          } catch (deltaErr) {
+            console.warn('[SYNC] Revisión rápida no disponible, se usa descarga completa:', deltaErr);
+            if (generation === syncGeneration) await runFullSync(generation, hintMs);
+          }
+        }
+      }
+      if (generation === syncGeneration) broadcastMemoryStoreToSubscribers();
+    } catch (err) {
+      console.warn('[SYNC] Sincronización de partidas pendiente:', err);
+      if (generation === syncGeneration) updateSyncStatus({ isFirestoreReachable: false });
     } finally {
-      activeHistoricalHydrationPromise = null;
+      if (generation === syncGeneration) activeSyncRun = null;
     }
   })();
 
-  return activeHistoricalHydrationPromise;
+  activeSyncRun = run;
+  return run;
 }
 
-function ensureSharedSavedGamesListener(): void {
-  if (activeFirestoreUnsubscribe || typeof window === 'undefined') return;
-  initConnectionMonitor();
-
-  // 1. Load all historical games in partitioned batches so we never exceed Firestore's 128 MiB query limit
-  void hydrateAllHistoricalGamesInPages();
-
-  // 2. Attach real-time listener for recent days (last 7 days) so live updates across all operators are instant
+function startTodayListener(): void {
+  if (!sessionCtx) return;
+  const today = getCurrentLocalDateKey();
+  if (activeTodayUnsubscribe && activeTodayKey === today) return;
+  if (activeTodayUnsubscribe) {
+    try {
+      activeTodayUnsubscribe();
+    } catch {
+      // ignore
+    }
+    activeTodayUnsubscribe = null;
+  }
+  activeTodayKey = today;
+  const generation = syncGeneration;
+  const colRef = collection(db, 'saved_games');
+  const todayQuery = sessionCtx.isAdmin
+    ? query(colRef, where('dailyDate', '==', today))
+    : query(colRef, where('ownerUid', '==', sessionCtx.uid), where('dailyDate', '==', today));
   try {
-    const recentWeekKeys = buildRecentDateChunks(7, 7)[0] || [getCurrentLocalDateKey()];
-    const boundedRealtimeQuery = query(
-      collection(db, 'saved_games'),
-      where('dailyDate', 'in', recentWeekKeys)
-    );
-    activeFirestoreUnsubscribe = onSnapshot(
-      boundedRealtimeQuery,
+    activeTodayUnsubscribe = onSnapshot(
+      todayQuery,
       (snapshot) => {
+        if (generation !== syncGeneration) return;
         updateSyncStatus({ isFirestoreReachable: true });
-
+        let hasRemoved = false;
         snapshot.docChanges().forEach((change) => {
-          const docKey = change.doc.id;
           if (change.type === 'removed') {
-            if (!syncQueueMap.has(docKey)) {
-              firestoreGamesMemoryStore.delete(docKey);
-            }
+            hasRemoved = true;
             return;
           }
-          ingestRemoteGameDoc(docKey, change.doc.data() as GameSequenceItem);
+          ingestRemoteGameDoc(change.doc.id, change.doc.data() as GameSequenceItem);
         });
-
         broadcastMemoryStoreToSubscribers();
+        if (hasRemoved) void runSyncCycle();
       },
       (error) => {
-        console.warn('Firestore saved_games subscription notice:', error);
+        console.warn('[SYNC] Escucha en vivo de hoy pendiente:', error);
         updateSyncStatus({ isFirestoreReachable: false });
       }
     );
   } catch (err) {
-    console.warn('Could not initialize shared saved_games subscription:', err);
+    console.warn('[SYNC] No se pudo iniciar la escucha en vivo:', err);
   }
+}
+
+function startRemoteSync(): void {
+  if (!sessionCtx || typeof window === 'undefined') return;
+  initConnectionMonitor();
+  startTodayListener();
+  void runSyncCycle();
+  if (!dayWatchTimer) {
+    dayWatchTimer = setInterval(() => {
+      if (!sessionCtx || !activeTodayUnsubscribe) return;
+      if (activeTodayKey !== getCurrentLocalDateKey()) {
+        startTodayListener();
+        void runSyncCycle();
+      }
+    }, 60000);
+  }
+}
+
+function ensureSharedSavedGamesListener(): void {
+  if (!sessionCtx || typeof window === 'undefined') return;
+  if (!activeTodayUnsubscribe) startRemoteSync();
+}
+
+/**
+ * Descarga de apoyo SOLO para borrados de administradores.
+ * - Con fecha: solo las partidas de ese día.
+ * - Sin fecha: si el administrador ya tiene todo el historial en el dispositivo, no descarga nada.
+ */
+async function fetchAllSavedGamesDocsPaginated(
+  _pageSize = 60,
+  onPageLoaded?: (docs: QueryDocumentSnapshot<DocumentData>[]) => void,
+  dateKey?: string
+): Promise<QueryDocumentSnapshot<DocumentData>[]> {
+  if (!sessionCtx || !sessionCtx.isAdmin) return [];
+  const colRef = collection(db, 'saved_games');
+  if (dateKey) {
+    const snap = await getDocs(query(colRef, where('dailyDate', '==', dateKey)));
+    if (onPageLoaded && !snap.empty) onPageLoaded(snap.docs);
+    return snap.docs;
+  }
+  if (readSyncMeta().lastFullSyncAt > 0) return [];
+  const all: QueryDocumentSnapshot<DocumentData>[] = [];
+  let afterId: string | null = null;
+  for (let page = 0; page < 500; page++) {
+    const constraints: any[] = [orderBy(documentId())];
+    if (afterId) constraints.push(startAfter(afterId));
+    constraints.push(limit(SYNC_PAGE_SIZE));
+    const snap = await getDocs(query(colRef, ...constraints));
+    all.push(...snap.docs);
+    if (onPageLoaded && !snap.empty) onPageLoaded(snap.docs);
+    if (snap.docs.length < SYNC_PAGE_SIZE) break;
+    afterId = snap.docs[snap.docs.length - 1].id;
+  }
+  return all;
+}
+
+export async function hydrateAllHistoricalGamesInPages(): Promise<void> {
+  if (typeof window === 'undefined' || !sessionCtx) return;
+  ensureSharedSavedGamesListener();
+  await runSyncCycle();
 }
 
 export function subscribeToSavedGamesFirestore(
@@ -1363,13 +1630,15 @@ export function subscribeToSavedGamesFirestore(
   }
 
   savedGamesSubscribers.add(callback);
+  if (pendingStopTimer) {
+    clearTimeout(pendingStopTimer);
+    pendingStopTimer = null;
+  }
   ensureSharedSavedGamesListener();
 
-  if (hasSyncedWithFirestore || firestoreGamesMemoryStore.size > 0) {
+  if (sessionCtx && (hasSyncedWithFirestore || firestoreGamesMemoryStore.size > 0)) {
     try {
-      callback(
-        sortGamesChronologicallyDesc(Array.from(firestoreGamesMemoryStore.values()))
-      );
+      callback(sortGamesChronologicallyDesc(Array.from(firestoreGamesMemoryStore.values())));
     } catch (e) {
       console.warn('Initial subscriber callback error:', e);
     }
@@ -1377,9 +1646,13 @@ export function subscribeToSavedGamesFirestore(
 
   return () => {
     savedGamesSubscribers.delete(callback);
-    if (savedGamesSubscribers.size === 0 && activeFirestoreUnsubscribe) {
-      activeFirestoreUnsubscribe();
-      activeFirestoreUnsubscribe = null;
+    if (savedGamesSubscribers.size === 0) {
+      if (pendingStopTimer) clearTimeout(pendingStopTimer);
+      // Pequeña espera para no cortar y reabrir la conexión cuando la pantalla solo se actualiza
+      pendingStopTimer = setTimeout(() => {
+        pendingStopTimer = null;
+        if (savedGamesSubscribers.size === 0) stopRemoteSync();
+      }, 5000);
     }
   };
 }
@@ -1391,18 +1664,65 @@ let isReorganizationRunning = false;
  * If any game has a date different from the subfolder where it is stored,
  * it is automatically moved to its correct subfolder.
  */
+const reorganizeAttempted = new Set<string>();
+let ownershipDirectoryCache: {
+  at: number;
+  byEmail: Map<string, string>;
+  byLegacy: Map<string, string>;
+  byUid: Set<string>;
+} | null = null;
+
+async function loadOwnershipDirectory() {
+  if (ownershipDirectoryCache && Date.now() - ownershipDirectoryCache.at < 10 * 60 * 1000) {
+    return ownershipDirectoryCache;
+  }
+  const snap = await getDocs(collection(db, 'users'));
+  const byEmail = new Map<string, string>();
+  const byLegacy = new Map<string, string>();
+  const byUid = new Set<string>();
+  snap.forEach((d) => {
+    const data = d.data();
+    if (d.id.startsWith('user_') || d.id.startsWith('admin_')) return; // cuentas antiguas sin Firebase Auth
+    if (data.status === 'deleted') return;
+    byUid.add(d.id);
+    const email = typeof data.email === 'string' ? data.email.trim().toLowerCase() : '';
+    if (email && !byEmail.has(email)) byEmail.set(email, d.id);
+    if (Array.isArray(data.legacyIds)) {
+      data.legacyIds.forEach((lid: unknown) => {
+        if (typeof lid === 'string') byLegacy.set(lid, d.id);
+      });
+    }
+  });
+  ownershipDirectoryCache = { at: Date.now(), byEmail, byLegacy, byUid };
+  return ownershipDirectoryCache;
+}
+
+function resolveOwnerUidForLegacyGame(
+  g: GameSequenceItem,
+  dir: { byEmail: Map<string, string>; byLegacy: Map<string, string>; byUid: Set<string> }
+): string | null {
+  const opUid = g.operatorUid && g.operatorUid !== 'anon' ? g.operatorUid : '';
+  if (opUid && dir.byUid.has(opUid)) return opUid;
+  if (opUid && dir.byLegacy.has(opUid)) return dir.byLegacy.get(opUid) || null;
+  const email = (g.operatorEmail || '').trim().toLowerCase();
+  if (email && dir.byEmail.has(email)) return dir.byEmail.get(email) || null;
+  return null;
+}
+
+/**
+ * SOLO ADMINISTRADORES. Revisa todas las partidas:
+ * - Corrige la subcarpeta si la fecha no coincide.
+ * - Asigna la dueña (ownerUid) a las partidas antiguas para que cada operadora vea las suyas.
+ * Cada partida se corrige una sola vez (no genera escrituras repetidas).
+ */
 export async function reorganizeAndHealAllStoredGames(): Promise<{
   totalChecked: number;
   reorganizedCount: number;
   details: Array<{ id: string; round: number; oldSubfolder: string; newSubfolder: string; reason: string }>;
 }> {
   const details: Array<{ id: string; round: number; oldSubfolder: string; newSubfolder: string; reason: string }> = [];
-  if (isReorganizationRunning) {
-    return {
-      totalChecked: firestoreGamesMemoryStore.size,
-      reorganizedCount: 0,
-      details,
-    };
+  if (isReorganizationRunning || !sessionCtx || !sessionCtx.isAdmin) {
+    return { totalChecked: firestoreGamesMemoryStore.size, reorganizedCount: 0, details };
   }
 
   isReorganizationRunning = true;
@@ -1410,76 +1730,85 @@ export async function reorganizeAndHealAllStoredGames(): Promise<{
   let reorganizedCount = 0;
 
   try {
-    // Always ensure all historical games from Firestore are hydrated before reorganizing
-    await hydrateAllHistoricalGamesInPages();
+    await runSyncCycle();
 
-    const entriesToAudit = Array.from(firestoreGamesMemoryStore.entries());
-    for (const [docKey, rawData] of entriesToAudit) {
-      if (!rawData) continue;
-      if (deletedGameIdsSet.has(docKey) || (rawData.id && deletedGameIdsSet.has(rawData.id))) {
-        firestoreGamesMemoryStore.delete(docKey);
-        void deleteGameFromIndexedDB(docKey);
-        deleteDoc(doc(db, 'saved_games', docKey)).catch(() => {});
-        continue;
-      }
+    let dir: Awaited<ReturnType<typeof loadOwnershipDirectory>> | null = null;
+    try {
+      dir = await loadOwnershipDirectory();
+    } catch (dirErr) {
+      console.warn('[REORGANIZAR] No se pudo leer la lista de usuarios:', dirErr);
+    }
+
+    const updates: Array<{ id: string; patch: Record<string, unknown>; merged: GameSequenceItem; owner: string | null; misplaced: boolean; reason?: string; oldSubfolder: string }> = [];
+
+    for (const [docKey, rawData] of Array.from(firestoreGamesMemoryStore.entries())) {
+      if (!rawData || syncQueueMap.has(docKey)) continue;
       totalChecked++;
-      const { normalizedGame, isMisplaced, reason } = normalizeGameFolderMetadata(
-        { ...rawData, id: docKey },
-        docKey
-      );
+      if (reorganizeAttempted.has(docKey)) continue;
+      reorganizeAttempted.add(docKey);
 
+      const { normalizedGame, isMisplaced, reason } = normalizeGameFolderMetadata({ ...rawData, id: docKey }, docKey);
+      const patch: Record<string, unknown> = {};
       if (isMisplaced) {
-        reorganizedCount++;
-        const oldSubfolder = rawData.subfolderDay || rawData.folderPath || 'desconocida';
-        const newSubfolder = normalizedGame.subfolderDay || normalizedGame.dailyDate || 'desconocida';
+        patch.dailyDate = normalizedGame.dailyDate;
+        patch.subfolderDay = normalizedGame.subfolderDay;
+        patch.folderPath = normalizedGame.folderPath;
+        patch.operatorFolder = normalizedGame.operatorFolder;
+        patch.operatorName = normalizedGame.operatorName;
+        patch.dateFormatted = normalizedGame.dateFormatted;
+      }
+      let owner: string | null = null;
+      if (!normalizedGame.ownerUid && dir) {
+        owner = resolveOwnerUidForLegacyGame(normalizedGame, dir);
+        if (owner) patch.ownerUid = owner;
+      }
+      if (Object.keys(patch).length === 0) continue;
+      patch.updatedAt = serverTimestamp();
+      updates.push({
+        id: docKey,
+        patch,
+        merged: owner ? { ...normalizedGame, ownerUid: owner } : normalizedGame,
+        owner,
+        misplaced: isMisplaced,
+        reason,
+        oldSubfolder: rawData.subfolderDay || rawData.folderPath || 'desconocida',
+      });
+    }
 
-        details.push({
-          id: docKey,
-          round: normalizedGame.round,
-          oldSubfolder,
-          newSubfolder,
-          reason: reason || 'Reorganización a fecha exacta',
+    const ownersToNotify = new Set<string>();
+    for (let i = 0; i < updates.length; i += 400) {
+      const chunk = updates.slice(i, i + 400);
+      try {
+        const batch = writeBatch(db);
+        chunk.forEach((u) => batch.set(doc(db, 'saved_games', u.id), u.patch, { merge: true }));
+        await batch.commit();
+        chunk.forEach((u) => {
+          firestoreGamesMemoryStore.set(u.id, u.merged);
+          void saveGameToIndexedDB(u.merged);
+          if (u.owner) ownersToNotify.add(u.owner);
+          if (u.misplaced) {
+            reorganizedCount++;
+            details.push({
+              id: u.id,
+              round: u.merged.round,
+              oldSubfolder: u.oldSubfolder,
+              newSubfolder: u.merged.subfolderDay || u.merged.dailyDate || 'desconocida',
+              reason: u.reason || 'Reorganización a fecha exacta',
+            });
+          }
         });
-
-        inFlightAutoHealIds.add(docKey);
-        await setDoc(
-          doc(db, 'saved_games', docKey),
-          {
-            id: docKey,
-            dailyDate: normalizedGame.dailyDate,
-            subfolderDay: normalizedGame.subfolderDay,
-            folderPath: normalizedGame.folderPath,
-            operatorFolder: normalizedGame.operatorFolder,
-            operatorName: normalizedGame.operatorName,
-            dateFormatted: normalizedGame.dateFormatted,
-          },
-          { merge: true }
-        )
-          .catch(() => {})
-          .finally(() => {
-            setTimeout(() => inFlightAutoHealIds.delete(docKey), 3000);
-          });
-
-        firestoreGamesMemoryStore.set(docKey, normalizedGame);
-        await saveGameToIndexedDB(normalizedGame);
-      } else {
-        firestoreGamesMemoryStore.set(docKey, normalizedGame);
+      } catch (batchErr) {
+        console.warn('[REORGANIZAR] Lote no aplicado:', batchErr);
+        chunk.forEach((u) => reorganizeAttempted.delete(u.id));
       }
     }
 
-    const sortedGames = sortGamesChronologicallyDesc(
-      Array.from(firestoreGamesMemoryStore.values())
-    );
-    cachedSortedGames = sortedGames;
-    syncTemporaryLocalCache(sortedGames);
-
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(
-        new CustomEvent('bingo_saved_games_updated', {
-          detail: { total: sortedGames.length, reorganizedCount },
-        })
-      );
+    // Avisar a cada operadora que vuelva a descargar su historial (ahora con sus partidas antiguas)
+    for (const ownerUid of Array.from(ownersToNotify)) {
+      setDoc(doc(db, 'sync_hints', ownerUid), { fullResyncAt: serverTimestamp() }, { merge: true }).catch(() => {});
     }
+
+    notifySavedGamesSubscribers(true);
   } catch (err) {
     console.warn('Notice during reorganizeAndHealAllStoredGames:', err);
   } finally {
@@ -1493,6 +1822,7 @@ export async function reorganizeAndHealAllStoredGames(): Promise<{
  * Returns all saved games from the authoritative Offline-First + Firestore memory store.
  */
 export function getSavedGamesGallery(): GameSequenceItem[] {
+  if (!sessionCtx) return [];
   if (hasSyncedWithFirestore || firestoreGamesMemoryStore.size > 0) {
     return sortGamesChronologicallyDesc(
       Array.from(firestoreGamesMemoryStore.values()).filter(
@@ -1533,10 +1863,12 @@ export function getSavedGamesGallery(): GameSequenceItem[] {
   return [];
 }
 
-/**
- * Resolves the existing document ID if a game with the same ID or same
- * (operatorFolder, dailyDate, mode, round, operatorUid) already exists, preventing duplicate records.
- */
+function canSessionWriteGame(g: GameSequenceItem | undefined): boolean {
+  if (!g || !sessionCtx) return false;
+  if (sessionCtx.isAdmin) return true;
+  return Boolean(g.ownerUid && g.ownerUid === sessionCtx.uid);
+}
+
 function resolveExistingOrCanonicalDocId(
   item: GameSequenceItem,
   operatorFolder: string,
@@ -1544,55 +1876,44 @@ function resolveExistingOrCanonicalDocId(
   mode: BingoMode,
   validRound: number
 ): { docId: string; duplicateIdsToClean: string[] } {
-  const existingGames = getSavedGamesGallery();
+  // 1. Edición de una partida ya guardada (mismo ID)
+  if (item.id && syncQueueMap.has(item.id)) {
+    return { docId: item.id, duplicateIdsToClean: [] };
+  }
+  if (item.id && firestoreGamesMemoryStore.has(item.id) && canSessionWriteGame(firestoreGamesMemoryStore.get(item.id))) {
+    return { docId: item.id, duplicateIdsToClean: [] };
+  }
+
+  // 2. Volver a guardar la MISMA ronda del mismo día (misma operadora y modalidad)
   const itemUid = item.operatorUid && item.operatorUid !== 'anon' ? item.operatorUid : null;
-
-  const matchingGames = existingGames.filter((g) => {
-    if (!g) return false;
-    const gDate = getGameNormalizedDateKey(g);
-    const gOp = sanitizeOperatorFolderName(g.operatorFolder || g.operatorName);
-    const gMode: BingoMode = g.mode || (g.sheetType === 'traditional-90' ? '90' : '75');
+  const match = getSavedGamesGallery().find((g) => {
+    if (!g || !g.id) return false;
+    if (!syncQueueMap.has(g.id) && !canSessionWriteGame(firestoreGamesMemoryStore.get(g.id))) return false;
     const gUid = g.operatorUid && g.operatorUid !== 'anon' ? g.operatorUid : null;
-
-    if (itemUid && gUid && itemUid !== gUid) {
-      return false;
-    }
-
+    if (itemUid && gUid && itemUid !== gUid) return false;
+    const gMode: BingoMode = g.mode || (g.sheetType === 'traditional-90' ? '90' : '75');
     return (
-      gDate === dailyDate &&
-      gOp === operatorFolder &&
+      getGameNormalizedDateKey(g) === dailyDate &&
+      sanitizeOperatorFolderName(g.operatorFolder || g.operatorName) === operatorFolder &&
       gMode === mode &&
       g.round === validRound
     );
   });
-
-  const canonicalId = buildCanonicalGameId(
-    operatorFolder,
-    dailyDate,
-    mode,
-    validRound,
-    item.operatorUid
-  );
-
-  const hasExplicitExistingId =
-    Boolean(item.id) && firestoreGamesMemoryStore.has(item.id!);
-
-  let chosenId: string;
-  if (hasExplicitExistingId) {
-    chosenId = item.id!;
-  } else if (matchingGames.length > 0 && matchingGames[0].id) {
-    chosenId = matchingGames[0].id;
-  } else if (item.id && !/^game_\d{10,}_\d+$/.test(item.id)) {
-    chosenId = item.id;
-  } else {
-    chosenId = canonicalId;
+  if (match && match.id) {
+    return { docId: match.id, duplicateIdsToClean: [] };
   }
 
-  const duplicateIdsToClean = matchingGames
-    .map((g) => g.id)
-    .filter((id): id is string => Boolean(id && id !== chosenId));
+  // 3. Partida nueva: ID único. Nunca sobrescribe otra partida aunque coincida el número de ronda.
+  const canonicalId = buildCanonicalGameId(operatorFolder, dailyDate, mode, validRound, item.operatorUid);
+  const uniqueSuffix = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  return { docId: canonicalId + '_' + uniqueSuffix, duplicateIdsToClean: [] };
+}
 
-  return { docId: chosenId, duplicateIdsToClean };
+function resolveOwnerUidForSave(item: GameSequenceItem, docId: string): string {
+  const existing = firestoreGamesMemoryStore.get(docId);
+  if (existing) return existing.ownerUid || item.ownerUid || '';
+  if (item.ownerUid) return item.ownerUid;
+  return sessionCtx ? sessionCtx.uid : '';
 }
 
 // ============================================================================
@@ -1601,6 +1922,7 @@ function resolveExistingOrCanonicalDocId(
 
 interface FirestoreGamePayload {
   id: string;
+  ownerUid: string;
   round: number;
   ballNumber: number;
   ternaBall?: number | null;
@@ -1654,6 +1976,7 @@ function buildFirestorePayloadFromItem(normalizedItem: GameSequenceItem): Firest
 
   const firestorePayload: FirestoreGamePayload = {
     id: normalizedItem.id!,
+    ownerUid: normalizedItem.ownerUid || (sessionCtx && !sessionCtx.isAdmin ? sessionCtx.uid : ''),
     round: normalizedItem.round,
     ballNumber: normalizedItem.ballNumber || 0,
     ternaBall: normalizedItem.ternaBall ?? null,
@@ -1749,6 +2072,9 @@ async function writeAndVerifyGameInFirestore(
     return { verified: false, errorMsg: 'Sin conexión a Internet' };
   }
 
+  if (!game.ownerUid && sessionCtx && !sessionCtx.isAdmin) {
+    game = { ...game, ownerUid: sessionCtx.uid };
+  }
   const docId = game.id!;
   const docRef = doc(db, 'saved_games', docId);
 
@@ -1821,6 +2147,7 @@ async function writeAndVerifyGameInFirestore(
  * - Locks and activeSaveId are unconditionally released in the finally block.
  */
 export async function processSaveQueue(): Promise<void> {
+  if (!sessionCtx) return;
   if (isProcessingQueue) {
     // Watchdog check: if lock has been held longer than QUEUE_WATCHDOG_TIMEOUT_MS, force-release it
     if (queueLockAcquiredAt > 0 && Date.now() - queueLockAcquiredAt > QUEUE_WATCHDOG_TIMEOUT_MS) {
@@ -1853,7 +2180,7 @@ export async function processSaveQueue(): Promise<void> {
 
       // Select all tasks whose retry timer is due (nextRetryAt <= now) and haven't failed in this exact pass
       const readyTasks = Array.from(syncQueueMap.values())
-        .filter((t) => t.nextRetryAt <= now && !attemptedInCurrentPass.has(t.gameId))
+        .filter((t) => t.nextRetryAt <= now && !attemptedInCurrentPass.has(t.gameId) && isTaskForCurrentSession(t))
         .sort((a, b) => {
           // Prioritize newly created games (retryCount === 0) so an old failing game NEVER delays a new game
           if (a.retryCount !== b.retryCount) {
@@ -2104,6 +2431,7 @@ export async function saveGameUnified(
     folderPath,
     operatorName,
     operatorUid: item.operatorUid || 'anon',
+    ownerUid: resolveOwnerUidForSave(item, docId),
     operatorEmail: item.operatorEmail || '',
     dateFormatted: formattedDate,
     timestamp: exactTimestamp,
@@ -2289,6 +2617,13 @@ async function executeBatchGameDeletion(
 
   if (idsToDelete.size === 0) return 0;
 
+  // Se guarda la dueña de cada partida antes de quitarla de memoria (para el registro de borrados)
+  const deletedOwners = new Map<string, string>();
+  idsToDelete.forEach((id) => {
+    const g = firestoreGamesMemoryStore.get(id);
+    deletedOwners.set(id, (g && g.ownerUid) || '');
+  });
+
   // 1. Register tombstones immediately so onSnapshot / auto-heal can NEVER resurrect these games
   for (const docId of idsToDelete) {
     deletedGameIdsSet.add(docId);
@@ -2334,6 +2669,13 @@ async function executeBatchGameDeletion(
       await deleteGameFromIndexedDB(docId);
       try {
         await deleteDoc(doc(db, 'saved_games', docId));
+        // Registro del borrado: los demás dispositivos lo aplican sin volver a descargar todo
+        await setDoc(doc(db, 'deleted_games', docId), {
+          gameId: docId,
+          ownerUid: deletedOwners.get(docId) || '',
+          deletedAt: serverTimestamp(),
+          deletedBy: sessionCtx ? sessionCtx.uid : '',
+        });
       } catch (err) {
         console.warn(`Firestore delete warning for ${docId} (tombstoned locally):`, err);
       }
@@ -2363,9 +2705,12 @@ export async function deleteGamePermanently(idOrItem: string | GameSequenceItem)
     const localIdbGames = await getAllGamesFromIndexedDB();
     const combined = [...current, ...localIdbGames];
 
+    const hasExactIdMatch = Boolean(targetId) && combined.some((g) => Boolean(g && g.id === targetId));
     const matchingItems = combined.filter((g) => {
       if (!g) return false;
       if (targetId && g.id === targetId) return true;
+      // Si la partida existe con su ID, se borra SOLO esa (nunca otras con el mismo número de ronda)
+      if (hasExactIdMatch) return false;
       if (
         targetRound !== undefined &&
         targetDate &&
@@ -2528,7 +2873,7 @@ export async function deleteGamesOfDay(
     }
 
     try {
-      const docs = await fetchAllSavedGamesDocsPaginated(60);
+      const docs = await fetchAllSavedGamesDocsPaginated(60, undefined, dateKey);
       docs.forEach((docSnap) => {
         checkAndCollect(docSnap.id, docSnap.data() as GameSequenceItem);
       });
@@ -2651,29 +2996,53 @@ export function subscribeToUsersCentralized(
   onError?: (err: unknown) => void
 ): () => void {
   if (typeof window === 'undefined') return () => {};
+  if (!sessionCtx || !sessionCtx.isAdmin) {
+    // Las operadoras no pueden ver la lista de usuarios: solo reciben su propio perfil
+    const self: AppUser[] = sessionCtx
+      ? [
+          {
+            id: sessionCtx.uid,
+            uid: sessionCtx.uid,
+            name: sessionCtx.name || 'Operador',
+            email: sessionCtx.email || '',
+            role: 'operator',
+            status: 'active',
+            assignedMode: '75',
+          } as AppUser,
+        ]
+      : [];
+    try {
+      onData(self);
+    } catch {
+      // ignore
+    }
+    return () => {};
+  }
   try {
-    const usersRef = collection(db, 'users');
     return onSnapshot(
-      usersRef,
+      collection(db, 'users'),
       (snapshot) => {
-        const users: AppUser[] = [];
+        const all: Array<{ id: string; data: Record<string, any> }> = [];
         snapshot.forEach((docSnap) => {
-          const data = docSnap.data();
+          all.push({ id: docSnap.id, data: docSnap.data() });
+        });
+        const isLegacyId = (id: string) => id.startsWith('user_') || id.startsWith('admin_');
+        const modernEmails = new Set<string>();
+        all.forEach((u) => {
+          const email = typeof u.data.email === 'string' ? u.data.email.trim().toLowerCase() : '';
+          if (!isLegacyId(u.id) && email && u.data.status !== 'deleted') modernEmails.add(email);
+        });
+
+        const users: AppUser[] = [];
+        all.forEach(({ id, data }) => {
+          if (data.status === 'deleted') return;
           const emailLower = typeof data.email === 'string' ? data.email.trim().toLowerCase() : '';
-          const isEmailAdmin = Boolean(emailLower && ADMIN_EMAILS_LIST.includes(emailLower));
-          const resolvedRole: 'admin' | 'operator' =
-            isEmailAdmin || data.role === 'admin' ? 'admin' : 'operator';
-
-          if (isEmailAdmin && data.role !== 'admin') {
-            updateDoc(doc(db, 'users', docSnap.id), {
-              role: 'admin',
-              assignedMode: 'all',
-            }).catch(() => {});
-          }
-
+          // Cuenta antigua que ya fue migrada a Firebase Authentication: no se duplica en la lista
+          if (isLegacyId(id) && emailLower && modernEmails.has(emailLower)) return;
+          const resolvedRole: 'admin' | 'operator' = data.role === 'admin' ? 'admin' : 'operator';
           users.push({
-            id: docSnap.id,
-            uid: docSnap.id,
+            id,
+            uid: id,
             name: data.name || 'Operador',
             email: data.email || '',
             role: resolvedRole,
@@ -2704,6 +3073,14 @@ export function subscribeToActivityLogsCentralized(
   onError?: (err: unknown) => void
 ): () => void {
   if (typeof window === 'undefined') return () => {};
+  if (!sessionCtx || !sessionCtx.isAdmin) {
+    try {
+      onData([], []);
+    } catch {
+      // ignore
+    }
+    return () => {};
+  }
   try {
     const activityRef = collection(db, 'activity_logs');
     const q = query(activityRef, orderBy('createdAt', 'desc'), limit(120));
@@ -2762,4 +3139,23 @@ export async function updateUserFieldsCentralized(
 ): Promise<void> {
   const userRef = doc(db, 'users', userId);
   await updateDoc(userRef, sanitizeForFirestore(fields));
+}
+
+/**
+ * SOLO ADMINISTRADORES. Elimina un usuario: ya no podrá entrar a la plataforma.
+ * Sus partidas guardadas se conservan para el historial.
+ */
+export async function deleteUserCentralized(userId: string): Promise<void> {
+  if (!sessionCtx || !sessionCtx.isAdmin) {
+    throw new Error('Solo los administradores pueden eliminar usuarios.');
+  }
+  if (userId === sessionCtx.uid) {
+    throw new Error('No puedes eliminar tu propia cuenta.');
+  }
+  await updateDoc(doc(db, 'users', userId), {
+    status: 'deleted',
+    role: 'operator',
+    deletedAt: serverTimestamp(),
+    deletedBy: sessionCtx.uid,
+  });
 }

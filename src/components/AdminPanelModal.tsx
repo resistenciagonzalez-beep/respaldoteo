@@ -46,6 +46,7 @@ import {
   subscribeToUsersCentralized,
   subscribeToActivityLogsCentralized,
   updateUserFieldsCentralized,
+  deleteUserCentralized,
 } from '../utils/savedGamesStorage';
 import { downloadGameDirectJpg, downloadGameDirectPdf } from '../utils/exportGameReport';
 import { GameSheetSnapshotModal } from './GameSheetSnapshotModal';
@@ -263,6 +264,28 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   };
 
   // Operator Assigned Mode toggle handler (Admin management)
+  // Eliminar usuario (solo administradores). Sus partidas guardadas se conservan.
+  const handleDeleteUser = async (user: AppUser) => {
+    if (!isAdmin) return;
+    if (currentUser && user.id === currentUser.id) return;
+    const ok = window.confirm(
+      '¿Eliminar al usuario "' + user.name + '" (' + user.email + ')? Ya no podrá entrar a la plataforma. Sus partidas guardadas se conservan.'
+    );
+    if (!ok) return;
+    try {
+      await deleteUserCentralized(user.id);
+      await logActivity(
+        'Eliminación de Usuario',
+        'status_change',
+        'El administrador eliminó la cuenta de ' + user.name + ' (' + user.email + ')'
+      );
+      showBanner('Usuario ' + user.name + ' eliminado.');
+    } catch (e: unknown) {
+      console.error(e);
+      showBanner('Error al eliminar usuario: ' + (e instanceof Error ? e.message : 'Error'));
+    }
+  };
+
   const handleToggleAssignedMode = async (user: AppUser) => {
     const newMode: '75' | '90' = user.assignedMode === '90' ? '75' : '90';
     try {
@@ -1897,6 +1920,17 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                                 <span>Suspender</span>
                               </>
                             )}
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={isSelf}
+                            onClick={() => handleDeleteUser(user)}
+                            className={'px-2.5 py-1.5 rounded-xl border text-xs font-bold transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer ' + (isSelf ? 'opacity-40 cursor-not-allowed bg-orange-100 border-orange-200' : 'bg-rose-600 hover:bg-rose-700 text-white border-rose-700 shadow-xs')}
+                            title="Eliminar usuario (solo administradores)"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>Eliminar</span>
                           </button>
                         </div>
                       </div>

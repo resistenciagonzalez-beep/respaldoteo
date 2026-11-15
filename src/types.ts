@@ -151,6 +151,7 @@ export interface BingoSheetData {
 export interface OperatorShift {
   id: string; // e.g. "shift_1730000000_operadora"
   operatorUid: string;
+  ownerUid?: string; // UID (Firebase) de la operadora dueña del turno
   operatorName: string;
   operatorEmail?: string;
   startDate: string; // e.g. "26/10/2026"
@@ -232,6 +233,7 @@ export interface ActivityLogItem {
 
 export interface GameSequenceItem {
   id?: string;
+  ownerUid?: string; // UID (Firebase) de la operadora dueña de la partida
   round: number;
   ballNumber: number; // Bingo ball (B)
   ternaBall?: number; // Terna ball (T)

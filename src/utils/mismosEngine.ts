@@ -75,103 +75,66 @@ function sheetHasPlayerCells(sheet?: BingoSheetData | null, targetPlayerIdOrName
 }
 
 /**
- * Retrieves the immediately preceding 75-ball multiplier sheet snapshot.
- * Prioritizes:
- * 1. Explicit override sheet if provided
- * 2. Most recent saved game from Firestore-backed gallery (excluding the currently active in-progress round)
- * 3. In-session previous sheet snapshot
+ * Devuelve la planilla de 75 bolas de la partida guardada INMEDIATAMENTE ANTERIOR
+ * a la partida actual (de la misma operadora). No salta a partidas más viejas.
  */
 export function getImmediatelyPrecedingSheet75(
   currentUser?: AppUser | null,
   overrideSheet?: BingoSheetData | null,
-  targetPlayerIdOrName?: string,
+  _targetPlayerIdOrName?: string,
   currentMatchRound?: number
 ): BingoSheetData | null {
   if (overrideSheet && Array.isArray(overrideSheet.columns) && overrideSheet.columns.length > 0) {
     return overrideSheet;
   }
 
-  const gallery = getSavedGamesGallery();
+  const gallery = getSavedGamesGallery(); // ordenada de la más reciente a la más antigua
   const localToday = getCurrentLocalDateKey();
 
-  // 1. Search Firestore-backed saved games belonging to current operator (most recent dailyDate & round first)
-  if (currentUser) {
-    for (const game of gallery) {
-      if (
-        currentMatchRound !== undefined &&
-        game.round !== undefined &&
-        game.round >= currentMatchRound &&
-        game.dailyDate === localToday
-      ) {
-        continue;
-      }
-      if (!isGameOfOperator(game, currentUser)) continue;
-      if (game.sheet75Snapshot && sheetHasPlayerCells(game.sheet75Snapshot, targetPlayerIdOrName)) {
-        return game.sheet75Snapshot;
-      }
-    }
-  }
-
-  // 2. Check in-session previous sheet archive
-  const archived = getPreviousGameSheet75(currentUser);
-  if (archived && sheetHasPlayerCells(archived, targetPlayerIdOrName)) {
-    return archived;
-  }
-
-  // 3. Search all saved games in Firestore-backed gallery
-  for (const game of gallery) {
+  const previousGame = gallery.find((game) => {
+    if (!game || !game.sheet75Snapshot || !Array.isArray(game.sheet75Snapshot.columns)) return false;
+    if (game.mode === '90' || game.sheetType === 'traditional-90') return false;
+    if (currentUser && !isGameOfOperator(game, currentUser)) return false;
+    // La partida en curso (si ya se guardó) no cuenta como "anterior"
     if (
       currentMatchRound !== undefined &&
-      game.round !== undefined &&
-      game.round >= currentMatchRound &&
-      game.dailyDate === localToday
+      game.dailyDate === localToday &&
+      typeof game.round === 'number' &&
+      game.round >= currentMatchRound
     ) {
-      continue;
+      return false;
     }
-    if (game.sheet75Snapshot && sheetHasPlayerCells(game.sheet75Snapshot, targetPlayerIdOrName)) {
-      return game.sheet75Snapshot;
-    }
+    return true;
+  });
+
+  if (previousGame && previousGame.sheet75Snapshot) {
+    return previousGame.sheet75Snapshot;
   }
 
-  // If targetPlayerIdOrName was specified and not found anywhere, still return latest operator game or archived sheet if it has any cells
-  if (currentUser) {
-    for (const game of gallery) {
-      if (
-        currentMatchRound !== undefined &&
-        game.round !== undefined &&
-        game.round >= currentMatchRound &&
-        game.dailyDate === localToday
-      ) {
-        continue;
-      }
-      if (isGameOfOperator(game, currentUser) && game.sheet75Snapshot && sheetHasPlayerCells(game.sheet75Snapshot)) {
-        return game.sheet75Snapshot;
-      }
-    }
-  }
-
-  if (archived && sheetHasPlayerCells(archived)) {
+  // Respaldo: planilla archivada en este dispositivo al terminar la partida anterior
+  const archived = getPreviousGameSheet75(currentUser);
+  if (archived && Array.isArray(archived.columns) && archived.columns.length > 0) {
     return archived;
   }
-
-  return archived || null;
+  return null;
 }
 
 /**
- * Core Deterministic Engine for "Mismos" Button:
- * Reconstructs the exact distribution of numbers and values each player had in the immediately preceding game.
+ * Motor del botón "MISMOS".
  *
- * Rules:
- * 1. Read previous game snapshot.
- * 2. For each player, identify the exact numbers (rows) and total multiplier/value they had (e.g. 3 X2, 14 X4).
- * 3. In the current game, assign the same numbers with the same values.
- * 4. If a cell of that multiplier is occupied, search the sheet and equalize (e.g. a 3 X4 occupied is equalized with two 3 X2).
- * 5. If all cells of that number are occupied (or there is remaining multiplier needed), automatically open a new column
- *    with the needed multiplier and assign what is needed ("abrir automáticamente una nueva columna y anotar lo que haga falta").
- * 6. NEVER steal numbers from other players.
- * 7. NEVER overwrite existing annotations.
- * 8. If player doesn't exist in current game, auto-create them.
- * 9. 100% deterministic, automated, and faithful replication.
+ * Copia en la partida actual EXACTAMENTE los mismos números con los mismos valores que el jugador
+ * tenía en la partida anterior. Ejemplo: si tenía el 4 en X5, el 2 en X2 y el 5 en X7, se anota
+ * el 4 en una columna X5, el 2 en una X2 y el 5 en una X7.
+ *
+ * Reglas:
+ * 1. Cada casilla anterior se copia con su número y su valor exactos (no se suman valores).
+ * 2. Si la casilla de ese valor ya está ocupada, se busca otra columna del MISMO valor con ese número libre.
+ * 3. Si no hay, se completa el valor combinando casillas libres de ese número que sumen exactamente lo mismo
+ *    (ej.: X5 = X3 + X2).
+ * 4. Si no se puede completar, se abre una columna nueva con ese valor (las que hagan falta).
+ *    Las columnas nuevas se reutilizan para los siguientes números.
+ * 5. Nunca se quitan casillas a otros jugadores ni se sobrescribe nada.
+ * 6. Si el jugador ya tiene ese número con ese valor anotado, no se duplica.
  */
 export function executeMismosReconstruction({
   currentSheet,
@@ -182,68 +145,65 @@ export function executeMismosReconstruction({
 }: {
   currentSheet: BingoSheetData;
   previousSheet: BingoSheetData;
-  targetPlayerIdOrName?: string; // If set, only runs for this player; if unset, runs for all players
+  targetPlayerIdOrName?: string;
   baseCost?: number;
   basePrize?: number;
 }): MismosExecutionResult {
+  const updatedColumns: BingoSheetColumn[] = (currentSheet.columns || []).map((col) => ({
+    ...col,
+    cells: (col.cells || []).map((cell) => ({ ...cell })),
+  }));
+  const updatedPlayers: BingoSheetPlayer[] = (currentSheet.players || []).map((p) => ({ ...p }));
+
+  const emptyResult = (message: string): MismosExecutionResult => ({
+    success: false,
+    totalAssigned: 0,
+    totalTarget: 0,
+    playersProcessed: 0,
+    newPlayersAdded: 0,
+    newColumnsCreated: 0,
+    playerReports: [],
+    updatedColumns,
+    updatedPlayers,
+    message,
+  });
+
   if (!previousSheet || !Array.isArray(previousSheet.columns) || previousSheet.columns.length === 0) {
-    return {
-      success: false,
-      totalAssigned: 0,
-      totalTarget: 0,
-      playersProcessed: 0,
-      newPlayersAdded: 0,
-      newColumnsCreated: 0,
-      playerReports: [],
-      updatedColumns: currentSheet.columns,
-      updatedPlayers: currentSheet.players,
-      message: 'No se encontró la partida anterior para replicar los mismos números.',
-    };
+    return emptyResult('No se encontró la partida anterior para copiar los mismos números.');
   }
 
-  const totalRows = currentSheet.totalRows || 15;
+  const totalRows = currentSheet.totalRows || previousSheet.totalRows || 15;
+  const queryNorm = targetPlayerIdOrName ? normalizePlayerName(targetPlayerIdOrName) : '';
 
-  // Deep clone columns and players to maintain strict immutability
-  const updatedColumns: BingoSheetColumn[] = currentSheet.columns.map((col) => ({
-    ...col,
-    cells: col.cells.map((cell) => ({ ...cell })),
-  }));
-
-  const updatedPlayers: BingoSheetPlayer[] = currentSheet.players.map((p) => ({ ...p }));
-
-  // Helper to find player in current list
-  const findPlayerInCurrent = (id?: string, name?: string): BingoSheetPlayer | undefined => {
-    const normName = normalizePlayerName(name);
-    return updatedPlayers.find(
-      (p) =>
-        (id && p.id === id) ||
-        (normName && normalizePlayerName(p.name) === normName)
-    );
+  const cellBelongsTo = (cell: BingoSheetCell | undefined, id: string, normName: string): boolean => {
+    if (!cell || isCellFree(cell)) return false;
+    if (id && cell.playerId === id) return true;
+    return Boolean(normName && cell.playerName && normalizePlayerName(cell.playerName) === normName);
   };
 
-  // Helper to find player in previous list
-  const findPlayerInPrevious = (id?: string, name?: string): BingoSheetPlayer | undefined => {
-    if (!previousSheet.players) return undefined;
-    const normName = normalizePlayerName(name);
-    return previousSheet.players.find(
-      (p) =>
-        (id && p.id === id) ||
-        (normName && normalizePlayerName(p.name) === normName)
-    );
+  const getRowCell = (col: BingoSheetColumn, rowNum: number): BingoSheetCell | undefined => {
+    const byIndex = col.cells[rowNum - 1];
+    if (byIndex && (byIndex.rowNumber === undefined || byIndex.rowNumber === rowNum)) return byIndex;
+    return col.cells.find((c) => c && c.rowNumber === rowNum) || byIndex;
   };
 
-  // 1. Gather all players to process
+  const getRowIndex = (col: BingoSheetColumn, rowNum: number): number => {
+    const byIndex = col.cells[rowNum - 1];
+    if (byIndex && (byIndex.rowNumber === undefined || byIndex.rowNumber === rowNum)) return rowNum - 1;
+    const found = col.cells.findIndex((c) => c && c.rowNumber === rowNum);
+    return found >= 0 ? found : rowNum - 1;
+  };
+
+  // 1. Jugadores de la partida anterior que tenían casillas
   interface PlayerTarget {
     id: string;
     name: string;
     color: string;
     textColor?: string;
   }
-
   const targetList: PlayerTarget[] = [];
-  const processedKeys = new Set<string>();
+  const seenKeys = new Set<string>();
 
-  // Extract from previous sheet columns to find everyone who had marked cells
   previousSheet.columns.forEach((col) => {
     if (!Array.isArray(col.cells)) return;
     col.cells.forEach((cell) => {
@@ -251,41 +211,29 @@ export function executeMismosReconstruction({
       const pId = cell.playerId || '';
       const pName = cell.playerName || '';
       const key = normalizePlayerName(pName) || pId;
-      if (!key || processedKeys.has(key)) return;
-
-      if (targetPlayerIdOrName) {
-        const queryNorm = normalizePlayerName(targetPlayerIdOrName);
-        const matchesQuery =
-          pId === targetPlayerIdOrName ||
-          normalizePlayerName(pName) === queryNorm;
-        if (!matchesQuery) return;
-      }
-
-      processedKeys.add(key);
-      const prevDef = findPlayerInPrevious(pId, pName);
+      if (!key || seenKeys.has(key)) return;
+      if (targetPlayerIdOrName && pId !== targetPlayerIdOrName && normalizePlayerName(pName) !== queryNorm) return;
+      seenKeys.add(key);
+      const prevDef = (previousSheet.players || []).find(
+        (p) => (pId && p.id === pId) || (pName && normalizePlayerName(p.name) === normalizePlayerName(pName))
+      );
+      const color =
+        cell.color || (prevDef && prevDef.color) || VIBRANT_PLAYER_COLORS[targetList.length % VIBRANT_PLAYER_COLORS.length].hex;
       targetList.push({
-        id: pId || prevDef?.id || `player_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-        name: pName || prevDef?.name || 'Jugador',
-        color: cell.color || prevDef?.color || VIBRANT_PLAYER_COLORS[targetList.length % VIBRANT_PLAYER_COLORS.length].hex,
-        textColor: cell.textColor || prevDef?.textColor || getContrastTextColor(cell.color || '#000000'),
+        id: pId || (prevDef && prevDef.id) || 'player_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
+        name: pName || (prevDef && prevDef.name) || 'Jugador',
+        color,
+        textColor: cell.textColor || (prevDef && prevDef.textColor) || getContrastTextColor(color),
       });
     });
   });
 
-  // If specific target was given but had no cells in previous game
-  if (targetPlayerIdOrName && targetList.length === 0) {
-    return {
-      success: false,
-      totalAssigned: 0,
-      totalTarget: 0,
-      playersProcessed: 0,
-      newPlayersAdded: 0,
-      newColumnsCreated: 0,
-      playerReports: [],
-      updatedColumns,
-      updatedPlayers,
-      message: `No se encontraron casillas previas para "${targetPlayerIdOrName}" en la partida anterior.`,
-    };
+  if (targetList.length === 0) {
+    return emptyResult(
+      targetPlayerIdOrName
+        ? '"' + targetPlayerIdOrName + '" no tenía números anotados en la partida anterior.'
+        : 'La partida anterior no tiene números anotados.'
+    );
   }
 
   let totalAssigned = 0;
@@ -293,16 +241,15 @@ export function executeMismosReconstruction({
   let newPlayersAdded = 0;
   let newColumnsCreated = 0;
   const playerReports: MismosPlayerReport[] = [];
+  const assignedDetail: string[] = [];
 
-  // Helper to assign a specific cell on a column
-  const assignCellToPlayer = (
-    col: BingoSheetColumn,
-    rIdx: number,
-    rowNum: number,
-    player: { id: string; name: string; color: string; textColor?: string }
-  ) => {
-    col.cells[rIdx] = {
-      ...col.cells[rIdx],
+  const assignCell = (col: BingoSheetColumn, rowNum: number, player: PlayerTarget) => {
+    const idx = getRowIndex(col, rowNum);
+    while (col.cells.length <= idx) {
+      col.cells.push({ rowNumber: col.cells.length + 1 });
+    }
+    col.cells[idx] = {
+      ...col.cells[idx],
       rowNumber: rowNum,
       playerId: player.id,
       playerName: player.name,
@@ -312,40 +259,56 @@ export function executeMismosReconstruction({
     };
   };
 
-  // Helper to create a new column with specified multiplier and assign a given row to player
-  const createNewColumnAndAssign = (
-    multiplier: number,
-    rowNum: number,
-    player: { id: string; name: string; color: string; textColor?: string }
-  ) => {
-    const nextColNum = updatedColumns.length + 1;
-    const newColCells: BingoSheetCell[] = [];
-    for (let r = 1; r <= totalRows; r++) {
-      newColCells.push({ rowNumber: r });
-    }
-
+  const createColumn = (multiplier: number): BingoSheetColumn => {
+    const cells: BingoSheetCell[] = [];
+    for (let r = 1; r <= totalRows; r++) cells.push({ rowNumber: r });
+    const template = updatedColumns.find((c) => (c.multiplier || 1) === multiplier);
     const newCol: BingoSheetColumn = {
-      id: `col_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      colNumber: nextColNum,
-      title: `X${multiplier}`,
-      multiplier: multiplier,
+      id: 'col_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
+      colNumber: updatedColumns.length + 1,
+      title: 'X' + multiplier,
+      multiplier,
       hasRedDividerRight: false,
-      columnPrice: multiplier * (baseCost || 0.1),
-      columnPrize: multiplier * (basePrize || 1.35),
-      cells: newColCells,
+      columnPrice: template && typeof template.columnPrice === 'number' ? template.columnPrice : multiplier * (baseCost || 0.1),
+      columnPrize: template && typeof template.columnPrize === 'number' ? template.columnPrize : multiplier * (basePrize || 1.35),
+      cells,
     };
-
-    assignCellToPlayer(newCol, rowNum - 1, rowNum, player);
     updatedColumns.push(newCol);
     newColumnsCreated++;
+    return newCol;
   };
 
-  // 2. Process each target player
-  targetList.forEach((target) => {
-    const targetNormName = normalizePlayerName(target.name);
+  // Busca casillas libres de ese número cuyos valores sumen EXACTAMENTE "value" (con la menor cantidad de casillas)
+  const findExactCombination = (rowNum: number, value: number): BingoSheetColumn[] | null => {
+    const free = updatedColumns
+      .filter((col) => isCellFree(getRowCell(col, rowNum)) && (col.multiplier || 1) < value)
+      .sort((a, b) => (b.multiplier || 1) - (a.multiplier || 1))
+      .slice(0, 24);
+    let best: BingoSheetColumn[] | null = null;
+    const search = (start: number, remaining: number, chosen: BingoSheetColumn[]) => {
+      if (remaining === 0) {
+        if (!best || chosen.length < best.length) best = chosen.slice();
+        return;
+      }
+      if (best && chosen.length >= best.length) return;
+      for (let i = start; i < free.length; i++) {
+        const m = free[i].multiplier || 1;
+        if (m > remaining) continue;
+        chosen.push(free[i]);
+        search(i + 1, remaining - m, chosen);
+        chosen.pop();
+      }
+    };
+    search(0, value, []);
+    return best;
+  };
 
-    // Rule 8: If player doesn't exist in current game, auto-create them
-    let currentPlayer = findPlayerInCurrent(target.id, target.name);
+  targetList.forEach((target) => {
+    const targetNorm = normalizePlayerName(target.name);
+
+    let currentPlayer = updatedPlayers.find(
+      (p) => (target.id && p.id === target.id) || normalizePlayerName(p.name) === targetNorm
+    );
     let isNewPlayer = false;
     if (!currentPlayer) {
       currentPlayer = {
@@ -363,159 +326,120 @@ export function executeMismosReconstruction({
       newPlayersAdded++;
     }
 
-    const playerObj = {
+    const player: PlayerTarget = {
       id: currentPlayer.id,
       name: currentPlayer.name,
       color: currentPlayer.color,
       textColor: currentPlayer.textColor || getContrastTextColor(currentPlayer.color),
     };
 
-    // Calculate total multiplier target per row (número) from previousSheet
-    // Map<rowNumber, targetMultiplier>
-    const previousRowMultipliers = new Map<number, number>();
-
+    // Casillas exactas de la partida anterior: número -> lista de valores (uno por casilla)
+    const previousByRow = new Map<number, number[]>();
     previousSheet.columns.forEach((col) => {
-      const colMult = col.multiplier || 1;
       if (!Array.isArray(col.cells)) return;
-
-      col.cells.forEach((cell, rIdx) => {
-        if (isCellFree(cell)) return;
-        const matchesId = cell.playerId && cell.playerId === target.id;
-        const matchesName = cell.playerName && normalizePlayerName(cell.playerName) === targetNormName;
-
-        if (matchesId || matchesName) {
-          const rowNum = cell.rowNumber || rIdx + 1;
-          const currentVal = previousRowMultipliers.get(rowNum) || 0;
-          previousRowMultipliers.set(rowNum, currentVal + colMult);
-        }
+      col.cells.forEach((cell, idx) => {
+        if (!cellBelongsTo(cell, target.id, targetNorm)) return;
+        const rowNum = cell.rowNumber || idx + 1;
+        const list = previousByRow.get(rowNum) || [];
+        list.push(col.multiplier || 1);
+        previousByRow.set(rowNum, list);
       });
     });
 
-    let playerTargetCount = 0;
-    let playerAssignedCount = 0;
-    let playerShortageCount = 0;
-    const valuesSummaryMap = new Map<number, { target: number; assigned: number }>();
+    const summary = new Map<number, { target: number; assigned: number }>();
+    let playerTarget = 0;
+    let playerAssigned = 0;
 
-    // Process row by row (sorted by row number: 1..15)
-    const sortedRows = Array.from(previousRowMultipliers.keys()).sort((a, b) => a - b);
+    Array.from(previousByRow.keys())
+      .sort((a, b) => a - b)
+      .forEach((rowNum) => {
+        const neededValues = (previousByRow.get(rowNum) || []).slice().sort((a, b) => b - a);
 
-    sortedRows.forEach((rowNum) => {
-      const targetMultiplier = previousRowMultipliers.get(rowNum)!;
-      playerTargetCount++;
-      totalTarget++;
+        // Lo que el jugador YA tiene anotado en este número en la partida actual
+        const ownValues: number[] = [];
+        updatedColumns.forEach((col) => {
+          if (cellBelongsTo(getRowCell(col, rowNum), player.id, targetNorm)) ownValues.push(col.multiplier || 1);
+        });
 
-      // Check what multiplier this player ALREADY has on this row in currentSheet
-      let alreadyMultiplier = 0;
-      updatedColumns.forEach((col) => {
-        const cell = col.cells[rowNum - 1];
-        if (!cell || isCellFree(cell)) return;
-        const isMine =
-          (cell.playerId && cell.playerId === playerObj.id) ||
-          (cell.playerName && normalizePlayerName(cell.playerName) === targetNormName);
-        if (isMine) {
-          alreadyMultiplier += col.multiplier || 1;
-        }
+        neededValues.forEach((value) => {
+          playerTarget++;
+          totalTarget++;
+          const s = summary.get(value) || { target: 0, assigned: 0 };
+          s.target++;
+          summary.set(value, s);
+
+          // Ya lo tiene con ese mismo valor: no se duplica
+          const ownIdx = ownValues.indexOf(value);
+          if (ownIdx >= 0) {
+            ownValues.splice(ownIdx, 1);
+            s.assigned++;
+            playerAssigned++;
+            totalAssigned++;
+            return;
+          }
+
+          // a) Columna del mismo valor con ese número libre
+          const sameValueCol = updatedColumns.find(
+            (col) => (col.multiplier || 1) === value && isCellFree(getRowCell(col, rowNum))
+          );
+          if (sameValueCol) {
+            assignCell(sameValueCol, rowNum, player);
+          } else {
+            // b) Combinar casillas libres de ese número que sumen exactamente el valor
+            const combo = findExactCombination(rowNum, value);
+            if (combo && combo.length > 0) {
+              combo.forEach((col) => assignCell(col, rowNum, player));
+            } else {
+              // c) Abrir una columna nueva con ese valor
+              const newCol = createColumn(value);
+              assignCell(newCol, rowNum, player);
+            }
+          }
+
+          assignedDetail.push(rowNum + ' X' + value);
+          s.assigned++;
+          playerAssigned++;
+          totalAssigned++;
+        });
       });
-
-      let remainingNeeded = Math.max(0, targetMultiplier - alreadyMultiplier);
-
-      // Track target in summary
-      const existingSummary = valuesSummaryMap.get(targetMultiplier) || { target: 0, assigned: 0 };
-      existingSummary.target++;
-      valuesSummaryMap.set(targetMultiplier, existingSummary);
-
-      if (remainingNeeded <= 0) {
-        playerAssignedCount++;
-        totalAssigned++;
-        existingSummary.assigned++;
-        return;
-      }
-
-      // Step 3A: Direct Match First
-      // Check if there is an existing column whose multiplier matches remainingNeeded exactly and has rowNum free
-      let directMatchColIdx = -1;
-      for (let cIdx = 0; cIdx < updatedColumns.length; cIdx++) {
-        const col = updatedColumns[cIdx];
-        if ((col.multiplier || 1) === remainingNeeded && isCellFree(col.cells[rowNum - 1])) {
-          directMatchColIdx = cIdx;
-          break;
-        }
-      }
-
-      if (directMatchColIdx >= 0) {
-        const targetCol = updatedColumns[directMatchColIdx];
-        assignCellToPlayer(targetCol, rowNum - 1, rowNum, playerObj);
-        remainingNeeded = 0;
-        playerAssignedCount++;
-        totalAssigned++;
-        existingSummary.assigned++;
-        return;
-      }
-
-      // Step 3B: Search on sheet and Equalize across available free cells
-      // "en caso tal que alguna casilla este ocupada entonses el sistema debe poder buscar en la planilla e igualar,
-      // por ejemplo, si tenia un 3 X4 y en la siguiente estan ocupadan la casilla X4, debe igualarlo y anotarlo
-      // en 2 casillas X2 de ese numero, o con las que esten"
-      const freeColsForThisRow = updatedColumns
-        .map((col, cIdx) => ({ col, cIdx, mult: col.multiplier || 1 }))
-        .filter((item) => isCellFree(item.col.cells[rowNum - 1]))
-        .sort((a, b) => b.mult - a.mult); // Prioritize larger multipliers first
-
-      for (const item of freeColsForThisRow) {
-        if (remainingNeeded <= 0) break;
-        if (item.mult <= remainingNeeded) {
-          assignCellToPlayer(item.col, rowNum - 1, rowNum, playerObj);
-          remainingNeeded -= item.mult;
-        }
-      }
-
-      // Step 3C: If all cells were occupied or there is remaining needed multiplier,
-      // "pero, si llegan a estar ocupadas todas las casillas que se deberian anotar,
-      // el sistema debe abrir automaticamente una nueva columna y anotar lo que haga falta"
-      if (remainingNeeded > 0) {
-        createNewColumnAndAssign(remainingNeeded, rowNum, playerObj);
-        remainingNeeded = 0;
-      }
-
-      playerAssignedCount++;
-      totalAssigned++;
-      existingSummary.assigned++;
-    });
-
-    const valuesSummary = Array.from(valuesSummaryMap.entries()).map(([value, s]) => ({
-      value,
-      target: s.target,
-      assigned: s.assigned,
-      shortage: Math.max(0, s.target - s.assigned),
-    }));
 
     playerReports.push({
-      playerId: playerObj.id,
-      playerName: playerObj.name,
+      playerId: player.id,
+      playerName: player.name,
       isNewPlayer,
-      targetCount: playerTargetCount,
-      assignedCount: playerAssignedCount,
-      shortageCount: playerShortageCount,
-      valuesSummary,
+      targetCount: playerTarget,
+      assignedCount: playerAssigned,
+      shortageCount: Math.max(0, playerTarget - playerAssigned),
+      valuesSummary: Array.from(summary.entries())
+        .sort((a, b) => a[0] - b[0])
+        .map(([value, s]) => ({
+          value,
+          target: s.target,
+          assigned: s.assigned,
+          shortage: Math.max(0, s.target - s.assigned),
+        })),
     });
   });
 
-  // Construct clear feedback message
-  let message = '';
+  // Renumerar columnas para que queden en orden
+  updatedColumns.forEach((col, idx) => {
+    col.colNumber = idx + 1;
+  });
+
+  const columnsNote =
+    newColumnsCreated > 0 ? ' Se abrieron ' + newColumnsCreated + ' columna(s) nueva(s).' : '';
+  let message: string;
   if (targetPlayerIdOrName) {
     const report = playerReports[0];
-    if (report) {
-      const summaryParts = report.valuesSummary.map((v) => `X${v.value}: ${v.assigned}/${v.target}`);
-      message = `¡Mismos asignados para ${report.playerName}! (${summaryParts.join(', ')})${newColumnsCreated > 0 ? ` • Se abrió ${newColumnsCreated} columna(s) nueva(s)` : ''}.`;
-    } else {
-      message = `No se pudieron asignar casillas para ${targetPlayerIdOrName}.`;
-    }
+    const detail = assignedDetail.length > 0 ? assignedDetail.join(', ') : 'ya los tenía todos anotados';
+    message = 'Mismos de ' + (report ? report.playerName : targetPlayerIdOrName) + ': ' + detail + '.' + columnsNote;
   } else {
-    message = `¡Mismos asignados para ${targetList.length} jugadores! Total: ${totalAssigned} números igualados${newColumnsCreated > 0 ? ` (${newColumnsCreated} columna(s) nueva(s) creadas)` : ''}.`;
+    message =
+      'Mismos anotados para ' + targetList.length + ' jugador(es): ' + totalAssigned + ' número(s).' + columnsNote;
   }
 
   return {
-    success: totalAssigned > 0 || playerReports.length > 0,
+    success: totalTarget > 0,
     totalAssigned,
     totalTarget,
     playersProcessed: targetList.length,
