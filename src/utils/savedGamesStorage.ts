@@ -1365,6 +1365,17 @@ async function runFullSync(generation: number, hintMs: number): Promise<void> {
 }
 
 async function applyRemoteDeletions(sinceMs: number, generation: number): Promise<number> {
+  try {
+    return await applyRemoteDeletionsUnsafe(sinceMs, generation);
+  } catch (err) {
+    // Si el registro de borrados aún no está disponible (por ejemplo, reglas sin publicar), se sigue sin él
+    const code = err && typeof err === 'object' && 'code' in err ? String((err as { code?: unknown }).code) : String(err);
+    console.info('[SYNC] Registro de borrados no disponible por ahora:', code);
+    return sinceMs;
+  }
+}
+
+async function applyRemoteDeletionsUnsafe(sinceMs: number, generation: number): Promise<number> {
   const since = Math.max(0, sinceMs - SYNC_OVERLAP_MS);
   const snap = await getDocs(
     query(collection(db, 'deleted_games'), where('deletedAt', '>', Timestamp.fromMillis(since)))
