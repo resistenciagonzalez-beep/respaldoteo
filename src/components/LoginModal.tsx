@@ -312,7 +312,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                 <form onSubmit={handleLoginSubmit} className="space-y-3.5">
                   <div>
                     <label className="block text-xs font-black text-orange-950 uppercase tracking-wider mb-1">
-                      Correo Electrónico o Usuario:
+                      Correo Electrónico:
                     </label>
                     <div className="relative">
                       <Mail className="w-4 h-4 text-orange-400 absolute left-3 top-2.5" />
@@ -321,7 +321,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                         required
                         value={loginEmail}
                         onChange={(e) => setLoginEmail(e.target.value)}
-                        placeholder="tu-correo@ejemplo.com o nombre de usuario"
+                        placeholder="tu-correo@ejemplo.com"
                         className="w-full pl-9 pr-3 py-2 rounded-xl bg-white border border-orange-200 text-xs font-bold text-orange-950 focus:outline-none focus:border-orange-500 placeholder-orange-300 shadow-xs"
                       />
                     </div>
