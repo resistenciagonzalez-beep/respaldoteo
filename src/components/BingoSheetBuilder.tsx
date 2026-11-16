@@ -582,7 +582,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
 
   // Desplazamiento de la columna SECUENCIA: permite anotar más partidas que filas tiene la planilla
   const [seqOffset, setSeqOffset] = useState<number>(0);
-  const seqVisibleRows = sheet.totalRows || 15;
+  // Filas visibles de la secuencia (la planilla de 75 tiene 15 filas). No usar "sheet" aquí: aún no está declarada.
+  const seqVisibleRows = 15;
   useEffect(() => {
     if (typeof activeSequenceRow !== 'number' || activeSequenceRow < 1) return;
     setSeqOffset((prev) => {
