@@ -5195,7 +5195,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                     <div
                       key={rowNumber}
                       className={`grid divide-x-[2px] divide-black transition-all relative ${
-                        is15SheetExpanded ? 'flex-1 min-h-0 max-h-[34px]' : 'h-[28px] sm:h-[30px] min-h-[28px]'
+                        is15SheetExpanded ? 'flex-1 min-h-0' : 'h-[28px] sm:h-[30px] min-h-[28px]'
                       }`}
                       style={{
                         gridTemplateColumns: `${seqColWidth}px repeat(${sheet.columns.length}, minmax(0, 1fr))`,
