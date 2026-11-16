@@ -375,6 +375,124 @@ const SheetHeaderFitTitle: React.FC<{ text: string; maxPx?: number; minPx?: numb
   );
 };
 
+/* ===================== Nombre ajustado a la casilla =====================
+ * Hace que el nombre del jugador ocupe el alto de la casilla sin salirse a lo ancho.
+ * Usa UN solo ResizeObserver compartido y mide el texto con canvas (sin reflujo),
+ * así no afecta el rendimiento aunque haya muchas casillas con nombre.
+ */
+let cellFitCanvasCtx: CanvasRenderingContext2D | null = null;
+const getCellFitCtx = (): CanvasRenderingContext2D | null => {
+  if (cellFitCanvasCtx) return cellFitCanvasCtx;
+  if (typeof document === 'undefined') return null;
+  cellFitCanvasCtx = document.createElement('canvas').getContext('2d');
+  return cellFitCanvasCtx;
+};
+const cellFitCallbacks = new Map<Element, () => void>();
+let cellFitObserver: ResizeObserver | null = null;
+const observeCellFit = (el: Element, cb: () => void) => {
+  if (typeof ResizeObserver === 'undefined') return;
+  if (!cellFitObserver) {
+    cellFitObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) cellFitCallbacks.get(entry.target)?.();
+    });
+  }
+  cellFitCallbacks.set(el, cb);
+  cellFitObserver.observe(el);
+};
+const unobserveCellFit = (el: Element) => {
+  cellFitCallbacks.delete(el);
+  cellFitObserver?.unobserve(el);
+};
+
+const CellFitName: React.FC<{ text: string; scalePercent: number; style: React.CSSProperties }> = ({
+  text,
+  scalePercent,
+  style,
+}) => {
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const [fit, setFit] = useState<{ px: number; lines: string[] } | null>(null);
+  const upper = text.toUpperCase().trim();
+
+  React.useLayoutEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    const compute = () => {
+      const w = box.clientWidth - 2;
+      const h = box.clientHeight;
+      const ctx = getCellFitCtx();
+      if (w <= 4 || h <= 4 || !ctx) return;
+      const family = window.getComputedStyle(box).fontFamily || 'sans-serif';
+      ctx.font = `900 100px ${family}`;
+      // ancho por cada px de fuente (con un pequeño margen por el contorno/tracking)
+      const widthPerPx = (t: string) => (ctx.measureText(t).width / 100) * 1.04;
+      const scale = Math.max(0.75, Math.min(1.45, scalePercent / 100));
+      // Alto: ~78% de la casilla a escala 100% (deja aire arriba y abajo para que no se vea apretado)
+      const heightCap1 = Math.min(h * 0.78 * scale, h * 0.92);
+      const one = Math.min(heightCap1, w / Math.max(widthPerPx(upper), 0.01));
+      let best = { px: one, lines: [upper] };
+      const words = upper.split(/\s+/).filter(Boolean);
+      if (words.length > 1) {
+        let bestSplit: string[] = [upper];
+        let bestW = Infinity;
+        for (let i = 1; i < words.length; i++) {
+          const a = words.slice(0, i).join(' ');
+          const b = words.slice(i).join(' ');
+          const mw = Math.max(widthPerPx(a), widthPerPx(b));
+          if (mw < bestW) {
+            bestW = mw;
+            bestSplit = [a, b];
+          }
+        }
+        const heightCap2 = Math.min((h * 0.9 * scale) / 1.9, (h * 0.96) / 1.9);
+        const two = Math.min(heightCap2, w / Math.max(bestW, 0.01));
+        if (two > one * 1.15) best = { px: two, lines: bestSplit };
+      }
+      const px = Math.max(7, Math.floor(best.px * 4) / 4);
+      setFit((prev) =>
+        prev && prev.px === px && prev.lines.join('|') === best.lines.join('|') ? prev : { px, lines: best.lines }
+      );
+    };
+    compute();
+    observeCellFit(box, compute);
+    // Recalcular cuando terminen de cargar las fuentes
+    let alive = true;
+    if (typeof document !== 'undefined' && (document as any).fonts?.ready) {
+      (document as any).fonts.ready.then(() => alive && compute()).catch(() => {});
+    }
+    return () => {
+      alive = false;
+      unobserveCellFit(box);
+    };
+  }, [upper, scalePercent]);
+
+  return (
+    <div ref={boxRef} className="w-full h-full min-w-0 flex items-center justify-center overflow-hidden">
+      <span
+        className="font-black uppercase block w-full text-center select-none"
+        style={{
+          ...style,
+          fontSize: fit ? `${fit.px}px` : style.fontSize,
+          lineHeight: fit && fit.lines.length > 1 ? 0.95 : 1,
+          letterSpacing: '-0.01em',
+          whiteSpace: 'nowrap',
+          wordBreak: 'normal',
+          overflowWrap: 'normal',
+        }}
+      >
+        {fit && fit.lines.length > 1 ? (
+          <>
+            {fit.lines[0]}
+            <br />
+            {fit.lines[1]}
+          </>
+        ) : (
+          upper
+        )}
+      </span>
+    </div>
+  );
+};
+
 // Casillas máximas de la columna SECUENCIA (se recorren con las flechas ▲ ▼)
 const SEQ_MAX_SLOTS = 99;
 
@@ -5277,12 +5395,11 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                                   effectiveTextColor
                                 );
                                 return (
-                                  <span
-                                    className={adaptiveStyle.className}
+                                  <CellFitName
+                                    text={cell.playerName || ''}
+                                    scalePercent={cellFontSizeScale}
                                     style={adaptiveStyle.style}
-                                  >
-                                    {cell.playerName ? cell.playerName.toUpperCase() : ''}
-                                  </span>
+                                  />
                                 );
                               })() : (
                                 <span className={`no-print text-[8px] sm:text-[8.5px] opacity-0 group-hover:opacity-100 font-black uppercase block leading-none ${
