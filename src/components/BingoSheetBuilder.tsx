@@ -375,6 +375,161 @@ const SheetHeaderFitTitle: React.FC<{ text: string; maxPx?: number; minPx?: numb
   );
 };
 
+/* ===================== Nombre ajustado a la casilla =====================
+ * Hace que el nombre del jugador ocupe el alto de la casilla. Si es largo, primero se
+ * "angosta" un poco (sin perder alto ni grosor) y, solo si aun así no cabe, se recorta
+ * por la derecha. Usa UN solo ResizeObserver compartido y mide el texto con canvas
+ * (sin reflujo), así no afecta el rendimiento aunque haya muchas casillas con nombre.
+ */
+let cellFitCanvasCtx: CanvasRenderingContext2D | null = null;
+const getCellFitCtx = (): CanvasRenderingContext2D | null => {
+  if (cellFitCanvasCtx) return cellFitCanvasCtx;
+  if (typeof document === 'undefined') return null;
+  cellFitCanvasCtx = document.createElement('canvas').getContext('2d');
+  return cellFitCanvasCtx;
+};
+const cellFitCallbacks = new Map<Element, () => void>();
+let cellFitObserver: ResizeObserver | null = null;
+const observeCellFit = (el: Element, cb: () => void) => {
+  if (typeof ResizeObserver === 'undefined') return;
+  if (!cellFitObserver) {
+    cellFitObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) cellFitCallbacks.get(entry.target)?.();
+    });
+  }
+  cellFitCallbacks.set(el, cb);
+  cellFitObserver.observe(el);
+};
+const unobserveCellFit = (el: Element) => {
+  cellFitCallbacks.delete(el);
+  cellFitObserver?.unobserve(el);
+};
+
+// Cuánto se puede angostar un nombre largo (1 = normal). 0.6 sigue viéndose limpio y legible.
+const CELL_NAME_MIN_SQUEEZE = 0.6;
+
+type CellFitState = { px: number; lines: string[]; squeeze: number; overflow: boolean };
+
+const CellFitName: React.FC<{
+  text: string;
+  scalePercent: number;
+  style: React.CSSProperties;
+  /** Proporción del alto que usa el nombre a 100% (por defecto 0.74) */
+  heightRatio?: number;
+}> = ({ text, scalePercent, style, heightRatio = 0.74 }) => {
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const [fit, setFit] = useState<CellFitState | null>(null);
+  const upper = text.toUpperCase().trim();
+
+  React.useLayoutEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    const compute = () => {
+      const w = box.clientWidth - 2;
+      const h = box.clientHeight;
+      const ctx = getCellFitCtx();
+      if (w <= 4 || h <= 4 || !ctx) return;
+      const family = window.getComputedStyle(box).fontFamily || 'sans-serif';
+      ctx.font = `900 100px ${family}`;
+      // ancho por cada px de fuente (con margen por el contorno que lo hace más grueso)
+      const widthPerPx = (t: string) => (ctx.measureText(t).width / 100) * 1.06;
+      const scale = Math.max(0.75, Math.min(1.45, scalePercent / 100));
+
+      // Calcula tamaño, angostado y recorte para un juego de renglones
+      const solve = (lines: string[], lineW: number) => {
+        const n = lines.length;
+        const maxH = n === 1 ? h * heightRatio : (h * 0.9) / (n * 0.95);
+        const hardMax = n === 1 ? h * 0.9 : (h * 0.96) / (n * 0.95);
+        // tamaño a 100%: alto deseado, sin pasarse del ancho aun angostando al máximo
+        const base = Math.min(maxH, w / Math.max(lineW * CELL_NAME_MIN_SQUEEZE, 0.01));
+        const px = Math.max(7, Math.min(base * scale, hardMax));
+        const squeeze = Math.max(CELL_NAME_MIN_SQUEEZE, Math.min(1, w / Math.max(px * lineW, 0.01)));
+        const overflow = px * lineW * squeeze > w + 0.5;
+        // puntaje: alto real con penalización suave por angostar
+        const score = base * Math.sqrt(Math.min(1, w / Math.max(base * lineW, 0.01)) || 1);
+        return { px: Math.floor(px * 4) / 4, lines, squeeze: Math.round(squeeze * 100) / 100, overflow, score };
+      };
+
+      let best = solve([upper], widthPerPx(upper));
+      const words = upper.split(/\s+/).filter(Boolean);
+      if (words.length > 1) {
+        let bestSplit: string[] = [upper];
+        let bestW = Infinity;
+        for (let i = 1; i < words.length; i++) {
+          const a = words.slice(0, i).join(' ');
+          const b = words.slice(i).join(' ');
+          const mw = Math.max(widthPerPx(a), widthPerPx(b));
+          if (mw < bestW) {
+            bestW = mw;
+            bestSplit = [a, b];
+          }
+        }
+        const two = solve(bestSplit, bestW);
+        if (two.score > best.score * 1.1) best = two;
+      }
+      const next: CellFitState = { px: best.px, lines: best.lines, squeeze: best.squeeze, overflow: best.overflow };
+      setFit((prev) =>
+        prev &&
+        prev.px === next.px &&
+        prev.squeeze === next.squeeze &&
+        prev.overflow === next.overflow &&
+        prev.lines.join('|') === next.lines.join('|')
+          ? prev
+          : next
+      );
+    };
+    compute();
+    observeCellFit(box, compute);
+    // Recalcular cuando terminen de cargar las fuentes
+    let alive = true;
+    if (typeof document !== 'undefined' && (document as any).fonts?.ready) {
+      (document as any).fonts.ready.then(() => alive && compute()).catch(() => {});
+    }
+    return () => {
+      alive = false;
+      unobserveCellFit(box);
+    };
+  }, [upper, scalePercent, heightRatio]);
+
+  const px = fit?.px;
+  // Contorno proporcional: todos los nombres (largos o cortos) se ven igual de gruesos
+  const stroke = px ? Math.max(0.35, Math.min(0.9, px * 0.035)) : 0.4;
+
+  return (
+    <div
+      ref={boxRef}
+      className={`w-full h-full min-w-0 flex items-center overflow-hidden ${fit?.overflow ? 'justify-start' : 'justify-center'}`}
+    >
+      <span
+        className="font-black uppercase block flex-shrink-0 select-none text-center"
+        style={{
+          ...style,
+          fontSize: px ? `${px}px` : style.fontSize,
+          fontWeight: 900,
+          lineHeight: fit && fit.lines.length > 1 ? 0.95 : 1,
+          letterSpacing: '0',
+          whiteSpace: 'nowrap',
+          wordBreak: 'normal',
+          overflowWrap: 'normal',
+          WebkitTextStroke: `${stroke.toFixed(2)}px currentColor`,
+          transform: fit && fit.squeeze < 1 ? `scaleX(${fit.squeeze})` : undefined,
+          transformOrigin: fit?.overflow ? 'left center' : 'center center',
+        }}
+      >
+        {fit && fit.lines.length > 1 ? (
+          <>
+            {fit.lines[0]}
+            <br />
+            {fit.lines[1]}
+          </>
+        ) : (
+          upper
+        )}
+      </span>
+    </div>
+  );
+};
+
 // Casillas máximas de la columna SECUENCIA (se recorren con las flechas ▲ ▼)
 const SEQ_MAX_SLOTS = 99;
 
@@ -4557,8 +4712,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
           }`}
         >
           <main
-            className={`flex-1 w-full flex flex-col items-center justify-center print-container ${
-              is15SheetExpanded ? 'h-full max-h-full overflow-hidden p-0.5 sm:p-1' : 'overflow-x-auto'
+            className={`flex-1 w-full flex flex-col items-center print-container ${
+              is15SheetExpanded ? 'justify-start h-full max-h-full overflow-y-auto overflow-x-hidden p-0.5 sm:p-1' : 'justify-center overflow-x-auto'
             }`}
           >
           {/* Winning Row Banner with automatic calculation of player earnings across Bingo, Terna, and Ambo */}
@@ -4616,6 +4771,12 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
             );
           })()}
 
+          {/* Bloque fijo (barra + planilla): ocupa siempre el alto completo. Si el cuadro rojo crece,
+              empuja este bloque hacia abajo sin encoger la planilla, y se recorre con scroll. */}
+          <div
+            className={is15SheetExpanded ? 'w-full flex flex-col items-center flex-shrink-0 min-h-0' : 'contents'}
+            style={is15SheetExpanded ? { height: '100%' } : undefined}
+          >
           {/* Manual Text Size Adjustment Bar & Results Quick Bar (Completely Hideable and Reopenable) */}
           {isTopAdjustmentBarVisible ? (
             <div className="no-print w-full max-w-[1280px] mb-2 px-3 py-1.5 rounded-xl bg-white border-2 border-orange-200/90 shadow-xs flex flex-wrap items-center justify-between gap-2 text-xs transition-all animate-fade-in">
@@ -5111,7 +5272,7 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                                   onChange={(e) => handleInlineSeqChange(seqSlot, 'ambo', e.target.value)}
                                   placeholder="-"
                                   className="w-full h-full bg-transparent text-center font-black text-sky-950 text-[13px] sm:text-[14.5px] leading-none focus:outline-none focus:bg-sky-100 placeholder:text-slate-300 placeholder:font-bold"
-                                  style={cellFontSizeScale !== 100 ? { fontSize: `calc(0.9em * ${cellFontSizeScale / 100})` } : undefined}
+                                  style={cellFontSizeScale !== 100 ? { fontSize: `${(14 * (cellFontSizeScale / 100)).toFixed(1)}px` } : undefined}
                                   title={`Anotar número de AMBO en secuencia #${seqSlot}`}
                                 />
                               </div>
@@ -5131,7 +5292,7 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                                   onChange={(e) => handleInlineSeqChange(seqSlot, 'terna', e.target.value)}
                                   placeholder="-"
                                   className="w-full h-full bg-transparent text-center font-black text-slate-950 text-[13px] sm:text-[14.5px] leading-none focus:outline-none focus:bg-emerald-100 placeholder:text-slate-300 placeholder:font-bold"
-                                  style={cellFontSizeScale !== 100 ? { fontSize: `calc(0.9em * ${cellFontSizeScale / 100})` } : undefined}
+                                  style={cellFontSizeScale !== 100 ? { fontSize: `${(14 * (cellFontSizeScale / 100)).toFixed(1)}px` } : undefined}
                                   title={`Anotar número de TERNA en secuencia #${seqSlot}`}
                                 />
                               </div>
@@ -5151,7 +5312,7 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                                   onChange={(e) => handleInlineSeqChange(seqSlot, 'bingo', e.target.value)}
                                   placeholder="-"
                                   className="w-full h-full bg-transparent text-center font-black text-slate-950 text-[13px] sm:text-[14.5px] leading-none focus:outline-none focus:bg-amber-200 placeholder:text-slate-300 placeholder:font-bold"
-                                  style={cellFontSizeScale !== 100 ? { fontSize: `calc(0.9em * ${cellFontSizeScale / 100})` } : undefined}
+                                  style={cellFontSizeScale !== 100 ? { fontSize: `${(14 * (cellFontSizeScale / 100)).toFixed(1)}px` } : undefined}
                                   title={`Anotar número de BINGO en secuencia #${seqSlot}`}
                                 />
                               </div>
@@ -5271,12 +5432,11 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                                   effectiveTextColor
                                 );
                                 return (
-                                  <span
-                                    className={adaptiveStyle.className}
+                                  <CellFitName
+                                    text={cell.playerName || ''}
+                                    scalePercent={cellFontSizeScale}
                                     style={adaptiveStyle.style}
-                                  >
-                                    {cell.playerName ? cell.playerName.toUpperCase() : ''}
-                                  </span>
+                                  />
                                 );
                               })() : (
                                 <span className={`no-print text-[8px] sm:text-[8.5px] opacity-0 group-hover:opacity-100 font-black uppercase block leading-none ${
@@ -5386,7 +5546,7 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                               }}
                               title={`${p.name.toUpperCase()}. Clic para pintar casillas con este jugador.`}
                             >
-                              <div className="flex items-center justify-center gap-0.5 w-full min-w-0 overflow-hidden">
+                              <div className="flex items-center justify-center gap-0.5 w-full h-full min-w-0 overflow-hidden">
                                 {(() => {
                                   const pObj = sheet.players.find(
                                     (pl) =>
@@ -5402,12 +5562,14 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                                     effTextColor
                                   );
                                   return (
-                                    <span
-                                      className="font-black block text-center truncate min-w-0 max-w-full leading-tight"
-                                      style={pNameStyle.style}
-                                    >
-                                      {p.name.toUpperCase()}
-                                    </span>
+                                    <div className="flex-1 min-w-0 h-full">
+                                      <CellFitName
+                                        text={p.name}
+                                        scalePercent={cellFontSizeScale}
+                                        style={pNameStyle.style}
+                                        heightRatio={0.7}
+                                      />
+                                    </div>
                                   );
                                 })()}
                                 {p.isBingoWinner && (
@@ -5451,10 +5613,10 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                               }}
                               className={`${
                                 is15SheetExpanded ? 'h-[22px]' : 'h-[26px]'
-                              } px-1 flex items-center justify-center gap-1 overflow-hidden font-black tabular-nums text-[12px] sm:text-[13px] tracking-tight border-b border-black cursor-pointer hover:bg-yellow-100 transition-colors relative group/ganocell ${
+                              } px-1 flex items-center justify-center gap-1 overflow-hidden leading-none font-black tabular-nums text-[12px] sm:text-[13px] tracking-tight border-b border-black cursor-pointer hover:bg-yellow-100 transition-colors relative group/ganocell ${
                                 p.totalGano > 0 ? 'text-emerald-950 bg-emerald-100/90' : 'text-black bg-[#fefce8]'
                               }`}
-                              style={cellFontSizeScale !== 100 ? { fontSize: `calc(1em * ${cellFontSizeScale / 100})` } : undefined}
+                              style={cellFontSizeScale !== 100 ? { fontSize: `${Math.min(13 * (cellFontSizeScale / 100), is15SheetExpanded ? 17 : 21).toFixed(1)}px` } : undefined}
                               title={`${p.name.toUpperCase()} - Ganado Acumulado: $${p.previousWon.toFixed(2)}${
                                 p.currentWon > 0
                                   ? ` + Esta Partida: $${p.currentWon.toFixed(2)}${
@@ -5465,7 +5627,7 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                                   : ''
                               } = $${p.totalGano.toFixed(2)}. Clic para ajustar o marcar premio como pagado.`}
                             >
-                              <span className="font-black drop-shadow-2xs">
+                              <span className="font-black drop-shadow-2xs" style={{ WebkitTextStroke: '0.6px currentColor' }}>
                                 {p.totalGano.toFixed(2)}
                               </span>
 
@@ -5477,11 +5639,10 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                                     e.stopPropagation();
                                     handleMarkPlayerGanoPaid(p.id, p.name);
                                   }}
-                                  className="no-print px-1 py-0.5 rounded bg-emerald-600 text-white hover:bg-emerald-700 active:scale-95 font-black text-[8px] sm:text-[8.5px] tracking-tight leading-none flex items-center gap-0.5 shadow-2xs transition-all cursor-pointer flex-shrink-0"
+                                  className="no-print p-[1px] rounded-sm bg-emerald-600 text-white hover:bg-emerald-700 active:scale-95 leading-none flex items-center justify-center shadow-2xs transition-all cursor-pointer flex-shrink-0"
                                   title={`Marcar premio de ${p.name.toUpperCase()} como enviado/pagado (deja GANO en 0.00)`}
                                 >
-                                  <Check className="w-2.5 h-2.5" />
-                                  <span>Pagado</span>
+                                  <Check className="w-2.5 h-2.5" strokeWidth={4} />
                                 </button>
                               )}
                             </div>
@@ -5500,15 +5661,15 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                               }}
                               className={`${
                                 is15SheetExpanded ? 'h-[22px]' : 'h-[26px]'
-                              } px-0.5 sm:px-1 flex items-center justify-center font-black tabular-nums text-[12px] sm:text-[13px] tracking-tight border-b border-black cursor-pointer hover:bg-yellow-100 transition-colors ${
+                              } px-0.5 sm:px-1 flex items-center justify-center overflow-hidden leading-none font-black tabular-nums text-[12px] sm:text-[13px] tracking-tight border-b border-black cursor-pointer hover:bg-yellow-100 transition-colors ${
                                 p.debe > 0 ? 'text-rose-950 bg-rose-100/80' : 'text-black bg-[#fefce8]'
                               }`}
-                              style={cellFontSizeScale !== 100 ? { fontSize: `calc(1em * ${cellFontSizeScale / 100})` } : undefined}
+                              style={cellFontSizeScale !== 100 ? { fontSize: `${Math.min(13 * (cellFontSizeScale / 100), is15SheetExpanded ? 17 : 21).toFixed(1)}px` } : undefined}
                               title={`${p.name.toUpperCase()} debe $${p.debe.toFixed(2)}${
                                 p.previousDebt > 0 ? ` (Deuda anterior: $${p.previousDebt.toFixed(2)})` : ''
                               }. Clic para abonar o liquidar.`}
                             >
-                              <span className="font-black drop-shadow-2xs">
+                              <span className="font-black drop-shadow-2xs" style={{ WebkitTextStroke: '0.6px currentColor' }}>
                                 {p.debe.toFixed(2)}
                               </span>
                             </div>
@@ -5527,17 +5688,17 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                               }}
                               className={`${
                                 is15SheetExpanded ? 'h-[22px]' : 'h-[26px]'
-                              } px-0.5 sm:px-1 flex items-center justify-center font-black tabular-nums text-[12px] sm:text-[13.5px] tracking-tight cursor-pointer hover:opacity-90 transition-opacity relative group/totcell ${
+                              } px-0.5 sm:px-1 flex items-center justify-center overflow-hidden leading-none font-black tabular-nums text-[12px] sm:text-[13.5px] tracking-tight cursor-pointer hover:opacity-90 transition-opacity relative group/totcell ${
                                 isNegative
                                   ? 'text-red-950 bg-red-200/95'
                                   : isPositive
                                   ? 'text-emerald-950 bg-emerald-200/95'
                                   : 'text-black bg-amber-100/90'
                               }`}
-                              style={cellFontSizeScale !== 100 ? { fontSize: `calc(1em * ${cellFontSizeScale / 100})` } : undefined}
+                              style={cellFontSizeScale !== 100 ? { fontSize: `${Math.min(13.5 * (cellFontSizeScale / 100), is15SheetExpanded ? 17 : 21).toFixed(1)}px` } : undefined}
                               title={`Saldo final de ${p.name.toUpperCase()}: Ganó $${p.totalGano.toFixed(2)} - Debe $${p.debe.toFixed(2)} = $${p.total.toFixed(2)}. Clic para ajustar o reiniciar saldo a $0.`}
                             >
-                              <span className="font-black drop-shadow-2xs">
+                              <span className="font-black drop-shadow-2xs" style={{ WebkitTextStroke: '0.6px currentColor' }}>
                                 {isNegative
                                   ? `-${Math.abs(p.total).toFixed(2)}`
                                   : isPositive
@@ -5596,6 +5757,7 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
             </div>
           </div>
         </div>
+          </div>
       </main>
       </div>
 
