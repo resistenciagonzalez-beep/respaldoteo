@@ -1306,9 +1306,16 @@ function removeGameLocally(docKey: string): void {
   void deleteGameFromIndexedDB(docKey);
 }
 
+// Agrupa las actualizaciones seguidas (por ejemplo, varias operadoras guardando a la vez)
+// en una sola actualización de pantalla cada 250 ms, para no saturar el navegador.
+let broadcastTimer: ReturnType<typeof setTimeout> | null = null;
 function broadcastMemoryStoreToSubscribers(): void {
   hasSyncedWithFirestore = true;
-  notifySavedGamesSubscribers(false);
+  if (broadcastTimer) return;
+  broadcastTimer = setTimeout(() => {
+    broadcastTimer = null;
+    notifySavedGamesSubscribers(false);
+  }, 250);
 }
 
 async function fetchVisibleGamesPage(afterId: string | null): Promise<QuerySnapshot<DocumentData>> {
