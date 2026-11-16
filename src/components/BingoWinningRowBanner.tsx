@@ -1,4 +1,5 @@
 import React, { useMemo } from 'react';
+// Cuadro rojo de premios de la fila ganadora (tamaño adaptable a planilla normal o expandida)
 import { BingoSheetData } from '../types';
 import { Trophy, X } from 'lucide-react';
 
