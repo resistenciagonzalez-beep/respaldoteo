@@ -410,7 +410,7 @@ const CellFitName: React.FC<{ text: string; scalePercent: number; style: React.C
   style,
 }) => {
   const boxRef = useRef<HTMLDivElement | null>(null);
-  const [fit, setFit] = useState<{ px: number; lines: string[] } | null>(null);
+  const [fit, setFit] = useState<{ px: number; lines: string[]; overflow: boolean } | null>(null);
   const upper = text.toUpperCase().trim();
 
   React.useLayoutEffect(() => {
@@ -427,9 +427,10 @@ const CellFitName: React.FC<{ text: string; scalePercent: number; style: React.C
       const widthPerPx = (t: string) => (ctx.measureText(t).width / 100) * 1.04;
       const scale = Math.max(0.75, Math.min(1.45, scalePercent / 100));
       // Base a 100%: ~78% del alto de la casilla, sin pasarse del ancho.
-      // Luego la barra de tamaño la agranda o achica (si se pasa un poquito del ancho, se recorta centrado).
+      // Luego la barra de tamaño la agranda o achica (si no cabe, se recorta solo por la derecha).
       const one = Math.min(h * 0.78, w / Math.max(widthPerPx(upper), 0.01));
       let best = { px: Math.min(one * scale, h * 0.92), lines: [upper] };
+      let bestLineW = widthPerPx(upper);
       const words = upper.split(/\s+/).filter(Boolean);
       if (words.length > 1) {
         let bestSplit: string[] = [upper];
@@ -444,11 +445,18 @@ const CellFitName: React.FC<{ text: string; scalePercent: number; style: React.C
           }
         }
         const two = Math.min((h * 0.9) / 1.9, w / Math.max(bestW, 0.01));
-        if (two > one * 1.15) best = { px: Math.min(two * scale, (h * 0.96) / 1.9), lines: bestSplit };
+        if (two > one * 1.15) {
+          best = { px: Math.min(two * scale, (h * 0.96) / 1.9), lines: bestSplit };
+          bestLineW = bestW;
+        }
       }
       const px = Math.max(7, Math.floor(best.px * 4) / 4);
+      // Si no cabe a lo ancho, se alinea a la izquierda y solo se recorta el final (derecha)
+      const overflow = px * bestLineW > w + 0.5;
       setFit((prev) =>
-        prev && prev.px === px && prev.lines.join('|') === best.lines.join('|') ? prev : { px, lines: best.lines }
+        prev && prev.px === px && prev.overflow === overflow && prev.lines.join('|') === best.lines.join('|')
+          ? prev
+          : { px, lines: best.lines, overflow }
       );
     };
     compute();
@@ -465,9 +473,12 @@ const CellFitName: React.FC<{ text: string; scalePercent: number; style: React.C
   }, [upper, scalePercent]);
 
   return (
-    <div ref={boxRef} className="w-full h-full min-w-0 flex items-center justify-center overflow-hidden">
+    <div
+      ref={boxRef}
+      className={`w-full h-full min-w-0 flex items-center overflow-hidden ${fit?.overflow ? 'justify-start' : 'justify-center'}`}
+    >
       <span
-        className="font-black uppercase block flex-shrink-0 text-center select-none"
+        className={`font-black uppercase block flex-shrink-0 select-none ${fit?.overflow ? 'text-left' : 'text-center'}`}
         style={{
           ...style,
           fontSize: fit ? `${fit.px}px` : style.fontSize,
