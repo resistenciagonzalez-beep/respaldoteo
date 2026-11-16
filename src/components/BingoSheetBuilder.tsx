@@ -375,6 +375,9 @@ const SheetHeaderFitTitle: React.FC<{ text: string; maxPx?: number; minPx?: numb
   );
 };
 
+// Casillas máximas de la columna SECUENCIA (se recorren con las flechas ▲ ▼)
+const SEQ_MAX_SLOTS = 99;
+
 export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
   onBackToGame,
   currentUser,
@@ -532,7 +535,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
   // Find the first empty row in the sequence table (1..15)
   // "la secuencia debe anotarse desde la primera fila vacia, no la segunda"
   const activeSequenceRow = useMemo(() => {
-    const total = 15;
+    const total = SEQ_MAX_SLOTS;
     for (let r = 1; r <= total; r++) {
       const custom = customSeqEntries[r];
       const hasCustom = custom && (custom.ambo !== undefined || custom.terna !== undefined || custom.bingo !== undefined);
@@ -576,6 +579,20 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
   const [manualTernaBall, setManualTernaBall] = useState<number | null>(null);
   const [manualBingoBall, setManualBingoBall] = useState<number | null>(null);
   const [isWinningBannerDismissed, setIsWinningBannerDismissed] = useState<boolean>(false);
+
+  // Desplazamiento de la columna SECUENCIA: permite anotar más partidas que filas tiene la planilla
+  const [seqOffset, setSeqOffset] = useState<number>(0);
+  const seqVisibleRows = sheet.totalRows || 15;
+  useEffect(() => {
+    if (typeof activeSequenceRow !== 'number' || activeSequenceRow < 1) return;
+    setSeqOffset((prev) => {
+      if (activeSequenceRow > prev + seqVisibleRows) {
+        return Math.min(SEQ_MAX_SLOTS - seqVisibleRows, activeSequenceRow - seqVisibleRows);
+      }
+      if (activeSequenceRow <= prev) return Math.max(0, activeSequenceRow - 1);
+      return prev;
+    });
+  }, [activeSequenceRow, seqVisibleRows]);
 
   // Apply a manual sequence entry (Ambo, Terna, Bingo) to automatically recognize winning rows and calculate prizes
   // Only recognizes options that are currently active in the bolillero
@@ -4580,8 +4597,9 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
             if (!hasBanner) return null;
 
             return (
-              <div className="no-print w-full max-w-[900px] mb-2">
+              <div className={'no-print w-full mb-2 ' + (is15SheetExpanded ? 'max-w-full' : 'max-w-[1100px]')}>
                 <BingoWinningRowBanner
+                  large={is15SheetExpanded}
                   winningRowNumber={bannerBingoRow}
                   winningBall={manualBingoBall ?? currentMatchBingoBall ?? winningBall}
                   ternaRowNumber={bannerTernaRow}
@@ -4851,8 +4869,28 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                   </div>
 
                   {/* SECUENCIA Banner */}
-                  <div className="bg-[#facc15] text-black font-black uppercase text-[8px] sm:text-[9px] tracking-wider text-center py-0.5 border-t border-b border-black leading-none">
-                    SECUENCIA
+                  <div className="bg-[#facc15] text-black font-black uppercase text-[8px] sm:text-[9px] tracking-wider text-center py-0.5 border-t border-b border-black leading-none flex items-center justify-between gap-0.5 px-0.5">
+                    <button
+                      type="button"
+                      onClick={() => setSeqOffset((o) => Math.max(0, o - 5))}
+                      disabled={seqOffset === 0}
+                      className="no-print px-1 rounded bg-black/10 hover:bg-black/25 disabled:opacity-30 cursor-pointer leading-none"
+                      title="Subir en la secuencia (partidas anteriores)"
+                    >
+                      ▲
+                    </button>
+                    <span className="truncate">
+                      {seqOffset > 0 ? 'SEC ' + (seqOffset + 1) + '-' + (seqOffset + seqVisibleRows) : 'SECUENCIA'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setSeqOffset((o) => Math.min(SEQ_MAX_SLOTS - seqVisibleRows, o + 5))}
+                      disabled={seqOffset >= SEQ_MAX_SLOTS - seqVisibleRows}
+                      className="no-print px-1 rounded bg-black/10 hover:bg-black/25 disabled:opacity-30 cursor-pointer leading-none"
+                      title="Bajar en la secuencia (más casillas para anotar partidas)"
+                    >
+                      ▼
+                    </button>
                   </div>
 
                   {/* Sub-headers: Only show AMB, TER, BIN if their option is active in the bolillero */}
@@ -5030,8 +5068,9 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
 
                       {/* Left Cell: SECUENCIA (Only shows active bolillero lines: AMB, TER, BIN) */}
                       {(() => {
-                        const isCurrentMatchRow = activeSequenceRow === rowNumber;
-                        const customEntry = customSeqEntries[rowNumber];
+                        const seqSlot = rowNumber + seqOffset;
+const isCurrentMatchRow = activeSequenceRow === seqSlot;
+                        const customEntry = customSeqEntries[seqSlot];
 
                         const aValStr =
                           customEntry?.ambo !== undefined && customEntry.ambo !== null && Number(customEntry.ambo) > 0
@@ -5055,7 +5094,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                                 ? 'bg-amber-100/80 text-black font-black ring-1 ring-amber-400'
                                 : 'bg-slate-50 text-black'
                             }`}
-                            title={`Secuencia #${rowNumber} - Escribe directamente el número para calcular premios automáticamente.`}
+                            title={`Secuencia #${seqSlot} - Escribe directamente el número para calcular premios automáticamente.`}
                           >
                             {/* A (Ambo) - Only rendered if Ambo is active in the bolillero */}
                             {isAmboActive && (
@@ -5068,11 +5107,11 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                                   type="text"
                                   inputMode="numeric"
                                   value={aValStr}
-                                  onChange={(e) => handleInlineSeqChange(rowNumber, 'ambo', e.target.value)}
+                                  onChange={(e) => handleInlineSeqChange(seqSlot, 'ambo', e.target.value)}
                                   placeholder="-"
                                   className="w-full h-full bg-transparent text-center font-black text-sky-950 text-[13px] sm:text-[14.5px] leading-none focus:outline-none focus:bg-sky-100 placeholder:text-slate-300 placeholder:font-bold"
                                   style={cellFontSizeScale !== 100 ? { fontSize: `calc(0.9em * ${cellFontSizeScale / 100})` } : undefined}
-                                  title={`Anotar número de AMBO en secuencia #${rowNumber}`}
+                                  title={`Anotar número de AMBO en secuencia #${seqSlot}`}
                                 />
                               </div>
                             )}
@@ -5088,11 +5127,11 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                                   type="text"
                                   inputMode="numeric"
                                   value={tValStr}
-                                  onChange={(e) => handleInlineSeqChange(rowNumber, 'terna', e.target.value)}
+                                  onChange={(e) => handleInlineSeqChange(seqSlot, 'terna', e.target.value)}
                                   placeholder="-"
                                   className="w-full h-full bg-transparent text-center font-black text-slate-950 text-[13px] sm:text-[14.5px] leading-none focus:outline-none focus:bg-emerald-100 placeholder:text-slate-300 placeholder:font-bold"
                                   style={cellFontSizeScale !== 100 ? { fontSize: `calc(0.9em * ${cellFontSizeScale / 100})` } : undefined}
-                                  title={`Anotar número de TERNA en secuencia #${rowNumber}`}
+                                  title={`Anotar número de TERNA en secuencia #${seqSlot}`}
                                 />
                               </div>
                             )}
@@ -5108,11 +5147,11 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                                   type="text"
                                   inputMode="numeric"
                                   value={bValStr}
-                                  onChange={(e) => handleInlineSeqChange(rowNumber, 'bingo', e.target.value)}
+                                  onChange={(e) => handleInlineSeqChange(seqSlot, 'bingo', e.target.value)}
                                   placeholder="-"
                                   className="w-full h-full bg-transparent text-center font-black text-slate-950 text-[13px] sm:text-[14.5px] leading-none focus:outline-none focus:bg-amber-200 placeholder:text-slate-300 placeholder:font-bold"
                                   style={cellFontSizeScale !== 100 ? { fontSize: `calc(0.9em * ${cellFontSizeScale / 100})` } : undefined}
-                                  title={`Anotar número de BINGO en secuencia #${rowNumber}`}
+                                  title={`Anotar número de BINGO en secuencia #${seqSlot}`}
                                 />
                               </div>
                             )}
@@ -5287,7 +5326,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                     {/* Header 1: NOMBRE */}
                     <div
                       className={`${
-                        is15SheetExpanded ? 'h-[22px]' : 'min-h-[26px] py-1'
+                        is15SheetExpanded ? 'h-[24px]' : 'h-[28px]'
                       } bg-[#d8b4fe] text-purple-950 font-black text-[10px] sm:text-[11.5px] uppercase tracking-wider flex items-center justify-center border-b border-black`}
                     >
                       NOMBRE
@@ -5295,24 +5334,24 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                     {/* Header 2: GANO */}
                     <div
                       className={`${
-                        is15SheetExpanded ? 'h-[20px]' : 'min-h-[24px] py-0.5'
-                      } bg-[#fde047] text-amber-950 font-black text-[9.5px] sm:text-[11px] uppercase tracking-wider flex items-center justify-center border-b border-black`}
+                        is15SheetExpanded ? 'h-[22px]' : 'h-[26px]'
+                      } bg-[#fde047] text-amber-950 font-black text-[10px] sm:text-[11.5px] uppercase tracking-wider flex items-center justify-center border-b border-black`}
                     >
                       GANO
                     </div>
                     {/* Header 3: DEBE */}
                     <div
                       className={`${
-                        is15SheetExpanded ? 'h-[20px]' : 'min-h-[24px] py-0.5'
-                      } bg-[#fef08a] text-amber-950 font-black text-[9.5px] sm:text-[11px] uppercase tracking-wider flex items-center justify-center border-b border-black`}
+                        is15SheetExpanded ? 'h-[22px]' : 'h-[26px]'
+                      } bg-[#fef08a] text-amber-950 font-black text-[10px] sm:text-[11.5px] uppercase tracking-wider flex items-center justify-center border-b border-black`}
                     >
                       DEBE
                     </div>
                     {/* Header 4: TOTAL */}
                     <div
                       className={`${
-                        is15SheetExpanded ? 'h-[20px]' : 'min-h-[24px] py-0.5'
-                      } bg-[#facc15] text-amber-950 font-black text-[9.5px] sm:text-[11px] uppercase tracking-wider flex items-center justify-center`}
+                        is15SheetExpanded ? 'h-[22px]' : 'h-[26px]'
+                      } bg-[#facc15] text-amber-950 font-black text-[10px] sm:text-[11.5px] uppercase tracking-wider flex items-center justify-center`}
                     >
                       TOTAL
                     </div>
@@ -5321,7 +5360,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                   {/* Right Player Columns (One column per registered player, independent of top sheet columns) */}
                   <div className="flex-1 flex min-w-0">
                     {playerSummaryList.length === 0 ? (
-                      <div className={`flex-1 flex items-center justify-center ${is15SheetExpanded ? 'h-[82px] py-1 text-[10px]' : 'py-3 text-xs'} px-3 text-slate-400 italic font-bold uppercase bg-white`}>
+                      <div className={`flex-1 flex items-center justify-center ${is15SheetExpanded ? 'h-[90px] text-[10px]' : 'h-[106px] text-xs'} px-3 text-slate-400 italic font-bold uppercase bg-white`}>
                         <span>+ Agrega jugadores para ver saldos</span>
                       </div>
                     ) : (
@@ -5332,21 +5371,21 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                         return (
                           <div
                             key={p.id}
-                            className="min-w-[80px] sm:min-w-[95px] flex-1 flex flex-col border-r border-black text-center group/pcol"
+                            className="min-w-[80px] sm:min-w-[95px] flex-1 flex flex-col border-r border-black text-center group/pcol overflow-hidden"
                           >
                             {/* Row 1: NOMBRE */}
                             <div
                               onClick={() => setSelectedPlayerId(p.id)}
                               className={`${
-                                is15SheetExpanded ? 'h-[22px]' : 'min-h-[26px] py-1'
-                              } px-0.5 sm:px-1 flex items-center justify-center font-black uppercase cursor-pointer hover:opacity-90 border-b border-black transition-opacity`}
+                                is15SheetExpanded ? 'h-[24px]' : 'h-[28px]'
+                              } px-0.5 sm:px-1 flex items-center justify-center overflow-hidden font-black uppercase cursor-pointer hover:opacity-90 border-b border-black transition-opacity`}
                               style={{
                                 backgroundColor: p.color ? `${p.color}dd` : '#f3e8ff',
                                 color: '#000000',
                               }}
                               title={`${p.name.toUpperCase()}. Clic para pintar casillas con este jugador.`}
                             >
-                              <div className="flex items-center justify-center gap-0.5 w-full">
+                              <div className="flex items-center justify-center gap-0.5 w-full min-w-0 overflow-hidden">
                                 {(() => {
                                   const pObj = sheet.players.find(
                                     (pl) =>
@@ -5363,7 +5402,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                                   );
                                   return (
                                     <span
-                                      className="font-black block text-center"
+                                      className="font-black block text-center truncate min-w-0 max-w-full leading-tight"
                                       style={pNameStyle.style}
                                     >
                                       {p.name.toUpperCase()}
@@ -5410,8 +5449,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                                 setManualDebeStr(p.debe.toString());
                               }}
                               className={`${
-                                is15SheetExpanded ? 'h-[20px]' : 'min-h-[24px] py-0.5'
-                              } px-1 flex items-center justify-center gap-1 font-black tabular-nums text-[12px] sm:text-[13px] tracking-tight border-b border-black cursor-pointer hover:bg-yellow-100 transition-colors relative group/ganocell ${
+                                is15SheetExpanded ? 'h-[22px]' : 'h-[26px]'
+                              } px-1 flex items-center justify-center gap-1 overflow-hidden font-black tabular-nums text-[12px] sm:text-[13px] tracking-tight border-b border-black cursor-pointer hover:bg-yellow-100 transition-colors relative group/ganocell ${
                                 p.totalGano > 0 ? 'text-emerald-950 bg-emerald-100/90' : 'text-black bg-[#fefce8]'
                               }`}
                               style={cellFontSizeScale !== 100 ? { fontSize: `calc(1em * ${cellFontSizeScale / 100})` } : undefined}
@@ -5459,7 +5498,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                                 setManualDebeStr(p.debe.toString());
                               }}
                               className={`${
-                                is15SheetExpanded ? 'h-[20px]' : 'min-h-[24px] py-0.5'
+                                is15SheetExpanded ? 'h-[22px]' : 'h-[26px]'
                               } px-0.5 sm:px-1 flex items-center justify-center font-black tabular-nums text-[12px] sm:text-[13px] tracking-tight border-b border-black cursor-pointer hover:bg-yellow-100 transition-colors ${
                                 p.debe > 0 ? 'text-rose-950 bg-rose-100/80' : 'text-black bg-[#fefce8]'
                               }`}
@@ -5486,7 +5525,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                                 setManualDebeStr(p.debe.toString());
                               }}
                               className={`${
-                                is15SheetExpanded ? 'h-[20px]' : 'min-h-[24px] py-0.5'
+                                is15SheetExpanded ? 'h-[22px]' : 'h-[26px]'
                               } px-0.5 sm:px-1 flex items-center justify-center font-black tabular-nums text-[12px] sm:text-[13.5px] tracking-tight cursor-pointer hover:opacity-90 transition-opacity relative group/totcell ${
                                 isNegative
                                   ? 'text-red-950 bg-red-200/95'
