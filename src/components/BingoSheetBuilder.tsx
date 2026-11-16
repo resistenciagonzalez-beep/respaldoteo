@@ -5465,7 +5465,7 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                                   : ''
                               } = $${p.totalGano.toFixed(2)}. Clic para ajustar o marcar premio como pagado.`}
                             >
-                              <span className="font-black drop-shadow-2xs">
+                              <span className="font-black drop-shadow-2xs" style={{ WebkitTextStroke: '0.6px currentColor' }}>
                                 {p.totalGano.toFixed(2)}
                               </span>
 
@@ -5477,11 +5477,10 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                                     e.stopPropagation();
                                     handleMarkPlayerGanoPaid(p.id, p.name);
                                   }}
-                                  className="no-print px-1 py-0.5 rounded bg-emerald-600 text-white hover:bg-emerald-700 active:scale-95 font-black text-[8px] sm:text-[8.5px] tracking-tight leading-none flex items-center gap-0.5 shadow-2xs transition-all cursor-pointer flex-shrink-0"
+                                  className="no-print p-[1px] rounded-sm bg-emerald-600 text-white hover:bg-emerald-700 active:scale-95 leading-none flex items-center justify-center shadow-2xs transition-all cursor-pointer flex-shrink-0"
                                   title={`Marcar premio de ${p.name.toUpperCase()} como enviado/pagado (deja GANO en 0.00)`}
                                 >
-                                  <Check className="w-2.5 h-2.5" />
-                                  <span>Pagado</span>
+                                  <Check className="w-2.5 h-2.5" strokeWidth={4} />
                                 </button>
                               )}
                             </div>
@@ -5508,7 +5507,7 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                                 p.previousDebt > 0 ? ` (Deuda anterior: $${p.previousDebt.toFixed(2)})` : ''
                               }. Clic para abonar o liquidar.`}
                             >
-                              <span className="font-black drop-shadow-2xs">
+                              <span className="font-black drop-shadow-2xs" style={{ WebkitTextStroke: '0.6px currentColor' }}>
                                 {p.debe.toFixed(2)}
                               </span>
                             </div>
@@ -5537,7 +5536,7 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                               style={cellFontSizeScale !== 100 ? { fontSize: `calc(1em * ${cellFontSizeScale / 100})` } : undefined}
                               title={`Saldo final de ${p.name.toUpperCase()}: Ganó $${p.totalGano.toFixed(2)} - Debe $${p.debe.toFixed(2)} = $${p.total.toFixed(2)}. Clic para ajustar o reiniciar saldo a $0.`}
                             >
-                              <span className="font-black drop-shadow-2xs">
+                              <span className="font-black drop-shadow-2xs" style={{ WebkitTextStroke: '0.6px currentColor' }}>
                                 {isNegative
                                   ? `-${Math.abs(p.total).toFixed(2)}`
                                   : isPositive
