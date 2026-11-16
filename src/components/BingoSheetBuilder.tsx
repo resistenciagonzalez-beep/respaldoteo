@@ -4557,8 +4557,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
           }`}
         >
           <main
-            className={`flex-1 w-full flex flex-col items-center justify-center print-container ${
-              is15SheetExpanded ? 'h-full max-h-full overflow-hidden p-0.5 sm:p-1' : 'overflow-x-auto'
+            className={`flex-1 w-full flex flex-col items-center print-container ${
+              is15SheetExpanded ? 'justify-start h-full max-h-full overflow-y-auto overflow-x-hidden p-0.5 sm:p-1' : 'justify-center overflow-x-auto'
             }`}
           >
           {/* Winning Row Banner with automatic calculation of player earnings across Bingo, Terna, and Ambo */}
@@ -4616,6 +4616,12 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
             );
           })()}
 
+          {/* Bloque fijo (barra + planilla): ocupa siempre el alto completo. Si el cuadro rojo crece,
+              empuja este bloque hacia abajo sin encoger la planilla, y se recorre con scroll. */}
+          <div
+            className={is15SheetExpanded ? 'w-full flex flex-col items-center flex-shrink-0 min-h-0' : 'contents'}
+            style={is15SheetExpanded ? { height: '100%' } : undefined}
+          >
           {/* Manual Text Size Adjustment Bar & Results Quick Bar (Completely Hideable and Reopenable) */}
           {isTopAdjustmentBarVisible ? (
             <div className="no-print w-full max-w-[1280px] mb-2 px-3 py-1.5 rounded-xl bg-white border-2 border-orange-200/90 shadow-xs flex flex-wrap items-center justify-between gap-2 text-xs transition-all animate-fade-in">
@@ -5595,6 +5601,7 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
             </div>
           </div>
         </div>
+          </div>
       </main>
       </div>
 
