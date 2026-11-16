@@ -5731,30 +5731,6 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
               </div>
             </div>
 
-            {/* Bottom Footer Note */}
-            <div className={`border-t border-black/40 flex flex-wrap items-center justify-between text-slate-700 font-bold select-none flex-shrink-0 ${
-              is15SheetExpanded ? 'mt-0.5 pt-0.5 text-[8.5px]' : 'mt-2 pt-1.5 text-[9px] sm:text-[10px]'
-            }`}>
-              <div className="flex flex-wrap items-center gap-2">
-                <span>Planilla Oficial por Multiplicadores</span>
-                <span className="text-red-700 font-extrabold flex items-center gap-1">
-                  <span className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full border border-black text-[7px] font-black relative">
-                    <span className="absolute inset-0 flex items-center justify-center">
-                      <span className="w-full border-b-2 border-red-600 -rotate-45" />
-                    </span>
-                    #
-                  </span>
-                  Círculo tachado = Pagado
-                </span>
-                {activeWinningRow && (
-                  <span className="text-emerald-800 bg-emerald-100 px-1.5 py-0.5 rounded font-black flex items-center gap-1">
-                    <span>🏆</span>
-                    Fila #{activeWinningRow} Ganadora
-                  </span>
-                )}
-              </div>
-              <span>Casillas: {stats.filledCells}/{stats.totalCells}</span>
-            </div>
           </div>
         </div>
           </div>
