@@ -11,6 +11,7 @@ interface BingoWinningRowBannerProps {
   amboBall?: number | null;
   sheet: BingoSheetData;
   onClose: () => void;
+  large?: boolean; // planilla expandida: se muestra más grande
   onMarkPlayerGanoPaid?: (playerId: string, playerName: string) => void;
   playerSummaryList?: Array<{
     id: string;
@@ -51,6 +52,7 @@ export const BingoWinningRowBanner: React.FC<BingoWinningRowBannerProps> = ({
   amboBall,
   sheet,
   onClose,
+  large = false,
 }) => {
   const hasAnyActiveRow =
     (winningRowNumber !== null && winningRowNumber !== undefined) ||
@@ -183,30 +185,35 @@ export const BingoWinningRowBanner: React.FC<BingoWinningRowBannerProps> = ({
   const grandTotalPrizes = winners.reduce((acc, w) => acc + w.totalPrize, 0);
 
   return (
-    <div className="no-print mb-1 rounded-xl bg-red-900/95 border border-red-400/40 px-2.5 py-1 text-white shadow-sm flex flex-wrap items-center justify-between gap-1.5 text-[11px]">
+    <div
+      className={
+        'no-print mb-1 rounded-xl bg-red-900/95 border border-red-400/40 text-white shadow-sm flex flex-wrap items-center justify-between ' +
+        (large ? 'px-4 py-2 gap-3 text-[17px]' : 'px-3 py-1.5 gap-2 text-[13px]')
+      }
+    >
       {/* Left: Compact Winning Row Badges */}
       <div className="flex items-center gap-1.5 flex-wrap">
         <span className="inline-flex items-center gap-1 font-black text-amber-300 uppercase tracking-tight">
-          <Trophy className="w-3.5 h-3.5 text-amber-300" />
+          <Trophy className="w-[1.2em] h-[1.2em] text-amber-300" />
           <span>Filas:</span>
         </span>
 
         {amboRowNumber !== null && amboRowNumber !== undefined && (
-          <span className="text-[10px] font-black uppercase px-1.5 py-0.2 rounded bg-sky-500/30 text-sky-100 border border-sky-300/40">
+          <span className="text-[0.9em] font-black uppercase px-1.5 py-0.2 rounded bg-sky-500/30 text-sky-100 border border-sky-300/40">
             Ambo #{amboRowNumber}
             {amboBall !== null && amboBall !== undefined ? ` (${amboBall})` : ''}
           </span>
         )}
 
         {ternaRowNumber !== null && ternaRowNumber !== undefined && (
-          <span className="text-[10px] font-black uppercase px-1.5 py-0.2 rounded bg-emerald-500/30 text-emerald-100 border border-emerald-300/40">
+          <span className="text-[0.9em] font-black uppercase px-1.5 py-0.2 rounded bg-emerald-500/30 text-emerald-100 border border-emerald-300/40">
             Terna #{ternaRowNumber}
             {ternaBall !== null && ternaBall !== undefined ? ` (${ternaBall})` : ''}
           </span>
         )}
 
         {winningRowNumber !== null && winningRowNumber !== undefined && (
-          <span className="text-[10px] font-black uppercase px-1.5 py-0.2 rounded bg-amber-400 text-amber-950 border border-amber-200">
+          <span className="text-[0.9em] font-black uppercase px-1.5 py-0.2 rounded bg-amber-400 text-amber-950 border border-amber-200">
             Bingo #{winningRowNumber}
             {winningBall !== null && winningBall !== undefined ? ` (${winningBall})` : ''}
           </span>
@@ -216,19 +223,19 @@ export const BingoWinningRowBanner: React.FC<BingoWinningRowBannerProps> = ({
       {/* Center: Compact Inline Winners Pills */}
       <div className="flex items-center gap-1 flex-wrap flex-1 justify-center min-w-0">
         {winners.length === 0 ? (
-          <span className="text-[10px] text-amber-200/80 italic">Sin ganadores en fila</span>
+          <span className="text-[0.9em] text-amber-200/80 italic">Sin ganadores en fila</span>
         ) : (
           winners.map((w) => (
             <span
               key={w.playerId}
-              className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded bg-white/10 border border-white/20 text-[10px] font-black whitespace-nowrap"
+              className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded bg-white/10 border border-white/20 text-[0.9em] font-black whitespace-nowrap"
               title={`${w.playerName.toUpperCase()} (${w.categoriesWon.join('+')}): +${sheet.currency}${w.totalPrize.toFixed(2)}`}
             >
               <span
-                className="w-2 h-2 rounded-full border border-white/70 flex-shrink-0"
+                className="w-[0.7em] h-[0.7em] rounded-full border border-white/70 flex-shrink-0"
                 style={{ backgroundColor: w.color }}
               />
-              <span className="text-white truncate max-w-[90px]">{w.playerName.toUpperCase()}</span>
+              <span className="text-white truncate max-w-[11em]">{w.playerName.toUpperCase()}</span>
               <span className="text-amber-300 font-mono">+{sheet.currency}{w.totalPrize.toFixed(2)}</span>
             </span>
           ))
@@ -237,7 +244,7 @@ export const BingoWinningRowBanner: React.FC<BingoWinningRowBannerProps> = ({
 
       {/* Right: Total & Close Button */}
       <div className="flex items-center gap-1.5 flex-shrink-0 ml-auto">
-        <span className="px-1.5 py-0.2 rounded bg-emerald-500/25 border border-emerald-400/40 text-emerald-200 font-black text-[10px] font-mono whitespace-nowrap">
+        <span className="px-1.5 py-0.2 rounded bg-emerald-500/25 border border-emerald-400/40 text-emerald-200 font-black text-[0.9em] font-mono whitespace-nowrap">
           Total: {sheet.currency}{grandTotalPrizes.toFixed(2)}
         </span>
         <button
@@ -246,7 +253,7 @@ export const BingoWinningRowBanner: React.FC<BingoWinningRowBannerProps> = ({
           className="p-0.5 rounded bg-white/10 hover:bg-white/25 text-white/80 hover:text-white transition-colors cursor-pointer"
           title="Ocultar barra de premios"
         >
-          <X className="w-3.5 h-3.5" />
+          <X className="w-[1.2em] h-[1.2em]" />
         </button>
       </div>
     </div>
