@@ -279,9 +279,13 @@ export function executeMismosReconstruction({
   };
 
   // Busca casillas libres de ese número cuyos valores sumen EXACTAMENTE "value" (con la menor cantidad de casillas)
-  const findExactCombination = (rowNum: number, value: number): BingoSheetColumn[] | null => {
+  const findExactCombination = (rowNum: number, value: number, allowEqual = false): BingoSheetColumn[] | null => {
     const free = updatedColumns
-      .filter((col) => isCellFree(getRowCell(col, rowNum)) && (col.multiplier || 1) < value)
+      .filter(
+        (col) =>
+          isCellFree(getRowCell(col, rowNum)) &&
+          ((col.multiplier || 1) < value || (allowEqual && (col.multiplier || 1) === value))
+      )
       .sort((a, b) => (b.multiplier || 1) - (a.multiplier || 1))
       .slice(0, 24);
     let best: BingoSheetColumn[] | null = null;
@@ -354,12 +358,7 @@ export function executeMismosReconstruction({
       .sort((a, b) => a - b)
       .forEach((rowNum) => {
         const neededValues = (previousByRow.get(rowNum) || []).slice().sort((a, b) => b - a);
-
-        // Lo que el jugador YA tiene anotado en este número en la partida actual
-        const ownValues: number[] = [];
-        updatedColumns.forEach((col) => {
-          if (cellBelongsTo(getRowCell(col, rowNum), player.id, targetNorm)) ownValues.push(col.multiplier || 1);
-        });
+        const rowTotal = neededValues.reduce((sum, val) => sum + val, 0);
 
         neededValues.forEach((value) => {
           playerTarget++;
@@ -367,40 +366,68 @@ export function executeMismosReconstruction({
           const s = summary.get(value) || { target: 0, assigned: 0 };
           s.target++;
           summary.set(value, s);
+        });
 
-          // Ya lo tiene con ese mismo valor: no se duplica
-          const ownIdx = ownValues.indexOf(value);
-          if (ownIdx >= 0) {
-            ownValues.splice(ownIdx, 1);
-            s.assigned++;
+        const markRowAssigned = () => {
+          neededValues.forEach((value) => {
+            const s = summary.get(value);
+            if (s) s.assigned++;
             playerAssigned++;
             totalAssigned++;
-            return;
-          }
+          });
+        };
 
-          // a) Columna del mismo valor con ese número libre
+        // Lo que el jugador YA tiene anotado en este número en la partida actual
+        const ownValues: number[] = [];
+        updatedColumns.forEach((col) => {
+          if (cellBelongsTo(getRowCell(col, rowNum), player.id, targetNorm)) ownValues.push(col.multiplier || 1);
+        });
+        const ownTotal = ownValues.reduce((sum, val) => sum + val, 0);
+
+        // Ya tiene el valor completo de ese número: no se duplica
+        if (ownTotal >= rowTotal) {
+          markRowAssigned();
+          return;
+        }
+
+        // Piezas que faltan según cómo estaba anotado antes (sin las que ya tiene iguales)
+        const pendingPieces = neededValues.slice();
+        ownValues.forEach((ov) => {
+          const idx = pendingPieces.indexOf(ov);
+          if (idx >= 0) pendingPieces.splice(idx, 1);
+        });
+        const remaining = rowTotal - ownTotal;
+
+        // 1) SIMPLIFICAR: la menor cantidad de casillas libres de ese número que sumen exactamente lo que falta
+        //    (ej.: antes 2 casillas X2 = 4, ahora hay una X4 libre -> se anota en la X4)
+        const simplified = findExactCombination(rowNum, remaining, true);
+        if (simplified && simplified.length > 0 && simplified.length <= Math.max(1, pendingPieces.length)) {
+          simplified.forEach((col) => assignCell(col, rowNum, player));
+          assignedDetail.push(rowNum + ' X' + remaining);
+          markRowAssigned();
+          return;
+        }
+
+        // 2) Si no se puede simplificar: igual que antes, valor por valor
+        if (pendingPieces.length === 0) pendingPieces.push(remaining);
+        pendingPieces.forEach((value) => {
           const sameValueCol = updatedColumns.find(
             (col) => (col.multiplier || 1) === value && isCellFree(getRowCell(col, rowNum))
           );
           if (sameValueCol) {
             assignCell(sameValueCol, rowNum, player);
           } else {
-            // b) Combinar casillas libres de ese número que sumen exactamente el valor
             const combo = findExactCombination(rowNum, value);
             if (combo && combo.length > 0) {
               combo.forEach((col) => assignCell(col, rowNum, player));
             } else {
-              // c) Abrir una columna nueva con ese valor
               const newCol = createColumn(value);
               assignCell(newCol, rowNum, player);
             }
           }
-
           assignedDetail.push(rowNum + ' X' + value);
-          s.assigned++;
-          playerAssigned++;
-          totalAssigned++;
         });
+        markRowAssigned();
       });
 
     playerReports.push({
