@@ -27,6 +27,7 @@ import {
   documentId,
   Timestamp,
   writeBatch,
+  getCountFromServer,
   FieldValue,
   QueryDocumentSnapshot,
   QuerySnapshot,
@@ -1164,6 +1165,10 @@ let activeHistoricalHydrationPromise: Promise<void> | null = null;
 const SYNC_PAGE_SIZE = 150;
 const SYNC_OVERLAP_MS = 2 * 60 * 1000;
 const OPERATOR_FULL_RESYNC_MS = 7 * 24 * 60 * 60 * 1000;
+// Administradores: revisión rápida periódica mientras la página está abierta
+const ADMIN_PERIODIC_SYNC_MS = 10 * 60 * 1000;
+// Administradores: como máximo una descarga completa de reparación cada 12 horas
+const ADMIN_INTEGRITY_RECHECK_MS = 12 * 60 * 60 * 1000;
 
 interface GamesSyncMeta {
   lastFullSyncAt: number;
@@ -1171,6 +1176,7 @@ interface GamesSyncMeta {
   lastDeletionMs: number;
   lastDeltaDay: string;
   lastHintMs: number;
+  lastIntegrityFullAt: number;
 }
 
 const EMPTY_SYNC_META: GamesSyncMeta = {
@@ -1179,6 +1185,7 @@ const EMPTY_SYNC_META: GamesSyncMeta = {
   lastDeletionMs: 0,
   lastDeltaDay: '',
   lastHintMs: 0,
+  lastIntegrityFullAt: 0,
 };
 
 function readSyncMeta(): GamesSyncMeta {
@@ -1226,6 +1233,7 @@ let dayWatchTimer: ReturnType<typeof setInterval> | null = null;
 let pendingStopTimer: ReturnType<typeof setTimeout> | null = null;
 let activeSyncRun: Promise<void> | null = null;
 let syncGeneration = 0;
+let lastAdminPeriodicSyncAt = 0;
 
 function notifySavedGamesSubscribers(emitWindowEvent: boolean): void {
   cachedSortedGames = sortGamesChronologicallyDesc(Array.from(firestoreGamesMemoryStore.values()));
@@ -1374,6 +1382,15 @@ async function runFullSync(generation: number, hintMs: number): Promise<void> {
     if (!seen.has(id)) removeGameLocally(id);
   }
 
+  // La descarga solo se da por terminada cuando TODAS las partidas quedaron guardadas en el dispositivo.
+  // (Si la página se cierra antes, la próxima vez se vuelve a descargar todo y no quedan partidas faltantes.)
+  try {
+    await idbWriteChain;
+  } catch {
+    // ignore
+  }
+  if (generation !== syncGeneration) return;
+
   writeSyncMeta({
     lastFullSyncAt: Date.now(),
     lastServerUpdateMs: Math.max(maxUpdated, meta.lastServerUpdateMs),
@@ -1382,6 +1399,31 @@ async function runFullSync(generation: number, hintMs: number): Promise<void> {
     lastHintMs: Math.max(hintMs, meta.lastHintMs || 0),
   });
   broadcastMemoryStoreToSubscribers();
+}
+
+/**
+ * Administradores: comprueba (con un simple conteo, muy barato) si en el dispositivo
+ * faltan partidas que sí existen en la nube.
+ */
+async function adminCacheLooksIncomplete(generation: number): Promise<boolean> {
+  try {
+    const snap = await getCountFromServer(collection(db, 'saved_games'));
+    if (generation !== syncGeneration) return false;
+    const serverCount = snap.data().count;
+    let localSynced = 0;
+    firestoreGamesMemoryStore.forEach((_g, id) => {
+      const task = syncQueueMap.get(id);
+      if (!task || task.status === 'synced') localSynced++;
+    });
+    if (serverCount > localSynced) {
+      console.info('[SYNC] Faltan partidas en este dispositivo (' + localSynced + ' de ' + serverCount + '). Se completan.');
+      return true;
+    }
+    return false;
+  } catch (err) {
+    console.info('[SYNC] Conteo de partidas no disponible por ahora:', err);
+    return false;
+  }
 }
 
 async function applyRemoteDeletions(sinceMs: number, generation: number): Promise<number> {
@@ -1499,7 +1541,17 @@ async function runSyncCycle(): Promise<void> {
           await runFullSync(generation, 0);
         } else {
           await runAdminDeltaSync(generation);
+          // Garantía: si al administrador le falta alguna partida en este dispositivo, se completa
+          if (
+            generation === syncGeneration &&
+            Date.now() - (meta.lastIntegrityFullAt || 0) > ADMIN_INTEGRITY_RECHECK_MS &&
+            (await adminCacheLooksIncomplete(generation))
+          ) {
+            writeSyncMeta({ lastIntegrityFullAt: Date.now() });
+            if (generation === syncGeneration) await runFullSync(generation, 0);
+          }
         }
+        lastAdminPeriodicSyncAt = Date.now();
       } else {
         let hintMs = 0;
         try {
@@ -1592,6 +1644,15 @@ function startRemoteSync(): void {
       if (!sessionCtx || !activeTodayUnsubscribe) return;
       if (activeTodayKey !== getCurrentLocalDateKey()) {
         startTodayListener();
+        void runSyncCycle();
+      } else if (
+        sessionCtx.isAdmin &&
+        Date.now() - lastAdminPeriodicSyncAt > ADMIN_PERIODIC_SYNC_MS &&
+        (typeof document === 'undefined' || document.visibilityState === 'visible')
+      ) {
+        // Administradores: cada 10 minutos se traen solo las partidas nuevas o modificadas
+        // (por ejemplo, partidas de días anteriores editadas después de medianoche)
+        lastAdminPeriodicSyncAt = Date.now();
         void runSyncCycle();
       }
     }, 60000);
