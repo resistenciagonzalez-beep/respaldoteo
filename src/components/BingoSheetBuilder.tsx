@@ -5616,7 +5616,7 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                               } px-1 flex items-center justify-center gap-1 overflow-hidden leading-none font-black tabular-nums text-[12px] sm:text-[13px] tracking-tight border-b border-black cursor-pointer hover:bg-yellow-100 transition-colors relative group/ganocell ${
                                 p.totalGano > 0 ? 'text-emerald-950 bg-emerald-100/90' : 'text-black bg-[#fefce8]'
                               }`}
-                              style={cellFontSizeScale !== 100 ? { fontSize: `${Math.min(13 * (cellFontSizeScale / 100), is15SheetExpanded ? 17 : 21).toFixed(1)}px` } : undefined}
+                              style={{ fontSize: `${Math.min((is15SheetExpanded ? 14.5 : 16.5) * (cellFontSizeScale / 100), is15SheetExpanded ? 18 : 22).toFixed(1)}px` }}
                               title={`${p.name.toUpperCase()} - Ganado Acumulado: $${p.previousWon.toFixed(2)}${
                                 p.currentWon > 0
                                   ? ` + Esta Partida: $${p.currentWon.toFixed(2)}${
@@ -5627,7 +5627,7 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                                   : ''
                               } = $${p.totalGano.toFixed(2)}. Clic para ajustar o marcar premio como pagado.`}
                             >
-                              <span className="font-black drop-shadow-2xs" style={{ WebkitTextStroke: '0.6px currentColor' }}>
+                              <span className="font-black drop-shadow-2xs" style={{ WebkitTextStroke: '0.9px currentColor', letterSpacing: '0.02em' }}>
                                 {p.totalGano.toFixed(2)}
                               </span>
 
@@ -5664,12 +5664,12 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                               } px-0.5 sm:px-1 flex items-center justify-center overflow-hidden leading-none font-black tabular-nums text-[12px] sm:text-[13px] tracking-tight border-b border-black cursor-pointer hover:bg-yellow-100 transition-colors ${
                                 p.debe > 0 ? 'text-rose-950 bg-rose-100/80' : 'text-black bg-[#fefce8]'
                               }`}
-                              style={cellFontSizeScale !== 100 ? { fontSize: `${Math.min(13 * (cellFontSizeScale / 100), is15SheetExpanded ? 17 : 21).toFixed(1)}px` } : undefined}
+                              style={{ fontSize: `${Math.min((is15SheetExpanded ? 14.5 : 16.5) * (cellFontSizeScale / 100), is15SheetExpanded ? 18 : 22).toFixed(1)}px` }}
                               title={`${p.name.toUpperCase()} debe $${p.debe.toFixed(2)}${
                                 p.previousDebt > 0 ? ` (Deuda anterior: $${p.previousDebt.toFixed(2)})` : ''
                               }. Clic para abonar o liquidar.`}
                             >
-                              <span className="font-black drop-shadow-2xs" style={{ WebkitTextStroke: '0.6px currentColor' }}>
+                              <span className="font-black drop-shadow-2xs" style={{ WebkitTextStroke: '0.9px currentColor', letterSpacing: '0.02em' }}>
                                 {p.debe.toFixed(2)}
                               </span>
                             </div>
@@ -5695,10 +5695,10 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                                   ? 'text-emerald-950 bg-emerald-200/95'
                                   : 'text-black bg-amber-100/90'
                               }`}
-                              style={cellFontSizeScale !== 100 ? { fontSize: `${Math.min(13.5 * (cellFontSizeScale / 100), is15SheetExpanded ? 17 : 21).toFixed(1)}px` } : undefined}
+                              style={{ fontSize: `${Math.min((is15SheetExpanded ? 14.5 : 16.5) * (cellFontSizeScale / 100), is15SheetExpanded ? 18 : 22).toFixed(1)}px` }}
                               title={`Saldo final de ${p.name.toUpperCase()}: Ganó $${p.totalGano.toFixed(2)} - Debe $${p.debe.toFixed(2)} = $${p.total.toFixed(2)}. Clic para ajustar o reiniciar saldo a $0.`}
                             >
-                              <span className="font-black drop-shadow-2xs" style={{ WebkitTextStroke: '0.6px currentColor' }}>
+                              <span className="font-black drop-shadow-2xs" style={{ WebkitTextStroke: '0.9px currentColor', letterSpacing: '0.02em' }}>
                                 {isNegative
                                   ? `-${Math.abs(p.total).toFixed(2)}`
                                   : isPositive
