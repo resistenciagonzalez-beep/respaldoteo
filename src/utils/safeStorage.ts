@@ -29,6 +29,13 @@ const SMALL_CONFIG_ALLOWED_KEYS = new Set<string>([
 ]);
 
 /**
+ * Claves pequeñas de sincronización (dueño de la copia local y estado de descarga).
+ * Se guardan en localStorage porque es inmediato y fiable: si se perdieran, el
+ * dispositivo volvería a descargar TODAS las partidas (mucho gasto de lecturas).
+ */
+const SMALL_SYNC_KEY_PREFIXES = ['bingo_games_cache_owner_v3', 'bingo_games_sync_meta_v3_'];
+
+/**
  * Prefixes of keys that hold games, galleries, sheets, archives, shifts, sequences, or caches
  * and MUST NEVER be written to localStorage (always routed to IndexedDB + memory mirror).
  */
@@ -69,7 +76,7 @@ export function shouldRouteToIndexedDB(key: string, byteSize?: number): boolean 
   if (INDEXEDDB_ONLY_KEY_PREFIXES.some((prefix) => key === prefix || key.startsWith(prefix))) {
     return true;
   }
-  if (!SMALL_CONFIG_ALLOWED_KEYS.has(key)) {
+  if (!SMALL_CONFIG_ALLOWED_KEYS.has(key) && !SMALL_SYNC_KEY_PREFIXES.some((prefix) => key.startsWith(prefix))) {
     return true;
   }
   if (typeof byteSize === 'number' && byteSize > MAX_LOCAL_STORAGE_ITEM_BYTES) {
