@@ -1,6 +1,58 @@
-import html2canvas from 'html2canvas';
-import { jsPDF } from 'jspdf';
 import { GameSequenceItem } from '../types';
+
+// ============================================================================
+// Herramientas de exportación (imagen y PDF) cargadas SOLO cuando hacen falta.
+// Así la plataforma abre más rápido: estas librerías pesan ~500 KB y casi no se usan.
+// Además se precargan en segundo plano unos segundos después de abrir la página,
+// para que exportar sea igual de rápido y funcione aunque se publique una versión nueva.
+// ============================================================================
+type Html2CanvasFn = typeof import('html2canvas').default;
+type JsPdfCtor = typeof import('jspdf').jsPDF;
+
+let html2canvasPromise: Promise<Html2CanvasFn> | null = null;
+let jsPdfPromise: Promise<JsPdfCtor> | null = null;
+
+const EXPORT_LOAD_ERROR =
+  'No se pudo cargar la herramienta de exportación. Revisa tu conexión o recarga la página e intenta de nuevo.';
+
+function loadHtml2Canvas(): Promise<Html2CanvasFn> {
+  if (!html2canvasPromise) {
+    html2canvasPromise = import('html2canvas')
+      .then((m) => m.default)
+      .catch((err) => {
+        html2canvasPromise = null; // permite reintentar después
+        console.error('Error cargando html2canvas:', err);
+        throw new Error(EXPORT_LOAD_ERROR);
+      });
+  }
+  return html2canvasPromise;
+}
+
+function loadJsPdf(): Promise<JsPdfCtor> {
+  if (!jsPdfPromise) {
+    jsPdfPromise = import('jspdf')
+      .then((m) => m.jsPDF)
+      .catch((err) => {
+        jsPdfPromise = null; // permite reintentar después
+        console.error('Error cargando jsPDF:', err);
+        throw new Error(EXPORT_LOAD_ERROR);
+      });
+  }
+  return jsPdfPromise;
+}
+
+// Precarga en segundo plano (sin afectar la carga inicial)
+if (typeof window !== 'undefined') {
+  const preload = () => {
+    void loadHtml2Canvas().catch(() => undefined);
+    void loadJsPdf().catch(() => undefined);
+  };
+  window.setTimeout(() => {
+    const ric = (window as unknown as { requestIdleCallback?: (cb: () => void) => void }).requestIdleCallback;
+    if (typeof ric === 'function') ric.call(window, preload);
+    else preload();
+  }, 8000);
+}
 
 // Evita que un nombre con código HTML se ejecute dentro del reporte
 function escapeReportHtml(value: unknown): string {
@@ -21,6 +73,7 @@ export async function exportElementAsJpg(
   filename: string = 'partida_bingo.jpg'
 ): Promise<void> {
   try {
+    const html2canvas = await loadHtml2Canvas();
     const canvas = await html2canvas(element, {
       scale: 2, // High resolution for crisp text and numbers
       useCORS: true,
@@ -50,6 +103,7 @@ export async function exportElementAsPdf(
   metadata?: { round?: number; operator?: string; date?: string }
 ): Promise<void> {
   try {
+    const [html2canvas, jsPDF] = await Promise.all([loadHtml2Canvas(), loadJsPdf()]);
     const canvas = await html2canvas(element, {
       scale: 2,
       useCORS: true,
