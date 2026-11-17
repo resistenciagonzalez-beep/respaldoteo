@@ -134,6 +134,13 @@ interface BingoSheetBuilderProps {
 // Colores vivos, brillantes y saturados para los jugadores (no pasteles)
 const PRESET_COLORS = VIBRANT_PLAYER_COLORS;
 
+// Colores extra que se muestran PRIMERO en la paleta de fondos (solo en la paleta; no cambian los colores automáticos)
+const EXTRA_BG_COLORS = [
+  { name: 'Rojo Pasión', hex: '#c4001a', border: '#8a0012', text: '#ffffff', darkText: false },
+  { name: 'Negro', hex: '#000000', border: '#333333', text: '#ffffff', darkText: false },
+];
+const BG_PALETTE_COLORS = [...EXTRA_BG_COLORS, ...PRESET_COLORS];
+
 /**
  * Calculates adaptive font size and letter tracking for player names in cells
  * so the name spans the full available cell space and scales down smoothly.
@@ -4509,7 +4516,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                       } font-black text-orange-950 uppercase tracking-wider flex items-center gap-1`}
                     >
                       <Palette className="w-3 h-3 text-orange-600" />
-                      <span>Fondo ({PRESET_COLORS.length} colores vivos):</span>
+                      <span>Fondo ({BG_PALETTE_COLORS.length} colores vivos):</span>
                     </span>
                     <span
                       className="w-4 h-4 rounded-full border border-black/30 shadow-2xs"
@@ -4524,7 +4531,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                         : 'grid-cols-11 gap-1.5 p-2 rounded-xl'
                     } bg-orange-50/70 border border-orange-200/90 max-h-28 overflow-y-auto scrollbar-thin`}
                   >
-                    {PRESET_COLORS.map((c, idx) => (
+                    {BG_PALETTE_COLORS.map((c, idx) => (
                       <button
                         key={`preset_bg_${c.hex}_${c.name}_${idx}`}
                         type="button"
@@ -4532,6 +4539,14 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                           setNewPlayerColor(c.hex);
                           if (activePlayer) {
                             handleUpdatePlayerColor(activePlayer.id, c.hex);
+                          }
+                          // Con fondo negro, si las letras están en negro se pasan a blanco para que el nombre se vea
+                          if (c.hex === '#000000') {
+                            const currentText = ((activePlayer ? activePlayer.textColor : newPlayerTextColor) || '#000000').toLowerCase();
+                            if (currentText === '#000000' || currentText === '#1e293b') {
+                              setNewPlayerTextColor('#ffffff');
+                              if (activePlayer) handleUpdatePlayerTextColor(activePlayer.id, '#ffffff');
+                            }
                           }
                         }}
                         className={`${
@@ -5195,7 +5210,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                     <div
                       key={rowNumber}
                       className={`grid divide-x-[2px] divide-black transition-all relative ${
-                        is15SheetExpanded ? 'flex-1 min-h-0 max-h-[34px]' : 'h-[28px] sm:h-[30px] min-h-[28px]'
+                        is15SheetExpanded ? 'flex-1 min-h-0' : 'h-[28px] sm:h-[30px] min-h-[28px]'
                       }`}
                       style={{
                         gridTemplateColumns: `${seqColWidth}px repeat(${sheet.columns.length}, minmax(0, 1fr))`,
@@ -5616,7 +5631,7 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                               } px-1 flex items-center justify-center gap-1 overflow-hidden leading-none font-black tabular-nums text-[12px] sm:text-[13px] tracking-tight border-b border-black cursor-pointer hover:bg-yellow-100 transition-colors relative group/ganocell ${
                                 p.totalGano > 0 ? 'text-emerald-950 bg-emerald-100/90' : 'text-black bg-[#fefce8]'
                               }`}
-                              style={cellFontSizeScale !== 100 ? { fontSize: `${Math.min(13 * (cellFontSizeScale / 100), is15SheetExpanded ? 17 : 21).toFixed(1)}px` } : undefined}
+                              style={{ fontSize: `${Math.min((is15SheetExpanded ? 14.5 : 16.5) * (cellFontSizeScale / 100), is15SheetExpanded ? 18 : 22).toFixed(1)}px` }}
                               title={`${p.name.toUpperCase()} - Ganado Acumulado: $${p.previousWon.toFixed(2)}${
                                 p.currentWon > 0
                                   ? ` + Esta Partida: $${p.currentWon.toFixed(2)}${
@@ -5627,7 +5642,7 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                                   : ''
                               } = $${p.totalGano.toFixed(2)}. Clic para ajustar o marcar premio como pagado.`}
                             >
-                              <span className="font-black drop-shadow-2xs" style={{ WebkitTextStroke: '0.6px currentColor' }}>
+                              <span className="font-black drop-shadow-2xs" style={{ WebkitTextStroke: '0.9px currentColor', letterSpacing: '0.02em' }}>
                                 {p.totalGano.toFixed(2)}
                               </span>
 
@@ -5664,12 +5679,12 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                               } px-0.5 sm:px-1 flex items-center justify-center overflow-hidden leading-none font-black tabular-nums text-[12px] sm:text-[13px] tracking-tight border-b border-black cursor-pointer hover:bg-yellow-100 transition-colors ${
                                 p.debe > 0 ? 'text-rose-950 bg-rose-100/80' : 'text-black bg-[#fefce8]'
                               }`}
-                              style={cellFontSizeScale !== 100 ? { fontSize: `${Math.min(13 * (cellFontSizeScale / 100), is15SheetExpanded ? 17 : 21).toFixed(1)}px` } : undefined}
+                              style={{ fontSize: `${Math.min((is15SheetExpanded ? 14.5 : 16.5) * (cellFontSizeScale / 100), is15SheetExpanded ? 18 : 22).toFixed(1)}px` }}
                               title={`${p.name.toUpperCase()} debe $${p.debe.toFixed(2)}${
                                 p.previousDebt > 0 ? ` (Deuda anterior: $${p.previousDebt.toFixed(2)})` : ''
                               }. Clic para abonar o liquidar.`}
                             >
-                              <span className="font-black drop-shadow-2xs" style={{ WebkitTextStroke: '0.6px currentColor' }}>
+                              <span className="font-black drop-shadow-2xs" style={{ WebkitTextStroke: '0.9px currentColor', letterSpacing: '0.02em' }}>
                                 {p.debe.toFixed(2)}
                               </span>
                             </div>
@@ -5695,10 +5710,10 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
                                   ? 'text-emerald-950 bg-emerald-200/95'
                                   : 'text-black bg-amber-100/90'
                               }`}
-                              style={cellFontSizeScale !== 100 ? { fontSize: `${Math.min(13.5 * (cellFontSizeScale / 100), is15SheetExpanded ? 17 : 21).toFixed(1)}px` } : undefined}
+                              style={{ fontSize: `${Math.min((is15SheetExpanded ? 14.5 : 16.5) * (cellFontSizeScale / 100), is15SheetExpanded ? 18 : 22).toFixed(1)}px` }}
                               title={`Saldo final de ${p.name.toUpperCase()}: Ganó $${p.totalGano.toFixed(2)} - Debe $${p.debe.toFixed(2)} = $${p.total.toFixed(2)}. Clic para ajustar o reiniciar saldo a $0.`}
                             >
-                              <span className="font-black drop-shadow-2xs" style={{ WebkitTextStroke: '0.6px currentColor' }}>
+                              <span className="font-black drop-shadow-2xs" style={{ WebkitTextStroke: '0.9px currentColor', letterSpacing: '0.02em' }}>
                                 {isNegative
                                   ? `-${Math.abs(p.total).toFixed(2)}`
                                   : isPositive
@@ -5731,30 +5746,6 @@ const isCurrentMatchRow = activeSequenceRow === seqSlot;
               </div>
             </div>
 
-            {/* Bottom Footer Note */}
-            <div className={`border-t border-black/40 flex flex-wrap items-center justify-between text-slate-700 font-bold select-none flex-shrink-0 ${
-              is15SheetExpanded ? 'mt-0.5 pt-0.5 text-[8.5px]' : 'mt-2 pt-1.5 text-[9px] sm:text-[10px]'
-            }`}>
-              <div className="flex flex-wrap items-center gap-2">
-                <span>Planilla Oficial por Multiplicadores</span>
-                <span className="text-red-700 font-extrabold flex items-center gap-1">
-                  <span className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full border border-black text-[7px] font-black relative">
-                    <span className="absolute inset-0 flex items-center justify-center">
-                      <span className="w-full border-b-2 border-red-600 -rotate-45" />
-                    </span>
-                    #
-                  </span>
-                  Círculo tachado = Pagado
-                </span>
-                {activeWinningRow && (
-                  <span className="text-emerald-800 bg-emerald-100 px-1.5 py-0.5 rounded font-black flex items-center gap-1">
-                    <span>🏆</span>
-                    Fila #{activeWinningRow} Ganadora
-                  </span>
-                )}
-              </div>
-              <span>Casillas: {stats.filledCells}/{stats.totalCells}</span>
-            </div>
           </div>
         </div>
           </div>
