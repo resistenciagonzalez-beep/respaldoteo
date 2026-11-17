@@ -134,6 +134,13 @@ interface BingoSheetBuilderProps {
 // Colores vivos, brillantes y saturados para los jugadores (no pasteles)
 const PRESET_COLORS = VIBRANT_PLAYER_COLORS;
 
+// Colores extra que se muestran PRIMERO en la paleta de fondos (solo en la paleta; no cambian los colores automáticos)
+const EXTRA_BG_COLORS = [
+  { name: 'Rojo Pasión', hex: '#c4001a', border: '#8a0012', text: '#ffffff', darkText: false },
+  { name: 'Negro', hex: '#000000', border: '#333333', text: '#ffffff', darkText: false },
+];
+const BG_PALETTE_COLORS = [...EXTRA_BG_COLORS, ...PRESET_COLORS];
+
 /**
  * Calculates adaptive font size and letter tracking for player names in cells
  * so the name spans the full available cell space and scales down smoothly.
@@ -4509,7 +4516,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                       } font-black text-orange-950 uppercase tracking-wider flex items-center gap-1`}
                     >
                       <Palette className="w-3 h-3 text-orange-600" />
-                      <span>Fondo ({PRESET_COLORS.length} colores vivos):</span>
+                      <span>Fondo ({BG_PALETTE_COLORS.length} colores vivos):</span>
                     </span>
                     <span
                       className="w-4 h-4 rounded-full border border-black/30 shadow-2xs"
@@ -4524,7 +4531,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                         : 'grid-cols-11 gap-1.5 p-2 rounded-xl'
                     } bg-orange-50/70 border border-orange-200/90 max-h-28 overflow-y-auto scrollbar-thin`}
                   >
-                    {PRESET_COLORS.map((c, idx) => (
+                    {BG_PALETTE_COLORS.map((c, idx) => (
                       <button
                         key={`preset_bg_${c.hex}_${c.name}_${idx}`}
                         type="button"
@@ -4532,6 +4539,14 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                           setNewPlayerColor(c.hex);
                           if (activePlayer) {
                             handleUpdatePlayerColor(activePlayer.id, c.hex);
+                          }
+                          // Con fondo negro, si las letras están en negro se pasan a blanco para que el nombre se vea
+                          if (c.hex === '#000000') {
+                            const currentText = ((activePlayer ? activePlayer.textColor : newPlayerTextColor) || '#000000').toLowerCase();
+                            if (currentText === '#000000' || currentText === '#1e293b') {
+                              setNewPlayerTextColor('#ffffff');
+                              if (activePlayer) handleUpdatePlayerTextColor(activePlayer.id, '#ffffff');
+                            }
                           }
                         }}
                         className={`${
