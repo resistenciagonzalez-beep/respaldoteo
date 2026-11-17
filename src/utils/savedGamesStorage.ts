@@ -53,6 +53,7 @@ import {
   withTimeout,
   saveGameToIndexedDB,
   getAllGamesFromIndexedDB,
+  getAllGamesFromIndexedDBStrict,
   deleteGameFromIndexedDB,
   putQueueTaskInIndexedDB,
   removeQueueTaskFromIndexedDB,
@@ -402,6 +403,8 @@ export interface StorageSessionContext {
 
 let sessionCtx: StorageSessionContext | null = null;
 let bootstrapPromise: Promise<void> = Promise.resolve();
+// true si al abrir la sesión no se pudo leer la copia local del dispositivo
+let localCacheUnreadable = false;
 const CACHE_OWNER_KEY = 'bingo_games_cache_owner_v3';
 const SYNC_META_KEY_PREFIX = 'bingo_games_sync_meta_v3_';
 
@@ -491,10 +494,11 @@ async function prepareLocalCacheForSession(ownerKey: string): Promise<void> {
     previousOwner = '';
   }
 
+  localCacheUnreadable = false;
   try {
-    const localGames = await getAllGamesFromIndexedDB();
-    if (previousOwner !== ownerKey) {
-      // Otra cuenta (o la versión anterior) usó este dispositivo: se borra solo la copia LOCAL
+    const localGames = await getAllGamesFromIndexedDBStrict(15000);
+    if (previousOwner && previousOwner !== ownerKey) {
+      // Otra cuenta CONOCIDA usó este dispositivo: se borra solo la copia LOCAL
       for (const g of localGames) {
         if (g && g.id && !syncQueueMap.has(g.id)) {
           await deleteGameFromIndexedDB(g.id);
@@ -503,6 +507,9 @@ async function prepareLocalCacheForSession(ownerKey: string): Promise<void> {
       safeRemoveItem(SYNC_META_KEY_PREFIX + ownerKey);
       safeSetItem(CACHE_OWNER_KEY, ownerKey);
     } else {
+      // Misma cuenta (o no se sabe cuál fue la anterior): se aprovecha la copia local.
+      // Nunca se borra por "no saber": eso obligaba a descargar todo otra vez.
+      if (!previousOwner) safeSetItem(CACHE_OWNER_KEY, ownerKey);
       for (const g of localGames) {
         if (!g || !g.id || deletedGameIdsSet.has(g.id)) continue;
         if (!isGameVisibleForSession(g)) continue;
@@ -513,6 +520,8 @@ async function prepareLocalCacheForSession(ownerKey: string): Promise<void> {
       }
     }
   } catch (err) {
+    // No se pudo leer la copia local: se completará descargando desde la nube (una sola vez por sesión)
+    localCacheUnreadable = true;
     console.warn('[OFFLINE_ENGINE] Copia local no disponible:', err);
   }
 
@@ -1536,7 +1545,12 @@ async function runSyncCycle(): Promise<void> {
   const run = (async () => {
     try {
       const meta = readSyncMeta();
-      if (sessionCtx!.isAdmin) {
+      if (localCacheUnreadable) {
+        // La copia local no se pudo leer: se descarga todo una vez y se vuelve al modo normal
+        await runFullSync(generation, 0);
+        if (generation === syncGeneration) localCacheUnreadable = false;
+        if (sessionCtx && sessionCtx.isAdmin) lastAdminPeriodicSyncAt = Date.now();
+      } else if (sessionCtx!.isAdmin) {
         if (!meta.lastFullSyncAt) {
           await runFullSync(generation, 0);
         } else {
