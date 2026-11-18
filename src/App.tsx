@@ -734,7 +734,7 @@ export default function App() {
         const exactTime = getCurrentLocalTimeString();
         const localDate = getCurrentLocalDateKey();
         const endShiftTime = endTurno
-          ? now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+          ? now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'America/Panama' })
           : undefined;
 
         const completeItem = buildCompleteGameSequenceItem({
