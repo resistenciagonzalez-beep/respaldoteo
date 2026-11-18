@@ -149,8 +149,8 @@ export function getActiveShift(
     operatorUid: operatorUid || 'anon',
     operatorName: (operatorName || 'Operadora Principal').trim(),
     operatorEmail: operatorEmail || '',
-    startDate: now.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' }),
-    startTime: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    startDate: now.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'America/Panama' }),
+    startTime: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'America/Panama' }),
     timestampISO: now.toISOString(),
     totalGames: 0,
     totalLines: 0,
@@ -262,8 +262,8 @@ export async function recordGameToActiveShift(
       operatorUid,
       operatorName,
       operatorEmail,
-      startDate: game.dateFormatted || now.toLocaleDateString('es-ES'),
-      startTime: game.timestamp || now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      startDate: game.dateFormatted || now.toLocaleDateString('es-ES', { timeZone: 'America/Panama' }),
+      startTime: game.timestamp || now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'America/Panama' }),
       timestampISO: now.toISOString(),
       totalGames: 0,
       totalLines: 0,
@@ -301,8 +301,8 @@ export async function recordGameToActiveShift(
   if (endTurno) {
     isClosed = true;
     updatedShift.status = 'completed';
-    updatedShift.endDate = now.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
-    updatedShift.endTime = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    updatedShift.endDate = now.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'America/Panama' });
+    updatedShift.endTime = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'America/Panama' });
     updatedShift.closedAtISO = now.toISOString();
 
     nextNewShift = {
@@ -310,8 +310,8 @@ export async function recordGameToActiveShift(
       operatorUid,
       operatorName,
       operatorEmail,
-      startDate: now.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' }),
-      startTime: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      startDate: now.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'America/Panama' }),
+      startTime: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'America/Panama' }),
       timestampISO: now.toISOString(),
       totalGames: 0,
       totalLines: 0,
