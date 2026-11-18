@@ -36,6 +36,7 @@ import {
   deleteGamesOfDay,
   deleteGamesOfOperatorFolder,
   getCurrentLocalDateKey,
+  getPreviousDateKey,
   reorganizeAndHealAllStoredGames,
   hydrateAllHistoricalGamesInPages,
   subscribeToSavedGamesFirestore,
@@ -359,9 +360,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
 
       if (!dayMap[dateKey]) {
         const todayKey = getCurrentLocalDateKey();
-        const yesterdayObj = new Date();
-        yesterdayObj.setDate(yesterdayObj.getDate() - 1);
-        const yesterdayKey = `${yesterdayObj.getFullYear()}-${String(yesterdayObj.getMonth() + 1).padStart(2, '0')}-${String(yesterdayObj.getDate()).padStart(2, '0')}`;
+        const yesterdayKey = getPreviousDateKey(todayKey);
 
         let prefix = '';
         if (dateKey === todayKey) prefix = 'Hoy - ';
@@ -415,7 +414,8 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     // If no games exist yet for this operator, only provide today's empty placeholder folder for non-admin operators
     if (Object.keys(dayMap).length === 0 && !isAdmin) {
       const todayKey = getCurrentLocalDateKey();
-      const todayObj = new Date();
+      const [ty, tm, td] = todayKey.split('-').map(Number);
+      const todayObj = new Date(ty, tm - 1, td);
       const weekday = todayObj.toLocaleDateString('es-ES', { weekday: 'long' });
       const capitalizedWeekday = weekday.charAt(0).toUpperCase() + weekday.slice(1);
       const formatted = todayObj.toLocaleDateString('es-ES', {
@@ -432,7 +432,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
         dateKey: todayKey,
         displayDate: `Hoy - ${todayDisplay}`,
         fullDate: `${capitalizedWeekday}, ${formatted}`,
-        formattedDate: new Date().toLocaleDateString('es-ES'),
+        formattedDate: todayObj.toLocaleDateString('es-ES'),
         games: [],
         totalLines: 0,
         totalCollected: 0,
