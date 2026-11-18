@@ -593,27 +593,94 @@ if (typeof window !== 'undefined') {
 // ============================================================================
 
 /**
- * Detects the operator's current local date formatted as YYYY-MM-DD (e.g. "2026-10-28").
- * Uses local machine calendar time rather than UTC, preventing night-shift date mismatch errors.
+ * Zona horaria oficial de la plataforma. Todas las fechas de carpetas y horas de guardado
+ * se calculan en hora de Panamá, sin importar la zona horaria configurada en el
+ * dispositivo de la operadora (evita que partidas de la noche caigan en la carpeta del día siguiente).
  */
-export function getCurrentLocalDateKey(): string {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+export const APP_TIME_ZONE = 'America/Panama';
+
+let appZoneFormatter: Intl.DateTimeFormat | null = null;
+
+function getAppZoneParts(d: Date): {
+  year: string;
+  month: string;
+  day: string;
+  hour: string;
+  minute: string;
+  second: string;
+} {
+  try {
+    if (!appZoneFormatter) {
+      appZoneFormatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: APP_TIME_ZONE,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hourCycle: 'h23',
+      });
+    }
+    const map: Record<string, string> = {};
+    for (const p of appZoneFormatter.formatToParts(d)) {
+      map[p.type] = p.value;
+    }
+    if (map.year && map.month && map.day && map.hour && map.minute && map.second) {
+      return {
+        year: map.year,
+        month: map.month.padStart(2, '0'),
+        day: map.day.padStart(2, '0'),
+        hour: (map.hour === '24' ? '00' : map.hour).padStart(2, '0'),
+        minute: map.minute.padStart(2, '0'),
+        second: map.second.padStart(2, '0'),
+      };
+    }
+  } catch {
+    // Si el navegador no soporta zonas horarias, se usa la hora del dispositivo
+  }
+  return {
+    year: String(d.getFullYear()),
+    month: String(d.getMonth() + 1).padStart(2, '0'),
+    day: String(d.getDate()).padStart(2, '0'),
+    hour: String(d.getHours()).padStart(2, '0'),
+    minute: String(d.getMinutes()).padStart(2, '0'),
+    second: String(d.getSeconds()).padStart(2, '0'),
+  };
 }
 
 /**
- * Detects the operator's current local time formatted as HH:mm:ss (24h format).
+ * Converts any Date into its YYYY-MM-DD calendar day in Panama time.
+ */
+export function dateToAppDateKey(d: Date): string {
+  const p = getAppZoneParts(d);
+  return `${p.year}-${p.month}-${p.day}`;
+}
+
+/**
+ * Detects the current date in Panama time formatted as YYYY-MM-DD (e.g. "2026-10-28").
+ */
+export function getCurrentLocalDateKey(): string {
+  return dateToAppDateKey(new Date());
+}
+
+/**
+ * Returns the YYYY-MM-DD key for the day before the given YYYY-MM-DD key (pure calendar math).
+ */
+export function getPreviousDateKey(dateKey: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateKey);
+  if (!m) return dateKey;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]) - 1));
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+/**
+ * Detects the current time in Panama formatted as HH:mm:ss (24h format).
  * E.g. "16:05:47". Guaranteed to have seconds and uniform formatting.
  */
 export function getCurrentLocalTimeString(): string {
-  const now = new Date();
-  const hours = String(now.getHours()).padStart(2, '0');
-  const minutes = String(now.getMinutes()).padStart(2, '0');
-  const seconds = String(now.getSeconds()).padStart(2, '0');
-  return `${hours}:${minutes}:${seconds}`;
+  const p = getAppZoneParts(new Date());
+  return `${p.hour}:${p.minute}:${p.second}`;
 }
 
 /**
@@ -721,12 +788,13 @@ export function parseDateStringToDateKey(dateStr?: string | null): string | null
   }
 
   if (/^\d{4}-\d{2}-\d{2}[T\s]/.test(trimmed)) {
+    // Sin zona horaria explícita (Z o +hh:mm) la fecha ya es de calendario: se toma tal cual
+    if (!/(Z|[+-]\d{2}:?\d{2})$/i.test(trimmed)) {
+      return trimmed.slice(0, 10);
+    }
     const d = new Date(trimmed);
     if (!isNaN(d.getTime())) {
-      const year = d.getFullYear();
-      const month = String(d.getMonth() + 1).padStart(2, '0');
-      const day = String(d.getDate()).padStart(2, '0');
-      return `${year}-${month}-${day}`;
+      return dateToAppDateKey(d);
     }
     return trimmed.slice(0, 10);
   }
@@ -828,10 +896,7 @@ export function extractGameExactDate(game: Partial<GameSequenceItem>): string {
             ? new Date(rawUpdated.seconds * 1000)
             : null;
       if (d && !isNaN(d.getTime())) {
-        const year = d.getFullYear();
-        const month = String(d.getMonth() + 1).padStart(2, '0');
-        const day = String(d.getDate()).padStart(2, '0');
-        return `${year}-${month}-${day}`;
+        return dateToAppDateKey(d);
       }
     } catch {
       // ignore
