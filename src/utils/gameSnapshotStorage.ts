@@ -569,16 +569,17 @@ export function buildCompleteGameSequenceItem(params: {
   const resolvedLetter =
     letter || (mode === '75' && typeof ballNumber === 'number' && ballNumber > 0 ? getBingo75Letter(ballNumber) : undefined);
 
-  const now = new Date();
   const timestamp = paramTimestamp || getCurrentLocalTimeString();
-  const dateFormatted = now.toLocaleDateString('es-ES', {
+  const dailyDate = paramDailyDate && /^\d{4}-\d{2}-\d{2}$/.test(paramDailyDate.trim())
+    ? paramDailyDate.trim()
+    : getCurrentLocalDateKey();
+  // La fecha visible siempre coincide con la carpeta (dailyDate, hora de Panamá)
+  const [dfY, dfM, dfD] = dailyDate.split('-').map(Number);
+  const dateFormatted = new Date(dfY, dfM - 1, dfD).toLocaleDateString('es-ES', {
     day: '2-digit',
     month: 'short',
     year: 'numeric',
   });
-  const dailyDate = paramDailyDate && /^\d{4}-\d{2}-\d{2}$/.test(paramDailyDate.trim())
-    ? paramDailyDate.trim()
-    : getCurrentLocalDateKey();
   const cleanOperatorName = (operatorName || 'Operadora Principal').trim();
   const operatorFolder = sanitizeOperatorFolderName(cleanOperatorName);
   const subfolderDay = dailyDate;
