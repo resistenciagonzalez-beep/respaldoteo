@@ -74,6 +74,10 @@ import {
 } from '../utils/savedGamesStorage';
 import { sanitizePlayerName } from '../utils/security';
 
+// Multiplicadores disponibles por columna (X1 hasta X10)
+const MAX_COLUMN_MULTIPLIER = 10;
+const COLUMN_MULTIPLIER_OPTIONS = Array.from({ length: MAX_COLUMN_MULTIPLIER }, (_, i) => i + 1);
+
 interface BingoSheetBuilderProps {
   onBackToGame: () => void;
   currentUser?: AppUser | null;
@@ -2231,11 +2235,11 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     notify(`Columna ${colIndex + 1} configurada a X${clamped} (Valor: ${(clamped * sheet.baseCost).toFixed(2)})`);
   };
 
-  // Cycle column multiplier (X1 -> X2 -> X3 -> X4 -> X5 -> X1)
+  // Cycle column multiplier (X1 -> X2 -> ... -> X10 -> X1)
   const handleCycleColumnMultiplier = (colIndex: number) => {
     const currentCol = sheet.columns[colIndex];
     const currentMult = currentCol.multiplier || 1;
-    const nextMult = currentMult >= 5 ? 1 : currentMult + 1;
+    const nextMult = currentMult >= MAX_COLUMN_MULTIPLIER ? 1 : currentMult + 1;
     handleSetColumnMultiplier(colIndex, nextMult);
   };
 
@@ -2965,7 +2969,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                   Multiplicador para toda la columna hacia abajo:
                 </label>
                 <div className="grid grid-cols-5 gap-1.5">
-                  {[1, 2, 3, 4, 5].map((m) => (
+                  {COLUMN_MULTIPLIER_OPTIONS.map((m) => (
                     <button
                       key={m}
                       type="button"
@@ -3883,8 +3887,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
 
                       {/* Multiplier buttons for this column */}
                       <div className="flex items-center justify-between gap-1 pt-1">
-                        <div className="flex items-center gap-1">
-                          {[1, 2, 3, 4, 5].map((m) => (
+                        <div className="flex flex-wrap items-center gap-1">
+                          {COLUMN_MULTIPLIER_OPTIONS.map((m) => (
                             <button
                               key={m}
                               type="button"
@@ -5132,20 +5136,20 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
                           pushUndoSnapshot();
                           handleCycleColumnMultiplier(cIdx);
                         }}
-                        className={`w-full h-full py-1 px-0.5 flex flex-col items-center justify-center transition-colors active:scale-95 cursor-pointer ${
+                        className={`w-full h-full py-0.5 px-0.5 flex items-center justify-center overflow-hidden transition-colors active:scale-95 cursor-pointer ${
                           mult >= 2 ? 'bg-[#facc15] hover:bg-[#fde047]' : 'bg-white hover:bg-amber-50'
                         }`}
+                        style={{ containerType: 'inline-size' }}
                         title={`Columna ${multName} (X${mult}). Clic para alternar multiplicador.`}
                       >
-                        <span className="text-[7.5px] sm:text-[8.5px] font-black uppercase tracking-tight text-black leading-none truncate max-w-full">
-                          {multName}
-                        </span>
+                        {/* Solo el multiplicador, grande y grueso: ocupa el ancho del cuadro (X1 ... X10) */}
                         <span
-                          className="text-base sm:text-lg md:text-xl font-black text-black tracking-tight leading-none mt-0.5"
+                          className="text-xl sm:text-2xl md:text-3xl font-black text-black leading-none whitespace-nowrap"
                           style={{
+                            fontSize: mult >= 10 ? 'clamp(14px, 36cqw, 34px)' : 'clamp(16px, 48cqw, 36px)',
                             fontWeight: 900,
-                            WebkitTextStroke: '0.6px black',
-                            letterSpacing: '-0.02em',
+                            WebkitTextStroke: '1.2px black',
+                            letterSpacing: '-0.04em',
                           }}
                         >
                           X{mult}
