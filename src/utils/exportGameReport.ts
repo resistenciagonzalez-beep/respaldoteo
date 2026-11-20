@@ -1,6 +1,7 @@
 import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
 import { GameSequenceItem } from '../types';
+import { formatTime12h } from './savedGamesStorage';
 
 // Evita que un nombre con código HTML se ejecute dentro del reporte
 function escapeReportHtml(value: unknown): string {
@@ -264,7 +265,7 @@ export function buildGameDocumentHtml(item: GameSequenceItem): string {
           </p>
         </div>
         <div style="text-align: right;">
-          <p style="margin: 0; font-size: 13px; font-weight: bold; color: #431407;">${item.dateFormatted || item.dailyDate || ''} - ${item.timestamp || ''}</p>
+          <p style="margin: 0; font-size: 13px; font-weight: bold; color: #431407;">${item.dateFormatted || item.dailyDate || ''} - ${formatTime12h(item.timestamp)}</p>
           <p style="margin: 4px 0 0; font-size: 12px; color: #7c2d12;">Duración: <strong>${item.durationFormatted || 'N/A'}</strong></p>
         </div>
       </div>
