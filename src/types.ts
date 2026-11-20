@@ -269,6 +269,7 @@ export interface GameSequenceItem {
   markedNumbers?: number[];
   cageSnapshotImage?: string; // Captura en imagen del bolillero tal cual quedó al cantar Bingo
   shiftId?: string; // ID del turno al que pertenece
+  shiftNumber?: number; // Número de turno dentro de su fecha (1, 2, 3...). Sin valor = Turno 1
   shiftName?: string; // e.g. "Turno: 26/10/2026 15:30 - 18:45"
   shiftDate?: string;
   shiftStartTime?: string;

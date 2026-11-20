@@ -35,6 +35,7 @@ import {
   DocumentData,
 } from 'firebase/firestore';
 import { db } from '../firebase';
+import { trustedNow, trustedNowMs } from './trustedClock';
 import {
   safeSetItem,
   safeGetItem,
@@ -661,7 +662,8 @@ export function dateToAppDateKey(d: Date): string {
  * Detects the current date in Panama time formatted as YYYY-MM-DD (e.g. "2026-10-28").
  */
 export function getCurrentLocalDateKey(): string {
-  return dateToAppDateKey(new Date());
+  // Hora real (corregida si el reloj del dispositivo está mal) en zona horaria de Panamá
+  return dateToAppDateKey(trustedNow());
 }
 
 /**
@@ -675,11 +677,32 @@ export function getPreviousDateKey(dateKey: string): string {
 }
 
 /**
+ * Muestra una hora en formato normal de 12 horas con AM / PM (ej. "7:16 PM").
+ * Acepta "19:16", "19:16:26" o textos antiguos como "07:16:26 p. m.".
+ * Solo cambia cómo se MUESTRA: la hora se sigue guardando en 24 h para ordenar bien.
+ */
+export function formatTime12h(value?: string | null): string {
+  if (!value) return '';
+  const text = String(value).trim();
+  const m = /^(\d{1,2}):(\d{2})(?::\d{2})?\s*([ap])?\.?\s*m?\.?$/i.exec(text.replace(/\u00a0/g, ' '));
+  if (!m) return text;
+  let h = Number(m[1]);
+  const min = m[2];
+  const marker = m[3] ? m[3].toLowerCase() : '';
+  if (marker === 'p' && h < 12) h += 12;
+  if (marker === 'a' && h === 12) h = 0;
+  if (!(h >= 0 && h <= 23)) return text;
+  const suffix = h >= 12 ? 'PM' : 'AM';
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}:${min} ${suffix}`;
+}
+
+/**
  * Detects the current time in Panama formatted as HH:mm:ss (24h format).
  * E.g. "16:05:47". Guaranteed to have seconds and uniform formatting.
  */
 export function getCurrentLocalTimeString(): string {
-  const p = getAppZoneParts(new Date());
+  const p = getAppZoneParts(trustedNow());
   return `${p.hour}:${p.minute}:${p.second}`;
 }
 
@@ -735,6 +758,133 @@ export function getOperatorStorageKey(baseKey: string, user?: AppUser | null): s
  * Checks whether a saved game strictly belongs to a specific operator or user session.
  * Used to strictly separate operator sequence bars, round counters, and individual views.
  */
+// ============================================================================
+// CARPETAS POR TURNO
+// Cada partida pertenece a la fecha en que INICIÓ su turno y a un número de turno
+// de ese día (Turno 1, Turno 2...). Así un turno de noche que pasa de medianoche
+// sigue en la carpeta del día en que empezó, y "Cerrar turno" abre una carpeta nueva.
+// ============================================================================
+
+/** Si una operadora deja pasar más de este tiempo sin guardar, se considera otra jornada. */
+const SHIFT_SEGMENT_MAX_GAP_MS = 6 * 60 * 60 * 1000;
+
+/** Número de turno de una partida dentro de su fecha (las partidas antiguas son Turno 1). */
+export function getGameShiftNumber(game: Partial<GameSequenceItem> | null | undefined): number {
+  const n = game ? Number((game as GameSequenceItem).shiftNumber) : NaN;
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1;
+}
+
+/** Clave de carpeta: "YYYY-MM-DD" para el Turno 1 y "YYYY-MM-DD#t2", "#t3"... para los siguientes. */
+export function getGameFolderKey(game: GameSequenceItem): string {
+  const dateKey = getGameNormalizedDateKey(game);
+  const n = getGameShiftNumber(game);
+  return n > 1 ? `${dateKey}#t${n}` : dateKey;
+}
+
+/** Separa una clave de carpeta en fecha y número de turno. */
+export function parseGameFolderKey(folderKey: string): { dateKey: string; shiftNumber: number } {
+  const m = /^(\d{4}-\d{2}-\d{2})(?:#t(\d+))?$/.exec((folderKey || '').trim());
+  if (!m) return { dateKey: folderKey, shiftNumber: 1 };
+  const n = m[2] ? Number(m[2]) : 1;
+  return { dateKey: m[1], shiftNumber: Number.isFinite(n) && n >= 1 ? n : 1 };
+}
+
+function getGameServerSavedMs(game: GameSequenceItem): number | null {
+  const raw = (game as any).updatedAt;
+  if (raw && typeof raw === 'object' && typeof raw.seconds === 'number') return raw.seconds * 1000;
+  if (raw && typeof raw.toMillis === 'function') {
+    try {
+      return raw.toMillis();
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function isSameOperatorGame(g: GameSequenceItem, item: GameSequenceItem, itemFolder: string): boolean {
+  const itemUid = item.operatorUid && item.operatorUid !== 'anon' ? item.operatorUid : null;
+  const gUid = g.operatorUid && g.operatorUid !== 'anon' ? g.operatorUid : null;
+  if (itemUid && gUid) return itemUid === gUid;
+  return sanitizeOperatorFolderName(g.operatorFolder || g.operatorName) === itemFolder;
+}
+
+/**
+ * Para una partida NUEVA, decide en qué carpeta va (fecha + número de turno):
+ * - Si su turno ya tiene partidas recientes, va a la misma carpeta (aunque ya sea otro día).
+ * - Si es la primera partida del turno, va a la fecha de hoy (hora de Panamá) con el
+ *   siguiente número de turno libre de ese día.
+ */
+function resolveShiftFolderForNewGame(
+  item: GameSequenceItem,
+  fallbackDateKey: string
+): { dailyDate: string; shiftNumber: number } {
+  if (!item.shiftId) {
+    return { dailyDate: fallbackDateKey, shiftNumber: getGameShiftNumber(item) };
+  }
+  const today = getCurrentLocalDateKey();
+  const itemFolder = sanitizeOperatorFolderName(item.operatorFolder || item.operatorName || 'Operadora Principal');
+  // Datos originales (sin renumerar) de las partidas en el dispositivo, incluidas las pendientes de subir
+  const mine = Array.from(firestoreGamesMemoryStore.values()).filter(
+    (g) => g && g.id && !deletedGameIdsSet.has(g.id) && isSameOperatorGame(g, item, itemFolder)
+  );
+  const nowMs = trustedNowMs();
+
+  // Partida más reciente del mismo turno
+  let latestSameShift: GameSequenceItem | null = null;
+  let latestMs = -1;
+  for (const g of mine) {
+    if (g.shiftId !== item.shiftId) continue;
+    // Las partidas aún sin confirmar en la nube cuentan como recientes
+    const ms = getGameServerSavedMs(g) ?? nowMs;
+    if (ms > latestMs) {
+      latestMs = ms;
+      latestSameShift = g;
+    }
+  }
+  if (latestSameShift && nowMs - latestMs <= SHIFT_SEGMENT_MAX_GAP_MS) {
+    return {
+      dailyDate: getGameNormalizedDateKey(latestSameShift),
+      shiftNumber: getGameShiftNumber(latestSameShift),
+    };
+  }
+
+  // Primera partida del turno: fecha de hoy y siguiente número de turno libre
+  let maxShiftToday = 0;
+  for (const g of mine) {
+    if (getGameNormalizedDateKey(g) !== today) continue;
+    if (g.shiftId && g.shiftId === item.shiftId) continue;
+    maxShiftToday = Math.max(maxShiftToday, getGameShiftNumber(g));
+  }
+  return { dailyDate: today, shiftNumber: maxShiftToday + 1 };
+}
+
+/**
+ * Número de partida que le toca a la próxima partida del turno actual.
+ * Devuelve null si no hay turno (se usa el conteo anterior por día).
+ */
+export function getNextRoundInShift(
+  shiftId: string | undefined,
+  operatorUid: string | undefined,
+  operatorName: string | undefined,
+  is90: boolean
+): number | null {
+  if (!shiftId) return null;
+  const probe = { shiftId, operatorUid, operatorName } as GameSequenceItem;
+  const folder = resolveShiftFolderForNewGame(probe, getCurrentLocalDateKey());
+  const itemFolder = sanitizeOperatorFolderName(operatorName || 'Operadora Principal');
+  let maxRound = 0;
+  for (const g of firestoreGamesMemoryStore.values()) {
+    if (!g || !g.id || deletedGameIdsSet.has(g.id) || !isSameOperatorGame(g, probe, itemFolder)) continue;
+    if (getGameNormalizedDateKey(g) !== folder.dailyDate) continue;
+    if (getGameShiftNumber(g) !== folder.shiftNumber) continue;
+    const gIs90 = g.mode === '90' || g.sheetType === 'traditional-90';
+    if (gIs90 !== is90) continue;
+    if (typeof g.round === 'number' && g.round > maxRound) maxRound = g.round;
+  }
+  return maxRound + 1;
+}
+
 export function isGameOfOperator(
   game: GameSequenceItem,
   user?: AppUser | null
@@ -1119,10 +1269,10 @@ export function normalizeGameFolderMetadata(
 function sortGamesChronologicallyDesc(games: GameSequenceItem[]): GameSequenceItem[] {
   const genuineGames = games.filter((g) => g && isGenuineCompletedGameRecord(g));
 
-  // Group by operatorFolder + dailyDate + mode so each operator's daily games are numbered 1, 2, 3, 4...
+  // Group by operatorFolder + carpeta de turno (fecha + turno) + mode so each folder is numbered 1, 2, 3, 4...
   const groups = new Map<string, GameSequenceItem[]>();
   for (const g of genuineGames) {
-    const dateKey = getGameNormalizedDateKey(g);
+    const dateKey = getGameFolderKey(g);
     const opFolder = sanitizeOperatorFolderName(g.operatorFolder || g.operatorName);
     const modeKey = g.mode === '90' || g.sheetType === 'traditional-90' ? '90' : '75';
     const groupKey = `${opFolder}__${dateKey}__${modeKey}`;
@@ -1136,14 +1286,15 @@ function sortGamesChronologicallyDesc(games: GameSequenceItem[]): GameSequenceIt
 
   const renumbered: GameSequenceItem[] = [];
   for (const bucket of groups.values()) {
-    // Sort chronologically ascending (oldest first -> #1, #2, #3...)
+    // Orden del turno: por número de partida guardado (no por hora, porque un turno puede
+    // pasar de medianoche: 11:50 p. m. va antes que 12:10 a. m.). Si el número se repite, por hora.
     bucket.sort((a, b) => {
+      if ((a.round || 0) !== (b.round || 0)) {
+        return (a.round || 0) - (b.round || 0);
+      }
       const timeA = (a.timestamp || '').trim();
       const timeB = (b.timestamp || '').trim();
-      if (timeA && timeB && timeA !== timeB) {
-        return timeA.localeCompare(timeB);
-      }
-      return (a.round || 0) - (b.round || 0);
+      return timeA.localeCompare(timeB);
     });
 
     bucket.forEach((g, idx) => {
@@ -1159,6 +1310,11 @@ function sortGamesChronologicallyDesc(games: GameSequenceItem[]): GameSequenceIt
     const dateB = getGameNormalizedDateKey(b);
     if (dateB !== dateA) {
       return dateB.localeCompare(dateA);
+    }
+    const shiftA = getGameShiftNumber(a);
+    const shiftB = getGameShiftNumber(b);
+    if (shiftB !== shiftA) {
+      return shiftB - shiftA;
     }
     if ((b.round || 0) !== (a.round || 0)) {
       return (b.round || 0) - (a.round || 0);
@@ -2038,11 +2194,16 @@ function resolveExistingOrCanonicalDocId(
     const gUid = g.operatorUid && g.operatorUid !== 'anon' ? g.operatorUid : null;
     if (itemUid && gUid && itemUid !== gUid) return false;
     const gMode: BingoMode = g.mode || (g.sheetType === 'traditional-90' ? '90' : '75');
+    // Debe ser también el mismo turno: el "Turno 2" nunca sobrescribe partidas del "Turno 1"
+    if (getGameShiftNumber(g) !== getGameShiftNumber(item)) return false;
+    if (item.shiftId && g.shiftId && item.shiftId !== g.shiftId) return false;
+    // Se compara con el número de partida GUARDADO (la galería muestra uno renumerado)
+    const rawRound = (firestoreGamesMemoryStore.get(g.id) || g).round;
     return (
       getGameNormalizedDateKey(g) === dailyDate &&
       sanitizeOperatorFolderName(g.operatorFolder || g.operatorName) === operatorFolder &&
       gMode === mode &&
-      g.round === validRound
+      rawRound === validRound
     );
   });
   if (match && match.id) {
@@ -2100,6 +2261,7 @@ interface FirestoreGamePayload {
   sheetType: SheetViewType;
   totalLinesPlayed: number;
   shiftId?: string;
+  shiftNumber?: number;
   shiftName?: string;
   shiftDate?: string;
   shiftStartTime?: string;
@@ -2156,6 +2318,7 @@ function buildFirestorePayloadFromItem(normalizedItem: GameSequenceItem): Firest
     sheetType: normalizedItem.sheetType || (mode === '90' ? 'traditional-90' : 'multipliers-15'),
     totalLinesPlayed: exactLines,
     shiftId: normalizedItem.shiftId || '',
+    shiftNumber: getGameShiftNumber(normalizedItem),
     shiftName: normalizedItem.shiftName || '',
     shiftDate: normalizedItem.shiftDate || normalizedItem.dailyDate,
     shiftStartTime: normalizedItem.shiftStartTime || '',
@@ -2528,7 +2691,21 @@ export async function saveGameUnified(
   const startTimeStr = getCurrentLocalTimeString();
 
   // 1. Single source of truth for date: dailyDate (YYYY-MM-DD)
-  const dailyDate = getGameNormalizedDateKey(item);
+  //    Partida nueva: carpeta = fecha de inicio de su turno + número de turno.
+  //    Edición de una partida ya guardada: conserva su carpeta.
+  const isEditOfExisting = Boolean(item.id && (syncQueueMap.has(item.id) || firestoreGamesMemoryStore.has(item.id)));
+  const itemDateKey = getGameNormalizedDateKey(item);
+  const shiftFolder = isEditOfExisting
+    ? { dailyDate: itemDateKey, shiftNumber: getGameShiftNumber(item) }
+    : resolveShiftFolderForNewGame(item, itemDateKey);
+  const dailyDate = shiftFolder.dailyDate;
+  item = {
+    ...item,
+    dailyDate,
+    shiftNumber: shiftFolder.shiftNumber,
+    // shiftDate guarda la misma fecha de la carpeta del turno
+    shiftDate: isEditOfExisting ? item.shiftDate : dailyDate,
+  };
   const operatorName = (item.operatorName || 'Operadora Principal').trim();
   const operatorFolder = sanitizeOperatorFolderName(item.operatorFolder || operatorName);
   const subfolderDay = dailyDate;
@@ -2548,6 +2725,15 @@ export async function saveGameUnified(
 
   const exactLines = getGameLines(item);
   let formattedDate = item.dateFormatted;
+  if (dailyDate !== itemDateKey) {
+    // La fecha visible siempre coincide con la carpeta del turno
+    const [fy, fm, fd] = dailyDate.split('-').map(Number);
+    formattedDate = new Date(fy, fm - 1, fd).toLocaleDateString('es-ES', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+    });
+  }
   if (!formattedDate || !parseDateStringToDateKey(formattedDate)) {
     const parts = dailyDate.split('-');
     formattedDate = parts.length === 3 ? `${parts[2]}/${parts[1]}/${parts[0]}` : new Date().toLocaleDateString('es-ES');
@@ -2572,6 +2758,7 @@ export async function saveGameUnified(
     round: validRound,
     mode,
     dailyDate,
+    shiftNumber: shiftFolder.shiftNumber,
     subfolderDay,
     operatorFolder,
     folderPath,
@@ -2988,6 +3175,9 @@ export async function deleteGamesOfDay(
     const opTrimmed = operatorName.trim().toLowerCase();
     const idsToDelete = new Set<string>();
     const matchingItems: GameSequenceItem[] = [];
+    // La carpeta es de un turno: "YYYY-MM-DD" (Turno 1) o "YYYY-MM-DD#t2"... Solo se borra ESE turno.
+    const folderInfo = parseGameFolderKey(dateKey);
+    dateKey = folderInfo.dateKey;
 
     const checkAndCollect = (docId: string | undefined, g: GameSequenceItem) => {
       if (!g) return;
@@ -3000,7 +3190,8 @@ export async function deleteGamesOfDay(
         gOp === opTrimmed ||
         gFolder === safeOp;
       const matchesDate =
-        gDate === dateKey || g.dailyDate === dateKey || g.subfolderDay === dateKey;
+        (gDate === dateKey || g.dailyDate === dateKey || g.subfolderDay === dateKey) &&
+        getGameShiftNumber(g) === folderInfo.shiftNumber;
 
       if (matchesOp && matchesDate) {
         const resolvedId = docId || g.id;

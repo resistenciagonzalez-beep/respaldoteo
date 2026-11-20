@@ -19,6 +19,7 @@ import {
   Download,
 } from 'lucide-react';
 import { downloadGameDirectJpg, downloadGameDirectPdf } from '../utils/exportGameReport';
+import { formatTime12h } from '../utils/savedGamesStorage';
 
 interface GameSheetSnapshotModalProps {
   isOpen: boolean;
@@ -93,7 +94,7 @@ export const GameSheetSnapshotModal: React.FC<GameSheetSnapshotModalProps> = ({
                 <span>•</span>
                 <span className="flex items-center gap-1">
                   <Clock className="w-3 h-3 opacity-80" />
-                  {item.timestamp}
+                  {formatTime12h(item.timestamp)}
                 </span>
                 <span>•</span>
                 <span className="font-bold text-yellow-200">
@@ -701,7 +702,7 @@ export const GameSheetSnapshotModal: React.FC<GameSheetSnapshotModalProps> = ({
         {/* Modal Footer */}
         <div className="px-4 sm:px-6 py-3 bg-[#fff1e6] border-t border-orange-200 flex items-center justify-between flex-shrink-0">
           <div className="text-[11px] text-orange-900/80 font-bold">
-            Partida #{item.round} • {item.timestamp}
+            Partida #{item.round} • {formatTime12h(item.timestamp)}
           </div>
           <button
             type="button"
