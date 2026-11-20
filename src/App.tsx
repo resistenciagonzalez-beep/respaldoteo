@@ -40,6 +40,7 @@ import { SavedGamesGalleryModal } from './components/SavedGamesGalleryModal';
 import { SyncStatusIndicator } from './components/SyncStatusIndicator';
 import {
   getSavedGamesGallery,
+  getNextRoundInShift,
   saveGameUnified,
   deleteGamePermanently,
   subscribeToSavedGamesFirestore,
@@ -53,6 +54,7 @@ import {
   isRealSavedGameInTodaySubfolder,
   clearRightSequenceBarToday,
 } from './utils/savedGamesStorage';
+import { trustedNow } from './utils/trustedClock';
 import {
   buildCompleteGameSequenceItem,
   dispatchResetSheetMarksEvent,
@@ -592,6 +594,9 @@ export default function App() {
   );
 
   const isArchivingNewGameRef = useRef<boolean>(false);
+  // Partida en curso que ya se guardó con el botón "Guardar" de la planilla.
+  // Al presionar "Nueva partida" se ACTUALIZA esa misma partida en vez de crear otra repetida.
+  const directSavedMatchRef = useRef<{ id: string; round: number; shiftId?: string; balls: number[] } | null>(null);
 
   // Finalize current match, snapshot its sheet and state, and save to gallery (Offline-First + Sequential Save Queue)
   // Strictly guarantees that the current game is finalized and stored before creating the next game.
@@ -632,20 +637,40 @@ export default function App() {
         const capturedAmboBall = currentMatchAmboBallRef.current ?? undefined;
         const capturedAmboRow = currentMatchAmboRowRef.current ?? undefined;
 
-        const todayKeyForRound = getCurrentLocalDateKey();
-        const myExistingTodayModeGames = getSavedGamesGallery().filter((g) => {
-          if (!g || !isRealSavedGameInTodaySubfolder(g, todayKeyForRound)) return false;
-          if (currentUser && !isGameOfOperator(g, currentUser)) return false;
-          const gIs90 = g.mode === '90' || g.sheetType === 'traditional-90';
-          return isBingo90 === gIs90;
-        });
-        const roundNum = myExistingTodayModeGames.length + 1;
-
         // Operator & Current Active Shift
         const opUid = currentUser?.id || currentUser?.uid || 'anon';
         const opName = (currentUser?.name || 'Operadora Principal').trim();
         const opEmail = currentUser?.email || '';
         const currentShift = getActiveShift(opUid, opName, opEmail);
+
+        // Número de partida: se cuenta dentro de la carpeta del TURNO actual
+        // (si el turno pasa de medianoche no vuelve a empezar en 1).
+        const roundInShift = getNextRoundInShift(currentShift.id, opUid, opName, isBingo90);
+        const todayKeyForRound = getCurrentLocalDateKey();
+        const myExistingTodayModeGames =
+          roundInShift === null
+            ? getSavedGamesGallery().filter((g) => {
+                if (!g || !isRealSavedGameInTodaySubfolder(g, todayKeyForRound)) return false;
+                if (currentUser && !isGameOfOperator(g, currentUser)) return false;
+                const gIs90 = g.mode === '90' || g.sheetType === 'traditional-90';
+                return isBingo90 === gIs90;
+              })
+            : [];
+        // Si esta misma partida ya se guardó con "Guardar" (mismas bolas desde el inicio y mismo turno),
+        // se reutiliza su número y su registro: así no quedan partidas repetidas ni números saltados.
+        const directSaved = directSavedMatchRef.current;
+        const reuseDirectSaved = Boolean(
+          directSaved &&
+            directSaved.shiftId === currentShift.id &&
+            directSaved.balls.length > 0 &&
+            drawnNumbersPlayed.length >= directSaved.balls.length &&
+            directSaved.balls.every((n, i) => drawnNumbersPlayed[i] === n)
+        );
+        const roundNum = reuseDirectSaved && directSaved
+          ? directSaved.round
+          : roundInShift !== null
+          ? roundInShift
+          : myExistingTodayModeGames.length + 1;
 
         // Capture current sheets BEFORE any reset occurs
         const s75Now = getStoredSheet75Snapshot();
@@ -730,7 +755,7 @@ export default function App() {
               total: (p.cumulativeWon || 0) - (p.cumulativeDebt || 0),
             }));
 
-        const now = new Date();
+        const now = trustedNow();
         const exactTime = getCurrentLocalTimeString();
         const localDate = getCurrentLocalDateKey();
         const endShiftTime = endTurno
@@ -779,8 +804,13 @@ export default function App() {
           savedViaNewGameFlow: true,
         });
 
+        if (reuseDirectSaved && directSaved) {
+          completeItem.id = directSaved.id;
+        }
+
         // 1. FINALIZE & SAVE CURRENT GAME FIRST (IndexedDB -> Save Queue -> Firestore verification)
         const { game: confirmedGame } = await saveGameUnified(completeItem);
+        directSavedMatchRef.current = null;
         refreshSavedGamesList();
 
         // Synchronize exact lines and shift state
@@ -990,6 +1020,14 @@ export default function App() {
       // Persist complete sheet and game records to Firestore with immediate verification
       const result = await saveGameUnified(completeItem);
       refreshSavedGamesList();
+      if (result && result.game && result.game.id) {
+        directSavedMatchRef.current = {
+          id: result.game.id,
+          round: result.game.round,
+          shiftId: currentShift.id,
+          balls: [...drawnNumbersPlayed],
+        };
+      }
 
       // Create direct shortcut immediately in the sequence bar
       if (isBingo90) {
