@@ -2,6 +2,7 @@ import { OperatorShift, GameSequenceItem } from '../types';
 import { doc, setDoc, serverTimestamp, collection, onSnapshot, query, where, orderBy, limit } from 'firebase/firestore';
 import { db } from '../firebase';
 import { safeSetItem, safeGetItem, safeRemoveItem } from './safeStorage';
+import { trustedNow } from './trustedClock';
 
 export const STORAGE_KEY_OPERATOR_SHIFTS = 'bingo_operator_shifts_v1';
 
@@ -143,7 +144,7 @@ export function getActiveShift(
     return existing;
   }
 
-  const now = new Date();
+  const now = trustedNow();
   const newShift: OperatorShift = {
     id: `shift_${Date.now()}_${canonical}`,
     operatorUid: operatorUid || 'anon',
@@ -255,7 +256,7 @@ export async function recordGameToActiveShift(
         s.operatorName.trim().toLowerCase() === operatorName.toLowerCase())
   );
 
-  const now = new Date();
+  const now = trustedNow();
   if (!currentActive) {
     currentActive = {
       id: `shift_${Date.now()}_${canonical}`,
@@ -273,6 +274,17 @@ export async function recordGameToActiveShift(
       status: 'active',
       gameIds: [],
       ownerUid: shiftsSession ? shiftsSession.uid : '',
+    };
+  }
+
+  // Un turno empieza de verdad con su PRIMERA partida (no cuando se cerró el turno anterior):
+  // así el turno siguiente toma la fecha y hora reales en que se empezó a jugar.
+  if (currentActive.totalGames === 0 && currentActive.gameIds.length === 0) {
+    currentActive = {
+      ...currentActive,
+      startDate: now.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'America/Panama' }),
+      startTime: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'America/Panama' }),
+      timestampISO: now.toISOString(),
     };
   }
 
