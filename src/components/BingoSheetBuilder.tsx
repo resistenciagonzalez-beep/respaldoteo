@@ -71,6 +71,7 @@ import {
   getCurrentLocalDateKey,
   isRealSavedGameInTodaySubfolder,
   deleteGamePermanently,
+  formatTime12h,
 } from '../utils/savedGamesStorage';
 import { sanitizePlayerName } from '../utils/security';
 
@@ -2880,7 +2881,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
         };
         const res = await onSaveCurrentGame(fullSnapshot);
         if (res && res.verified) {
-          notify(`¡Partida #${res.game.round} guardada con éxito a las ${res.game.timestamp} en subcarpeta ${res.game.dailyDate}!`);
+          notify(`¡Partida #${res.game.round} guardada con éxito a las ${formatTime12h(res.game.timestamp)} en subcarpeta ${res.game.dailyDate}!`);
         } else {
           notify('Partida guardada exitosamente');
         }
