@@ -20,6 +20,7 @@ import {
   Layers,
   Gauge,
 } from 'lucide-react';
+import { formatTime12h } from '../utils/savedGamesStorage';
 
 interface Bolillero90SidebarProps {
   drawnBalls: Ball[];
@@ -573,7 +574,7 @@ export const Bolillero90Sidebar: React.FC<Bolillero90SidebarProps> = memo(({
 
                   <div className="flex items-center gap-1 flex-shrink-0">
                     <span className="text-[9px] text-orange-700 font-semibold">
-                      {item.timestamp || item.durationFormatted}
+                      {item.timestamp ? formatTime12h(item.timestamp) : item.durationFormatted}
                     </span>
                     {isAdmin && onDeleteGameItem && (
                       <button
