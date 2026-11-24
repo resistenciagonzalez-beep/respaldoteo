@@ -1,7 +1,9 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
+import fs from 'fs';
 import path from 'path';
 import {defineConfig, type Plugin} from 'vite';
+import { buildAppIcons } from './tools/pngIcons';
 
 // Identificador único de cada versión publicada (en Vercel: el commit publicado).
 const BUILD_ID = process.env.VERCEL_GIT_COMMIT_SHA || `local-${Date.now()}`;
@@ -22,9 +24,24 @@ function versionFilePlugin(): Plugin {
   };
 }
 
+// Íconos de la app (logo de Familia Teo). Al compilar se generan los tamaños que usa
+// la app instalable (/icons/...) a partir de branding/1795541856961_image.png.
+function pwaIconsPlugin(): Plugin {
+  return {
+    name: 'bolillero-pwa-icons',
+    apply: 'build',
+    generateBundle() {
+      const logo = fs.readFileSync(path.resolve(__dirname, 'branding/1795541856961_image.png'));
+      for (const [fileName, png] of Object.entries(buildAppIcons(logo))) {
+        this.emitFile({ type: 'asset', fileName, source: png });
+      }
+    },
+  };
+}
+
 export default defineConfig(() => {
   return {
-    plugins: [react(), tailwindcss(), versionFilePlugin()],
+    plugins: [react(), tailwindcss(), versionFilePlugin(), pwaIconsPlugin()],
     define: {
       __APP_BUILD_ID__: JSON.stringify(BUILD_ID),
     },
