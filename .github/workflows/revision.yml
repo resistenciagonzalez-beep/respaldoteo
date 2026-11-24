@@ -29,6 +29,5 @@ jobs:
             echo "::error::Hay archivos privados dentro de la carpeta publica"; exit 1
           fi
 
-      - name: Revision de tipos (informativa por ahora)
-        continue-on-error: true
+      - name: Revision de tipos (errores de codigo)
         run: bunx tsc --noEmit
