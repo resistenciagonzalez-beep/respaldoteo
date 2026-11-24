@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import App from './App.tsx';
 import { AuthProvider } from './hooks/useAuth.tsx';
 import { AppErrorBoundary } from './components/AppErrorBoundary.tsx';
+import { UpdateAvailableBanner } from './components/UpdateAvailableBanner.tsx';
 import './index.css';
 
 createRoot(document.getElementById('root')!).render(
@@ -13,6 +14,8 @@ createRoot(document.getElementById('root')!).render(
         <AppErrorBoundary>
           <App />
         </AppErrorBoundary>
+        {/* Aviso cuando se publica una versión nueva (nunca recarga sola) */}
+        <UpdateAvailableBanner />
       </AuthProvider>
     </AppErrorBoundary>
   </StrictMode>,

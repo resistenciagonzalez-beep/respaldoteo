@@ -4,6 +4,8 @@
  */
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { lazyWithPreload, runWhenIdle } from './utils/lazyLoad';
+import { LazyModalBoundary } from './components/LazyModalBoundary';
 import confetti from 'canvas-confetti';
 import {
   BingoMode,
@@ -31,12 +33,10 @@ import { ModeSelectionModal } from './components/ModeSelectionModal';
 import { BingoEsFormat } from './components/BingoEsFormat';
 import { BingoCelebrationModal } from './components/BingoCelebrationModal';
 import { BingoSheetBuilder } from './components/BingoSheetBuilder';
-import { AdminPanelModal } from './components/AdminPanelModal';
 import { LoginModal } from './components/LoginModal';
 import { AuthScreen } from './components/AuthScreen';
 import { GameSheetSnapshotModal } from './components/GameSheetSnapshotModal';
 import { NewGameModal } from './components/NewGameModal';
-import { SavedGamesGalleryModal } from './components/SavedGamesGalleryModal';
 import { SyncStatusIndicator } from './components/SyncStatusIndicator';
 import {
   getSavedGamesGallery,
@@ -160,6 +160,14 @@ function secureRandomInt(max: number): number {
   return Math.floor(Math.random() * max);
 }
 
+// Ventanas grandes que se descargan bajo demanda (la plataforma abre más rápido)
+const AdminPanelModal = lazyWithPreload(() =>
+  import('./components/AdminPanelModal').then((m) => ({ default: m.AdminPanelModal }))
+);
+const SavedGamesGalleryModal = lazyWithPreload(() =>
+  import('./components/SavedGamesGalleryModal').then((m) => ({ default: m.SavedGamesGalleryModal }))
+);
+
 export default function App() {
   // Game Settings State
   const [settings, setSettings] = useState<GameSettings>({
@@ -232,6 +240,9 @@ export default function App() {
   const [isModeSelectionOpen, setIsModeSelectionOpen] = useState<boolean>(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isAdminOpen, setIsAdminOpen] = useState<boolean>(false);
+  // La ventana se crea la primera vez que se abre y luego se mantiene (igual que antes)
+  const adminEverOpenedRef = useRef(false);
+  if (isAdminOpen) adminEverOpenedRef.current = true;
   const [isLoginOpen, setIsLoginOpen] = useState<boolean>(false);
   const { currentUser, isAdmin, logActivity, loading } = useAuth();
   const [accessDeniedMessage, setAccessDeniedMessage] = useState<string | null>(null);
@@ -436,6 +447,16 @@ export default function App() {
 
   // Gallery of Saved Games state & Active Round Counter
   const [showSavedGamesGallery, setShowSavedGamesGallery] = useState<boolean>(false);
+  const galleryEverOpenedRef = useRef(false);
+  if (showSavedGamesGallery) galleryEverOpenedRef.current = true;
+
+  // Unos segundos después de abrir, se descargan en segundo plano la galería y el panel
+  useEffect(() => {
+    return runWhenIdle(() => {
+      void SavedGamesGalleryModal.preload();
+      void AdminPanelModal.preload();
+    }, 4000);
+  }, []);
   const [savedGamesList, setSavedGamesList] = useState<GameSequenceItem[]>(() => getSavedGamesGallery());
 
   const [currentMatchRound, setCurrentMatchRound] = useState<number>(() => {
@@ -1760,10 +1781,14 @@ export default function App() {
           onOpenAdmin={handleOpenAdminPanel}
           onAccessDeniedNotice={(msg) => setAccessDeniedMessage(msg)}
         />
-        <AdminPanelModal
-          isOpen={isAdminOpen}
-          onClose={() => setIsAdminOpen(false)}
-        />
+        {(isAdminOpen || adminEverOpenedRef.current) && (
+          <LazyModalBoundary onClose={() => setIsAdminOpen(false)}>
+            <AdminPanelModal
+              isOpen={isAdminOpen}
+              onClose={() => setIsAdminOpen(false)}
+            />
+          </LazyModalBoundary>
+        )}
         {accessDeniedMessage && (
           <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-fade-in select-none">
             <div className="w-full max-w-sm rounded-3xl border-2 border-rose-300 bg-[#fffaf5] p-5 text-center flex flex-col items-center gap-3 shadow-2xl">
@@ -1786,14 +1811,18 @@ export default function App() {
           </div>
         )}
         {/* Saved Games Gallery Modal */}
-        <SavedGamesGalleryModal
-          isOpen={showSavedGamesGallery}
-          savedGames={savedGamesList}
-          onClose={() => setShowSavedGamesGallery(false)}
-          onRefreshGallery={refreshSavedGamesList}
-          currentUser={currentUser}
-          isAdmin={isAdmin}
-        />
+        {(showSavedGamesGallery || galleryEverOpenedRef.current) && (
+          <LazyModalBoundary onClose={() => setShowSavedGamesGallery(false)}>
+            <SavedGamesGalleryModal
+              isOpen={showSavedGamesGallery}
+              savedGames={savedGamesList}
+              onClose={() => setShowSavedGamesGallery(false)}
+              onRefreshGallery={refreshSavedGamesList}
+              currentUser={currentUser}
+              isAdmin={isAdmin}
+            />
+          </LazyModalBoundary>
+        )}
 
         {/* Game Snapshot Viewer Modal */}
         <GameSheetSnapshotModal
@@ -2368,10 +2397,14 @@ export default function App() {
       />
 
       {/* Admin Panel Modal (Gestión de Usuarios) */}
-      <AdminPanelModal
-        isOpen={isAdminOpen}
-        onClose={() => setIsAdminOpen(false)}
-      />
+      {(isAdminOpen || adminEverOpenedRef.current) && (
+        <LazyModalBoundary onClose={() => setIsAdminOpen(false)}>
+          <AdminPanelModal
+            isOpen={isAdminOpen}
+            onClose={() => setIsAdminOpen(false)}
+          />
+        </LazyModalBoundary>
+      )}
 
       {/* Login Modal */}
       <LoginModal
@@ -2457,14 +2490,18 @@ export default function App() {
       )}
 
       {/* Saved Games Gallery Modal */}
-      <SavedGamesGalleryModal
-        isOpen={showSavedGamesGallery}
-        savedGames={savedGamesList}
-        onClose={() => setShowSavedGamesGallery(false)}
-        onRefreshGallery={refreshSavedGamesList}
-        currentUser={currentUser}
-        isAdmin={isAdmin}
-      />
+      {(showSavedGamesGallery || galleryEverOpenedRef.current) && (
+        <LazyModalBoundary onClose={() => setShowSavedGamesGallery(false)}>
+          <SavedGamesGalleryModal
+            isOpen={showSavedGamesGallery}
+            savedGames={savedGamesList}
+            onClose={() => setShowSavedGamesGallery(false)}
+            onRefreshGallery={refreshSavedGamesList}
+            currentUser={currentUser}
+            isAdmin={isAdmin}
+          />
+        </LazyModalBoundary>
+      )}
 
       {/* Game Snapshot Viewer Modal */}
       <GameSheetSnapshotModal
