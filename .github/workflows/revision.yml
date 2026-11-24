@@ -16,8 +16,9 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
 
-      - name: Instalar dependencias (versiones exactas del proyecto)
-        run: bun install --frozen-lockfile
+      # Igual que Vercel. (Pendiente: actualizar bun.lock para usar --frozen-lockfile)
+      - name: Instalar dependencias
+        run: bun install
 
       - name: Compilar la plataforma
         run: bun run build
