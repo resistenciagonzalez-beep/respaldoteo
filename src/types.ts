@@ -209,7 +209,7 @@ export interface AppUser {
   passwordHash?: string;
   role: 'admin' | 'operator';
   assignedMode?: '75' | '90' | 'all'; // Operadoras: '75' o '90' exclusivo. Administradoras: 'all'
-  status: 'active' | 'suspended';
+  status: 'active' | 'suspended' | 'pending'; // 'pending' = cuenta nueva esperando aprobación
   joinedDate?: string;
   createdAt?: FirestoreTimestampLike;
   lastActive?: string;
