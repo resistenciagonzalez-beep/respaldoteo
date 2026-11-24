@@ -212,9 +212,9 @@ async function ensureProfileDocument(
     name,
     email: fbUser.email || '',
     role: 'operator',
-    // Cuenta nueva: pendiente hasta que un administrador la apruebe.
-    // Se activa directo solo si es una cuenta antigua que se está migrando o un correo de administración.
-    status: legacyData || ADMIN_EMAILS.includes(normalizeEmail(fbUser.email)) ? 'active' : 'pending',
+    // Cuenta nueva (o cuenta antigua que se pasa al sistema nuevo): pendiente hasta que un
+    // administrador la apruebe. Solo se activa directo un correo de administración YA verificado.
+    status: ADMIN_EMAILS.includes(normalizeEmail(fbUser.email)) && fbUser.emailVerified ? 'active' : 'pending',
     assignedMode: mode,
     joinedDate: (legacyData && legacyData.joinedDate) || getCurrentLocalDateKey(),
     createdAt: (legacyData && legacyData.createdAt) || new Date().toISOString(),
@@ -524,7 +524,7 @@ export function useAuthProvider(): AuthContextType {
 
         if (ADMIN_EMAILS.includes(cleanEmail) && !verificationSentRef.current) {
           verificationSentRef.current = true;
-          sendEmailVerification(cred.user).catch(() => {});
+          await sendEmailVerification(cred.user).catch(() => {});
         }
 
         void writeActivityLog(
@@ -537,7 +537,7 @@ export function useAuthProvider(): AuthContextType {
         );
 
         // Cuenta nueva pendiente de aprobación: se cierra la sesión y se le avisa
-        if (!ADMIN_EMAILS.includes(cleanEmail)) {
+        if (!(ADMIN_EMAILS.includes(cleanEmail) && cred.user.emailVerified)) {
           await signOut(auth).catch(() => {});
           return fail(PENDING_APPROVAL_MESSAGE);
         }
