@@ -1,0 +1,33 @@
+name: Revision automatica
+
+# Antes de publicar cualquier cambio, GitHub compila la plataforma igual que Vercel.
+# Si algo no compila, el cambio queda marcado en rojo y no se debe pasar a la versión en vivo.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  compilar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Instalar dependencias (versiones exactas del proyecto)
+        run: bun install --frozen-lockfile
+
+      - name: Compilar la plataforma
+        run: bun run build
+
+      - name: Revisar que no queden archivos privados en la carpeta publica
+        run: |
+          if find dist -type f \( -name "*.zip" -o -name "*.env" -o -name "*.pem" -o -name "*.key" \) | grep -q .; then
+            echo "::error::Hay archivos privados dentro de la carpeta publica"; exit 1
+          fi
+
+      - name: Revision de tipos (informativa por ahora)
+        continue-on-error: true
+        run: bunx tsc --noEmit
