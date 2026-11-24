@@ -241,6 +241,28 @@ export async function saveGameToIndexedDB(game: GameSequenceItem): Promise<void>
 /**
  * Loads all locally persisted games from IndexedDB.
  */
+/**
+ * Igual que getAllGamesFromIndexedDB, pero si falla o tarda demasiado LANZA el error
+ * (en vez de devolver una lista vacía), para que quien la usa sepa que la copia local
+ * no se pudo leer y no la confunda con "no hay partidas".
+ */
+export async function getAllGamesFromIndexedDBStrict(timeoutMs: number = 15000): Promise<GameSequenceItem[]> {
+  return withTimeout(
+    (async () => {
+      const db = await openOfflineDatabase();
+      return await new Promise<GameSequenceItem[]>((resolve, reject) => {
+        const tx = db.transaction([STORE_GAMES], 'readonly');
+        const store = tx.objectStore(STORE_GAMES);
+        const req = store.getAll();
+        req.onsuccess = () => resolve(Array.isArray(req.result) ? req.result : []);
+        req.onerror = () => reject(req.error);
+      });
+    })(),
+    timeoutMs,
+    'getAllGamesFromIndexedDBStrict'
+  );
+}
+
 export async function getAllGamesFromIndexedDB(): Promise<GameSequenceItem[]> {
   try {
     return await withTimeout(
@@ -521,7 +543,8 @@ export async function getAllKeyValuesFromIndexedDB(): Promise<PersistedKeyValueR
           req.onerror = () => reject(req.error);
         });
       })(),
-      3000,
+      // Solo se usa una vez al abrir la página: se da más margen en equipos lentos
+      10000,
       'getAllKeyValuesFromIndexedDB'
     );
   } catch (err) {
