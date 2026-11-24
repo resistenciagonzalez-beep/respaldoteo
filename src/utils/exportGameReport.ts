@@ -1,5 +1,6 @@
 import { GameSequenceItem } from '../types';
 import { formatTime12h } from './savedGamesStorage';
+import { sanitizeReportData } from './reportSafety';
 
 // ============================================================================
 // Herramientas de exportación (imagen y PDF) cargadas SOLO cuando hacen falta.
@@ -171,7 +172,10 @@ export async function exportElementAsPdf(
 /**
  * Generate full HTML markup of the game, including metrics, financials, and full card sheet
  */
-export function buildGameDocumentHtml(item: GameSequenceItem): string {
+export function buildGameDocumentHtml(rawItem: GameSequenceItem): string {
+  // Seguridad: todos los textos de la partida se limpian antes de armar el reporte,
+  // así ningún dato guardado puede meter código en la pantalla de quien lo exporta.
+  const item = sanitizeReportData(rawItem);
   const isBingo90 = item.mode === '90' || item.sheetType === 'traditional-90';
   const totalBallsCount = item.drawnBallsPlayed?.length || item.totalBallsDrawnCount || 0;
   const linesCount =
