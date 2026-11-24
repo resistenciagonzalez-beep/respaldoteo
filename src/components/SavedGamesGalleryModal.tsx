@@ -32,6 +32,8 @@ import {
   deleteGamePermanently,
   isGameOfOperator,
   getGameNormalizedDateKey,
+  getGameFolderKey,
+  getGameShiftNumber,
   getGameLines,
   deleteGamesOfDay,
   deleteGamesOfOperatorFolder,
@@ -42,6 +44,7 @@ import {
   subscribeToSavedGamesFirestore,
   subscribeToUsersCentralized,
   sanitizeOperatorFolderName,
+  formatTime12h,
 } from '../utils/savedGamesStorage';
 import {
   exportElementAsJpg,
@@ -339,11 +342,14 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
       return gName === targetOpName || gFolder === targetOpFolder;
     });
 
-    // Group games by exact normalized dateKey (YYYY-MM-DD) - STRICT ISOLATION PER DAY
+    // Agrupar por carpeta de TURNO: fecha de inicio del turno (YYYY-MM-DD) + número de turno.
+    // dateKey = clave de la carpeta ("YYYY-MM-DD" o "YYYY-MM-DD#t2"); calendarDate = la fecha.
     const dayMap: Record<
       string,
       {
         dateKey: string;
+        calendarDate: string;
+        shiftNumber: number;
         displayDate: string;
         fullDate: string;
         formattedDate: string;
@@ -356,20 +362,21 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     > = {};
 
     folderGames.forEach((g) => {
-      const dateKey = getGameNormalizedDateKey(g);
+      const calendarDate = getGameNormalizedDateKey(g);
+      const dateKey = getGameFolderKey(g);
 
       if (!dayMap[dateKey]) {
         const todayKey = getCurrentLocalDateKey();
         const yesterdayKey = getPreviousDateKey(todayKey);
 
         let prefix = '';
-        if (dateKey === todayKey) prefix = 'Hoy - ';
-        else if (dateKey === yesterdayKey) prefix = 'Ayer - ';
+        if (calendarDate === todayKey) prefix = 'Hoy - ';
+        else if (calendarDate === yesterdayKey) prefix = 'Ayer - ';
 
-        let display = dateKey;
-        let fullDate = dateKey;
+        let display = calendarDate;
+        let fullDate = calendarDate;
         try {
-          const [y, m, d] = dateKey.split('-').map(Number);
+          const [y, m, d] = calendarDate.split('-').map(Number);
           if (y && m && d) {
             const dateObj = new Date(y, m - 1, d);
             const weekday = dateObj.toLocaleDateString('es-ES', { weekday: 'long' });
@@ -392,6 +399,8 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
 
         dayMap[dateKey] = {
           dateKey,
+          calendarDate,
+          shiftNumber: getGameShiftNumber(g),
           displayDate: `${prefix}${display}`,
           fullDate,
           formattedDate: g.dateFormatted || display,
@@ -430,6 +439,8 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
       });
       dayMap[todayKey] = {
         dateKey: todayKey,
+        calendarDate: todayKey,
+        shiftNumber: 1,
         displayDate: `Hoy - ${todayDisplay}`,
         fullDate: `${capitalizedWeekday}, ${formatted}`,
         formattedDate: todayObj.toLocaleDateString('es-ES'),
@@ -440,6 +451,18 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
         netProfit: 0,
       };
     }
+
+    // Si una fecha tiene más de un turno, cada carpeta lo indica ("· Turno 1", "· Turno 2"...)
+    const shiftsPerDate: Record<string, number> = {};
+    Object.values(dayMap).forEach((f) => {
+      shiftsPerDate[f.calendarDate] = (shiftsPerDate[f.calendarDate] || 0) + 1;
+    });
+    Object.values(dayMap).forEach((f) => {
+      if (f.shiftNumber > 1 || shiftsPerDate[f.calendarDate] > 1) {
+        f.displayDate = `${f.displayDate} · Turno ${f.shiftNumber}`;
+        f.fullDate = `${f.fullDate} · Turno ${f.shiftNumber}`;
+      }
+    });
 
     return Object.values(dayMap).sort((a, b) => b.dateKey.localeCompare(a.dateKey));
   }, [selectedFolderOperator, filteredItems, isAdmin]);
@@ -458,7 +481,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
       });
 
       if (selectedFolderDay && selectedFolderDay !== 'all') {
-        list = list.filter((g) => getGameNormalizedDateKey(g) === selectedFolderDay);
+        list = list.filter((g) => getGameFolderKey(g) === selectedFolderDay);
       }
     } else if (!isAdmin && currentUser) {
       const currentOpName = (currentUser.name || 'Operadora Principal').trim().toLowerCase();
@@ -502,7 +525,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
       const matchesOp =
         gName === targetOp.trim().toLowerCase() ||
         gFolder === sanitizeOperatorFolderName(targetOp);
-      return matchesOp && getGameNormalizedDateKey(g) !== targetDay;
+      return matchesOp && getGameFolderKey(g) !== targetDay;
     });
     if (remainingForOp.length === 0) {
       setSelectedFolderOperator(null);
@@ -742,7 +765,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                     : 'Bingo 75 Multiplicadores'}
                 </span>
                 <span className="text-[11px] text-orange-100 hidden lg:inline truncate font-mono">
-                  📅 {selectedGame.dailyDate} • ⏰ {selectedGame.timestamp} ({selectedGame.durationFormatted || '0m 30s'})
+                  📅 {selectedGame.dailyDate} • ⏰ {formatTime12h(selectedGame.timestamp)} ({selectedGame.durationFormatted || '0m 30s'})
                 </span>
               </div>
             </div>
@@ -1197,7 +1220,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                 ) : (
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                     {operatorDaysList.map((dayFolder) => {
-                      const isToday = dayFolder.dateKey === getCurrentLocalDateKey();
+                      const isToday = dayFolder.calendarDate === getCurrentLocalDateKey();
                       return (
                         <div
                           key={dayFolder.dateKey}
@@ -1217,7 +1240,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                                       {isToday ? '📅 Hoy' : '📁 Día'}
                                     </span>
                                     <span className="text-[10px] text-slate-500 font-bold font-mono">
-                                      {dayFolder.dateKey}
+                                      {dayFolder.calendarDate}
                                     </span>
                                   </div>
                                   <h5 className="text-sm font-black text-slate-900 truncate mt-0.5">
@@ -1234,7 +1257,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                                   type="button"
                                   onClick={(e) => handleRequestDeleteDay(dayFolder.dateKey, e)}
                                   className="px-2 py-1 rounded-xl bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white border border-rose-200 hover:border-rose-600 transition-all shadow-2xs cursor-pointer flex items-center gap-1 flex-shrink-0 active:scale-95"
-                                  title={`Eliminar únicamente las partidas del día ${dayFolder.dateKey}`}
+                                  title={`Eliminar únicamente las partidas de esta carpeta (${dayFolder.displayDate})`}
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
                                   <span className="text-[10px] font-black">Borrar</span>
@@ -1363,7 +1386,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                                 Subcarpeta del Día
                               </span>
                               <span className="text-xs font-mono font-bold text-white/90">
-                                {currentDayInfo.dateKey}
+                                {currentDayInfo.calendarDate}
                               </span>
                             </div>
                             <h3 className="text-base sm:text-lg font-black text-white mt-0.5">
@@ -1490,7 +1513,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                                   📁 {game.dailyDate}
                                 </span>
                                 <span className="text-[10px] bg-blue-100 text-blue-900 px-1.5 py-0.5 rounded font-mono font-bold border border-blue-300" title="Hora exacta de guardado">
-                                  ⏰ {game.timestamp}
+                                  ⏰ {formatTime12h(game.timestamp)}
                                 </span>
                               </div>
                             </div>
@@ -1518,7 +1541,7 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                                   <Calendar className="w-3.5 h-3.5 text-orange-600 flex-shrink-0" />
                                   <span className="truncate">{game.dateFormatted || 'Fecha no registrada'}</span>
                                   <span>•</span>
-                                  <span className="truncate">{game.timestamp}</span>
+                                  <span className="truncate">{formatTime12h(game.timestamp)}</span>
                                 </div>
 
                                 <div className="flex items-center gap-1.5 text-xs text-slate-600 font-medium mt-0.5">
@@ -2447,10 +2470,10 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
               </div>
               <div className="flex-1">
                 <h4 className="text-base sm:text-lg font-black text-slate-900 leading-tight">
-                  ¿Vaciar partidas del día {dayToDelete}?
+                  ¿Vaciar partidas de la carpeta {operatorDaysList.find((d) => d.dateKey === dayToDelete)?.displayDate || dayToDelete}?
                 </h4>
                 <p className="text-xs text-slate-600 mt-1 leading-relaxed">
-                  Se eliminarán únicamente las partidas y líneas registradas en esta fecha ({dayToDelete}) para la operadora <strong className="text-slate-900">{selectedFolderOperator}</strong>. Ningún otro día ni operadora se verá afectado.
+                  Se eliminarán únicamente las partidas y líneas registradas en esta carpeta ({operatorDaysList.find((d) => d.dateKey === dayToDelete)?.displayDate || dayToDelete}) para la operadora <strong className="text-slate-900">{selectedFolderOperator}</strong>. Ningún otro día ni operadora se verá afectado.
                 </p>
               </div>
             </div>

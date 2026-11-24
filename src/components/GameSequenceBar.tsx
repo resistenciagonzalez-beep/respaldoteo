@@ -5,6 +5,7 @@ import { getBingo75Letter, getBallBadgeColor } from '../utils/ballColors';
 import {
   getCurrentLocalDateKey,
   isRealSavedGameInTodaySubfolder,
+  formatTime12h,
 } from '../utils/savedGamesStorage';
 import {
   Trophy,
@@ -424,7 +425,7 @@ export const GameSequenceBar: React.FC<GameSequenceBarProps> = ({
                       {item.timestamp && (
                         <span className="text-[8.5px] text-orange-900/60 font-semibold flex items-center gap-0.5">
                           <Clock className="w-2 h-2 text-orange-400" />
-                          {item.timestamp}
+                          {formatTime12h(item.timestamp)}
                         </span>
                       )}
                       {isAdmin && onDeleteGameItem && (

@@ -47,6 +47,7 @@ import {
   subscribeToActivityLogsCentralized,
   updateUserFieldsCentralized,
   deleteUserCentralized,
+  formatTime12h,
 } from '../utils/savedGamesStorage';
 import { downloadGameDirectJpg, downloadGameDirectPdf } from '../utils/exportGameReport';
 import { GameSheetSnapshotModal } from './GameSheetSnapshotModal';
@@ -724,7 +725,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
           mode: isBingo90 ? 'Bingo 90' : 'Bingo 75',
           sheetType: g.sheetType,
           date: g.dailyDate || g.dateFormatted,
-          time: g.timestamp,
+          time: formatTime12h(g.timestamp),
           operatorName: g.operatorName,
           operatorEmail: g.operatorEmail,
           winningBall: g.ballNumber,
@@ -792,7 +793,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
       return [
         `"${g.id || ''}"`,
         `"${g.dailyDate || g.dateFormatted || ''}"`,
-        `"${g.timestamp || ''}"`,
+        `"${formatTime12h(g.timestamp)}"`,
         `"${(g.operatorName || 'Operadora').replace(/"/g, '""')}"`,
         `"${(g.operatorEmail || '').replace(/"/g, '""')}"`,
         `"${g.round || 1}"`,
@@ -842,7 +843,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
         mode: isBingo90 ? 'Bingo 90 Bolas' : 'Bingo 75 Bolas',
         sheetType: game.sheetType,
         date: game.dailyDate || game.dateFormatted,
-        time: game.timestamp,
+        time: formatTime12h(game.timestamp),
         operator: {
           uid: game.operatorUid,
           name: game.operatorName,
@@ -889,7 +890,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
         ['COPIA COMPLETA DE PLANILLA DE BINGO 90 (TRIPLETAS)'],
         ['Partida #', game.round],
         ['Fecha', game.dailyDate || game.dateFormatted || 'Hoy'],
-        ['Hora', game.timestamp || ''],
+        ['Hora', formatTime12h(game.timestamp)],
         ['Operadora', game.operatorName || 'Principal'],
         ['Correo Operadora', game.operatorEmail || ''],
         ['Anfitrión', sheet.hostName || 'No especificado'],
@@ -937,7 +938,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
         ['COPIA COMPLETA DE PLANILLA DE BINGO 75 (POR COLUMNAS Y MULTIPLICADORES)'],
         ['Partida #', game.round],
         ['Fecha', game.dailyDate || game.dateFormatted || 'Hoy'],
-        ['Hora', game.timestamp || ''],
+        ['Hora', formatTime12h(game.timestamp)],
         ['Operadora', game.operatorName || 'Principal'],
         ['Correo Operadora', game.operatorEmail || ''],
         ['Título de la Planilla', sheet.title || 'Planilla Oficial'],
@@ -1511,7 +1512,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                               <span>{game.dailyDate || game.dateFormatted || 'Hoy'}</span>
                             </div>
                             <div className="text-[10px] text-orange-900/50 font-mono">
-                              {game.timestamp || ''}
+                              {formatTime12h(game.timestamp)}
                             </div>
                           </div>
 
@@ -2184,7 +2185,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                     Detalle Completo - Partida #{selectedGameForDetail.round}
                   </h3>
                   <p className="text-xs text-orange-900/70 font-semibold">
-                    Modo {selectedGameForDetail.mode === '90' ? 'Bingo 90 Bolas' : 'Bingo 75 Bolas'} • {selectedGameForDetail.dailyDate || selectedGameForDetail.dateFormatted} a las {selectedGameForDetail.timestamp}
+                    Modo {selectedGameForDetail.mode === '90' ? 'Bingo 90 Bolas' : 'Bingo 75 Bolas'} • {selectedGameForDetail.dailyDate || selectedGameForDetail.dateFormatted} a las {formatTime12h(selectedGameForDetail.timestamp)}
                   </p>
                 </div>
               </div>
