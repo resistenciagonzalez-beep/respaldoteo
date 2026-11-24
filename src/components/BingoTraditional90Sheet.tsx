@@ -40,6 +40,14 @@ import { Bolillero90Sidebar } from './Bolillero90Sidebar';
 import { GameSequenceBar } from './GameSequenceBar';
 import { deleteGamePermanently } from '../utils/savedGamesStorage';
 import { safeSetItem, safeGetItem } from '../utils/safeStorage';
+import {
+  generateDefaultRows90,
+  getTablesList90,
+  buildHitsSet90,
+  getRowHits90,
+  findWinningRows90,
+  winningRowKey90,
+} from '../utils/sheet90Logic';
 
 interface BingoTraditional90SheetProps {
   drawnBalls?: Ball[];
@@ -76,20 +84,8 @@ interface BingoTraditional90SheetProps {
 
 const STORAGE_KEY = 'bingo_traditional_90_sheet_v1';
 
-// Generate default 30 rows with triples: [r, r+30, r+60]
-const generateDefaultRows = (): Traditional90Row[] => {
-  return Array.from({ length: 30 }, (_, i) => {
-    const rowNum = i + 1;
-    return {
-      rowNumber: rowNum,
-      numbers: [rowNum, rowNum + 30, rowNum + 60],
-      playerId: undefined,
-      playerName: undefined,
-      color: undefined,
-      paid: false,
-    };
-  });
-};
+// 30 filas con triples [r, r+30, r+60] (regla en utils/sheet90Logic.ts, con pruebas automáticas)
+const generateDefaultRows = generateDefaultRows90;
 
 export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = ({
   drawnBalls = [],
@@ -172,12 +168,10 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
   sheetDataRef.current = sheetData;
 
   // Tables array normalized
-  const tablesList = useMemo(() => {
-    if (sheetData.tables && sheetData.tables.length > 0) {
-      return sheetData.tables;
-    }
-    return [sheetData.table1, sheetData.table2].filter(Boolean);
-  }, [sheetData.tables, sheetData.table1, sheetData.table2]);
+  const tablesList = useMemo(
+    () => getTablesList90({ tables: sheetData.tables, table1: sheetData.table1, table2: sheetData.table2 }),
+    [sheetData.tables, sheetData.table1, sheetData.table2]
+  );
 
   // Active marker table number (ONLY this planilla shows the yellow balls when balls are drawn!)
   const [activeMarkerTableNumber, setActiveMarkerTableNumber] = useState<number>(() => {
@@ -617,59 +611,29 @@ export const BingoTraditional90Sheet: React.FC<BingoTraditional90SheetProps> = (
   }, [drawnBalls]);
 
   // Balls actually completed in game (from bolillero drawn balls OR manual circles)
-  const effectiveHitsSet = useMemo(() => {
-    const combined = new Set<number>(drawnSet);
-    manuallyCircledNumbers.forEach((n) => combined.add(n));
-    return combined;
-  }, [drawnSet, manuallyCircledNumbers]);
+  const effectiveHitsSet = useMemo(
+    () => buildHitsSet90(drawnSet, manuallyCircledNumbers),
+    [drawnSet, manuallyCircledNumbers]
+  );
 
   // Helper to calculate hits on 3 numbers
   const getRowHits = useCallback(
-    (numbers: number[]) => {
-      const hitCount = numbers.filter((n) => effectiveHitsSet.has(n)).length;
-      return {
-        count: hitCount,
-        isBingo: hitCount === 3,
-      };
-    },
+    (numbers: number[]) => getRowHits90(numbers, effectiveHitsSet),
     [effectiveHitsSet]
   );
 
   // Winning rows across ALL open planillas
-  const winningRows = useMemo(() => {
-    const list: {
-      tableNum: number;
-      tableTitle: string;
-      rowNumber: number;
-      numbers: [number, number, number];
-      playerName?: string;
-    }[] = [];
-
-    tablesList.forEach((tbl, tIdx) => {
-      const tableNum = tbl.tableNumber || tIdx + 1;
-      tbl.rows.forEach((r) => {
-        const hits = getRowHits(r.numbers);
-        if (hits.isBingo) {
-          list.push({
-            tableNum,
-            tableTitle: tbl.title || String(tableNum),
-            rowNumber: r.rowNumber,
-            numbers: r.numbers as [number, number, number],
-            playerName: r.playerName,
-          });
-        }
-      });
-    });
-
-    return list;
-  }, [tablesList, getRowHits]);
+  const winningRows = useMemo(
+    () => findWinningRows90(tablesList, effectiveHitsSet),
+    [tablesList, effectiveHitsSet]
+  );
 
   // AUTOMATICALLY STOP BOLILLERO WHEN A ROW REACHES 3 NUMBERS ON ANY OPEN PLANILLA
   useEffect(() => {
     if (winningRows.length === 0) return;
 
     for (const win of winningRows) {
-      const key = `t${win.tableNum}_r${win.rowNumber}_${win.numbers.join('_')}`;
+      const key = winningRowKey90(win);
       if (!celebratedSheetBingosRef.current.has(key)) {
         celebratedSheetBingosRef.current.add(key);
 

@@ -19,6 +19,9 @@ jobs:
       - name: Instalar dependencias (versiones exactas del proyecto)
         run: bun install --frozen-lockfile
 
+      - name: Pruebas automaticas de las reglas del juego
+        run: bun test
+
       - name: Compilar la plataforma
         run: bun run build
 
