@@ -9,16 +9,18 @@ import { lazy, type ComponentType, type LazyExoticComponent } from 'react';
  *   publique una versión nueva mientras la página está abierta.
  * - Si la descarga falla (internet inestable), se reintenta sola 2 veces.
  */
-export type PreloadableComponent<P> = LazyExoticComponent<ComponentType<P>> & {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type PreloadableComponent<T extends ComponentType<any>> = LazyExoticComponent<T> & {
   preload: () => Promise<unknown>;
 };
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export function lazyWithPreload<P>(
-  factory: () => Promise<{ default: ComponentType<P> }>
-): PreloadableComponent<P> {
-  let promise: Promise<{ default: ComponentType<P> }> | null = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function lazyWithPreload<T extends ComponentType<any>>(
+  factory: () => Promise<{ default: T }>
+): PreloadableComponent<T> {
+  let promise: Promise<{ default: T }> | null = null;
 
   const load = () => {
     if (!promise) {
@@ -41,7 +43,7 @@ export function lazyWithPreload<P>(
     return promise;
   };
 
-  const Component = lazy(load) as PreloadableComponent<P>;
+  const Component = lazy(load) as PreloadableComponent<T>;
   Component.preload = () => load().catch(() => undefined);
   return Component;
 }
