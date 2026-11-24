@@ -79,7 +79,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   // Search & Filter for Users & Activities
   const [searchTerm, setSearchTerm] = useState('');
   const [roleFilter, setRoleFilter] = useState<'all' | 'admin' | 'operator'>('all');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'suspended'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'suspended' | 'pending'>('all');
   const [activityFilterOperator, setActivityFilterOperator] = useState<string>('all');
 
   // Search & Filter for Saved Games
@@ -247,6 +247,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
   // Status toggle handler
   const handleToggleStatus = async (user: AppUser) => {
+    // Pendiente o suspendida -> se activa (aprobar / reactivar). Activa -> se suspende.
     const newStatus = user.status === 'active' ? 'suspended' : 'active';
     try {
       await updateUserFieldsCentralized(user.id, { status: newStatus });
@@ -1002,7 +1003,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
   // Filtered users list
   const filteredUsers = useMemo(() => {
-    return usersList.filter((u) => {
+    const filtered = usersList.filter((u) => {
       const matchSearch =
         u.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
         u.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -1013,7 +1014,14 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
       return matchSearch && matchRole && matchStatus;
     });
+    // Las cuentas pendientes de aprobación aparecen primero
+    return [...filtered].sort((a, b) => Number(b.status === 'pending') - Number(a.status === 'pending'));
   }, [usersList, searchTerm, roleFilter, statusFilter]);
+
+  const pendingUsersCount = useMemo(
+    () => usersList.filter((u) => u.status === 'pending').length,
+    [usersList]
+  );
 
   // Filtered activities list
   const filteredActivities = useMemo(() => {
@@ -1759,18 +1767,28 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
                 <select
                   value={statusFilter}
-                  onChange={(e) => setStatusFilter(e.target.value as 'all' | 'active' | 'suspended')}
+                  onChange={(e) => setStatusFilter(e.target.value as 'all' | 'active' | 'suspended' | 'pending')}
                   className="py-1.5 px-2.5 rounded-xl border border-orange-200 bg-white text-xs font-bold text-orange-950 focus:outline-none focus:border-orange-500 cursor-pointer shadow-xs"
                 >
                   <option value="all">Todos los Estados</option>
                   <option value="active">Activos</option>
                   <option value="suspended">Suspendidos</option>
+                  <option value="pending">Pendientes de aprobación</option>
                 </select>
               </div>
             </div>
 
             {/* Users List */}
             <div className="flex-1 overflow-y-auto p-4 sm:p-6 min-h-0 space-y-2.5">
+              {pendingUsersCount > 0 && statusFilter !== 'pending' && (
+                <button
+                  type="button"
+                  onClick={() => setStatusFilter('pending')}
+                  className="w-full text-left px-3.5 py-2.5 rounded-2xl border-2 border-amber-400 bg-amber-50 hover:bg-amber-100 text-amber-950 text-xs font-black cursor-pointer transition-colors"
+                >
+                  ⏳ {pendingUsersCount === 1 ? '1 cuenta nueva espera' : `${pendingUsersCount} cuentas nuevas esperan`} tu aprobación. Toca aquí para verlas.
+                </button>
+              )}
               {filteredUsers.length === 0 ? (
                 <div className="text-center py-12 flex flex-col items-center justify-center text-orange-900/60">
                   <Users className="w-10 h-10 mb-2 stroke-[1.5] opacity-50" />
@@ -1781,6 +1799,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                   {filteredUsers.map((user) => {
                     const isUserAdmin = user.role === 'admin';
                     const isSuspended = user.status === 'suspended';
+                    const isPending = user.status === 'pending';
                     const isSelf = currentUser?.id === user.id;
 
                     return (
@@ -1840,12 +1859,14 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
                               <span
                                 className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
-                                  isSuspended
+                                  isPending
+                                    ? 'bg-amber-100 text-amber-900 border-amber-400'
+                                    : isSuspended
                                     ? 'bg-rose-100 text-rose-800 border-rose-300'
                                     : 'bg-emerald-100 text-emerald-800 border-emerald-300'
                                 }`}
                               >
-                                {isSuspended ? '● Suspendido' : '● Activo'}
+                                {isPending ? '● Pendiente de aprobación' : isSuspended ? '● Suspendido' : '● Activo'}
                               </span>
                             </div>
 
@@ -1905,12 +1926,17 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                             className={`px-2.5 py-1.5 rounded-xl border text-xs font-bold transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer ${
                               isSelf
                                 ? 'opacity-40 cursor-not-allowed bg-orange-100 border-orange-200'
-                                : isSuspended
+                                : isSuspended || isPending
                                 ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-700 shadow-xs'
                                 : 'bg-rose-100 hover:bg-rose-200 text-rose-900 border-rose-300'
                             }`}
                           >
-                            {isSuspended ? (
+                            {isPending ? (
+                              <>
+                                <UserCheck className="w-3.5 h-3.5" />
+                                <span>Aprobar</span>
+                              </>
+                            ) : isSuspended ? (
                               <>
                                 <UserCheck className="w-3.5 h-3.5" />
                                 <span>Reactivar</span>
