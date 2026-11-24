@@ -5,6 +5,7 @@ rules_version = '2';
 // - Las operadoras solo ven y guardan SUS partidas y turnos (campo ownerUid).
 // - Los administradores ven todo.
 // - Solo los administradores pueden borrar partidas, carpetas o usuarios, y cambiar rangos.
+// - Las cuentas nuevas quedan pendientes hasta que un administrador las aprueba.
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -43,6 +44,23 @@ service cloud.firestore {
         ];
     }
 
+    // Correos de administración (para que su cuenta nueva quede activa de una vez)
+    function isAdminListEmail() {
+      return isSignedIn() && request.auth.token.email in [
+        'resistenciagonzalez@gmail.com',
+        'genesis.vargas0619@gmail.com',
+        'bingoteteoo@gmail.com'
+      ];
+    }
+
+    // Cuenta antigua (anterior a Firebase Authentication) que se está migrando: ya estaba aprobada
+    function isLegacyMigration() {
+      return request.resource.data.get('legacyIds', []) is list
+        && request.resource.data.get('legacyIds', []).size() > 0
+        && exists(userPath(request.resource.data.legacyIds[0]))
+        && get(userPath(request.resource.data.legacyIds[0])).data.get('email', '') == request.auth.token.email;
+    }
+
     function isValidId(id) {
       return id is string && id.size() > 0 && id.size() <= 200;
     }
@@ -66,10 +84,12 @@ service cloud.firestore {
       allow list: if isAdmin()
         || (isSignedIn() && resource.data.email == request.auth.token.email);
 
+      // Cuenta nueva: queda 'pending' hasta que un administrador la apruebe
       allow create: if isSignedIn()
         && request.auth.uid == userId
         && request.resource.data.email == request.auth.token.email
-        && request.resource.data.get('status', 'active') == 'active'
+        && (request.resource.data.get('status', '') == 'pending'
+            || (request.resource.data.get('status', '') == 'active' && (isAdminListEmail() || isLegacyMigration())))
         && !('password' in request.resource.data)
         && !('passwordHash' in request.resource.data)
         && (request.resource.data.get('role', 'operator') == 'operator'
