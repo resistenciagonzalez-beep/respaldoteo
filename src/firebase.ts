@@ -8,9 +8,9 @@ import {
 } from 'firebase/firestore';
 import configJson from '../firebase-applet-config.json';
 
-// Silence internal SDK connection retry messages in browser/iframe sandbox
+// Solo se muestran errores reales de Firebase en la consola (no los mensajes normales de reconexión)
 try {
-  setLogLevel('silent');
+  setLogLevel('error');
 } catch (err) {
   console.warn('Could not set Firestore log level:', err);
 }
@@ -29,20 +29,21 @@ const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
 export const auth = getAuth(app);
 
-// Use initializeFirestore with experimentalForceLongPolling to ensure reliable
-// connections in iframe / cloud preview environments without WebChannel streaming issues.
+// Conexión con Firestore: el SDK detecta solo si la red permite la conexión rápida (streaming)
+// y, si no, usa la conexión de respaldo (long polling). Antes se forzaba siempre la de respaldo,
+// que era necesaria solo dentro de Google AI Studio y hace todo más lento.
 let firestoreDb: Firestore;
 try {
   firestoreDb = configJson.firestoreDatabaseId
     ? initializeFirestore(
         app,
         {
-          experimentalForceLongPolling: true,
+          experimentalAutoDetectLongPolling: true,
         },
         configJson.firestoreDatabaseId
       )
     : initializeFirestore(app, {
-        experimentalForceLongPolling: true,
+        experimentalAutoDetectLongPolling: true,
       });
 } catch (err) {
   console.warn('Firestore already initialized, retrieving existing instance:', err);
