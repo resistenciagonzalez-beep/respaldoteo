@@ -347,6 +347,19 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     });
   }, [savedGamesList, gameDateFilter, customDatePicker, gameOperatorFilter, gameModeFilter, gameSearchTerm, currentLocalDate]);
 
+  // La lista se muestra por tandas para que el Panel abra rápido aunque haya miles de partidas.
+  // Filtros, totales, descargas y estadísticas siguen usando TODAS las partidas.
+  const GAMES_PAGE_SIZE = 40;
+  const [visibleGamesCount, setVisibleGamesCount] = useState(GAMES_PAGE_SIZE);
+  useEffect(() => {
+    setVisibleGamesCount(GAMES_PAGE_SIZE);
+  }, [gameDateFilter, customDatePicker, gameOperatorFilter, gameModeFilter, gameSearchTerm]);
+  const visibleSavedGames = useMemo(
+    () => filteredSavedGames.slice(0, visibleGamesCount),
+    [filteredSavedGames, visibleGamesCount]
+  );
+  const hiddenGamesCount = Math.max(0, filteredSavedGames.length - visibleSavedGames.length);
+
   // List of distinct operators who have saved games
   const savedGamesOperators = useMemo(() => {
     const map = new Map<string, string>();
@@ -1421,7 +1434,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                 </div>
               ) : (
                 <div className="space-y-2.5">
-                  {filteredSavedGames.map((game) => {
+                  {visibleSavedGames.map((game) => {
                     const isBingo90 = game.mode === '90';
                     const ballsCount = game.drawnBallsPlayed?.length || game.totalBallsDrawnCount || 0;
                     const linesCount =
@@ -1614,6 +1627,15 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                       </div>
                     );
                   })}
+                  {hiddenGamesCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setVisibleGamesCount((n) => n + GAMES_PAGE_SIZE)}
+                      className="w-full py-3 rounded-2xl bg-orange-100 hover:bg-orange-200 border border-orange-300 text-orange-950 text-sm font-black transition-colors"
+                    >
+                      Mostrar {Math.min(GAMES_PAGE_SIZE, hiddenGamesCount)} partidas más (quedan {hiddenGamesCount})
+                    </button>
+                  )}
                 </div>
               )}
             </div>
