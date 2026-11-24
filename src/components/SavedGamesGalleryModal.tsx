@@ -491,6 +491,19 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
     return list;
   }, [filteredItems, viewMode, selectedFolderOperator, selectedFolderDay, isAdmin, currentUser]);
 
+  // La cuadrícula se muestra por tandas para que la Galería no se trabe con miles de partidas.
+  // Contadores, totales y filtros siguen usando TODAS las partidas.
+  const GALLERY_PAGE_SIZE = 40;
+  const [visibleGalleryCount, setVisibleGalleryCount] = useState(GALLERY_PAGE_SIZE);
+  React.useEffect(() => {
+    setVisibleGalleryCount(GALLERY_PAGE_SIZE);
+  }, [viewMode, selectedFolderOperator, selectedFolderDay, filterMode, sortOrder, searchQuery]);
+  const visibleGalleryItems = useMemo(
+    () => displayItems.slice(0, visibleGalleryCount),
+    [displayItems, visibleGalleryCount]
+  );
+  const hiddenGalleryCount = Math.max(0, displayItems.length - visibleGalleryItems.length);
+
   // Day deletion handlers (ONLY ADMIN)
   const handleRequestDeleteDay = (dateKey: string, e?: React.MouseEvent) => {
     if (e) {
@@ -1448,12 +1461,23 @@ export const SavedGamesGalleryModal: React.FC<SavedGamesGalleryModalProps> = ({
                     </p>
                   </div>
                 ) : (
-                  <GalleryGamesGrid
-                    displayItems={displayItems}
-                    handleOpenGameDetail={handleOpenGameDetail}
-                    isAdmin={isAdmin}
-                    handleRequestDeleteItem={handleRequestDeleteItem}
-                  />
+                  <>
+                    <GalleryGamesGrid
+                      displayItems={visibleGalleryItems}
+                      handleOpenGameDetail={handleOpenGameDetail}
+                      isAdmin={isAdmin}
+                      handleRequestDeleteItem={handleRequestDeleteItem}
+                    />
+                    {hiddenGalleryCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setVisibleGalleryCount((n) => n + GALLERY_PAGE_SIZE)}
+                        className="mt-4 w-full py-3 rounded-2xl bg-orange-100 hover:bg-orange-200 border border-orange-300 text-orange-950 text-sm font-black transition-colors cursor-pointer"
+                      >
+                        Mostrar {Math.min(GALLERY_PAGE_SIZE, hiddenGalleryCount)} partidas más (quedan {hiddenGalleryCount})
+                      </button>
+                    )}
+                  </>
                 )}
               </div>
             )
