@@ -60,6 +60,10 @@ const ADMIN_EMAILS = [
   'bingoteteoo@gmail.com',
 ];
 
+// Las cuentas nuevas quedan "pendientes" hasta que un administrador las aprueba en el Panel
+const PENDING_APPROVAL_MESSAGE =
+  'Tu cuenta fue creada y está pendiente de aprobación. Un administrador debe activarla desde el Panel; luego podrás iniciar sesión.';
+
 const SESSION_CACHE_KEY = 'bingo_current_user_session';
 
 // Limpieza: versiones anteriores guardaban en el navegador una lista de usuarios con sus contraseñas.
@@ -85,7 +89,7 @@ function buildProfile(uid: string, data: FirestoreData | null | undefined, fbUse
     name: (data && data.name) || (fbUser && fbUser.displayName) || (email ? email.split('@')[0] : 'Operador'),
     email,
     role,
-    status: data && data.status === 'suspended' ? 'suspended' : 'active',
+    status: data && data.status === 'suspended' ? 'suspended' : data && data.status === 'pending' ? 'pending' : 'active',
     joinedDate: (data && data.joinedDate) || getCurrentLocalDateKey(),
     createdAt: data ? data.createdAt : undefined,
     lastActive: (data && data.lastActive) || 'En línea',
@@ -208,7 +212,9 @@ async function ensureProfileDocument(
     name,
     email: fbUser.email || '',
     role: 'operator',
-    status: 'active',
+    // Cuenta nueva: pendiente hasta que un administrador la apruebe.
+    // Se activa directo solo si es una cuenta antigua que se está migrando o un correo de administración.
+    status: legacyData || ADMIN_EMAILS.includes(normalizeEmail(fbUser.email)) ? 'active' : 'pending',
     assignedMode: mode,
     joinedDate: (legacyData && legacyData.joinedDate) || getCurrentLocalDateKey(),
     createdAt: (legacyData && legacyData.createdAt) || new Date().toISOString(),
@@ -317,10 +323,12 @@ export function useAuthProvider(): AuthContextType {
           }
 
           const data = snap.data();
-          if (data.status === 'deleted' || data.status === 'suspended') {
+          if (data.status === 'deleted' || data.status === 'suspended' || data.status === 'pending') {
             setError(
               data.status === 'deleted'
                 ? 'Esta cuenta fue eliminada por un administrador.'
+                : data.status === 'pending'
+                ? PENDING_APPROVAL_MESSAGE
                 : 'Esta cuenta ha sido suspendida por un administrador.'
             );
             signOut(auth).catch(() => {});
@@ -457,11 +465,13 @@ export function useAuthProvider(): AuthContextType {
           await ensureProfileDocument(fbUser, { legacy });
         } else {
           const data = snap.data();
-          if (data.status === 'deleted' || data.status === 'suspended') {
+          if (data.status === 'deleted' || data.status === 'suspended' || data.status === 'pending') {
             await signOut(auth).catch(() => {});
             return fail(
               data.status === 'deleted'
                 ? 'Esta cuenta fue eliminada por un administrador.'
+                : data.status === 'pending'
+                ? PENDING_APPROVAL_MESSAGE
                 : 'Esta cuenta ha sido suspendida. Contacte a un administrador.'
             );
           }
@@ -525,6 +535,12 @@ export function useAuthProvider(): AuthContextType {
           'register',
           'El usuario "' + cleanName + '" (' + cleanEmail + ') se registró con rol de Operador.'
         );
+
+        // Cuenta nueva pendiente de aprobación: se cierra la sesión y se le avisa
+        if (!ADMIN_EMAILS.includes(cleanEmail)) {
+          await signOut(auth).catch(() => {});
+          return fail(PENDING_APPROVAL_MESSAGE);
+        }
         return { success: true };
       } catch (err) {
         console.error('User register error:', err);

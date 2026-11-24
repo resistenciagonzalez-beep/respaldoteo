@@ -3397,7 +3397,7 @@ export function subscribeToUsersCentralized(
             name: data.name || 'Operador',
             email: data.email || '',
             role: resolvedRole,
-            status: data.status === 'suspended' ? 'suspended' : 'active',
+            status: data.status === 'suspended' ? 'suspended' : data.status === 'pending' ? 'pending' : 'active',
             joinedDate: data.joinedDate || '',
             createdAt: data.createdAt,
             lastActive: data.lastActive || 'Reciente',
