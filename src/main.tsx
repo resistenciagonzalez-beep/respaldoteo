@@ -4,6 +4,7 @@ import App from './App.tsx';
 import { AuthProvider } from './hooks/useAuth.tsx';
 import { AppErrorBoundary } from './components/AppErrorBoundary.tsx';
 import { UpdateAvailableBanner } from './components/UpdateAvailableBanner.tsx';
+import { setupPwa } from './utils/pwa';
 import './index.css';
 
 createRoot(document.getElementById('root')!).render(
@@ -20,3 +21,6 @@ createRoot(document.getElementById('root')!).render(
     </AppErrorBoundary>
   </StrictMode>,
 );
+
+// App instalable: modo sin señal, datos protegidos y pantalla encendida (solo en la app instalada)
+setupPwa();
