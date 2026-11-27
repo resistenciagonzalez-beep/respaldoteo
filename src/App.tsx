@@ -66,6 +66,13 @@ import {
   savePreviousGameSheet75,
   savePreviousGameSheet90,
 } from './utils/gameSnapshotStorage';
+import { getStoredPlanilla90Snapshot } from './utils/planilla90Storage';
+import {
+  getPlanilla90Lines,
+  getPlanilla90TypedBalls,
+  isPlanilla90Snapshot,
+  normalizePlanilla90,
+} from './utils/planilla90Rules';
 import { getActiveShift, recordGameToActiveShift } from './utils/shiftsStorage';
 import {
   safeSetItem,
@@ -696,12 +703,16 @@ export default function App() {
         // Capture current sheets BEFORE any reset occurs
         const s75Now = getStoredSheet75Snapshot();
         const s90Now = getStoredSheet90Snapshot();
+        // Planilla 90 nueva (formato por columnas): sus datos mandan cuando se juega 90
+        const p90Now = isBingo90 ? getStoredPlanilla90Snapshot() : null;
 
         // Save snapshots of current sheets as previous game for the "Mismos" auto-restore feature
         if (s75Now) savePreviousGameSheet75(s75Now, currentUser);
         if (s90Now) savePreviousGameSheet90(s90Now, currentUser);
 
-        const exactLines = isBingo90
+        const exactLines = p90Now
+          ? getPlanilla90Lines(p90Now)
+          : isBingo90
           ? (s90Now?.tables?.length ? s90Now.tables.length * 30 : 30)
           : (s75Now?.columns?.length
               ? s75Now.columns.reduce((sum, col) => sum + (Number(col.multiplier) || 1), 0)
@@ -719,9 +730,16 @@ export default function App() {
         if (!customSeq && s75Now?.customSeqEntries) {
           customSeq = s75Now.customSeqEntries;
         }
+        if (p90Now) {
+          customSeq = p90Now.customSeqEntries || {};
+        }
 
         // Fallback to manual sequence entry if operator typed numbers directly in the sheet sequence
         const manualEntryForRound = (() => {
+          if (p90Now) {
+            // Planilla 90 nueva: vale lo anotado en la casilla de la partida en curso
+            return p90Now.activeSeqSlot ? customSeq?.[p90Now.activeSeqSlot] : undefined;
+          }
           if (!customSeq) return undefined;
           if (customSeq[roundNum]) return customSeq[roundNum];
           const keys = Object.keys(customSeq)
@@ -744,8 +762,10 @@ export default function App() {
             ? Number(manualEntryForRound.ambo)
             : undefined;
 
-        const effectiveWinBallNum = winBallNum > 0 ? winBallNum : manualBingoNum;
+        const p90Typed = getPlanilla90TypedBalls(p90Now);
+        const effectiveWinBallNum = p90Typed.bingo ?? (winBallNum > 0 ? winBallNum : manualBingoNum);
         const effectiveWinRow =
+          p90Typed.bingoRow ??
           winRow ??
           (effectiveWinBallNum > 0
             ? (((effectiveWinBallNum - 1) % (modeToUse === '75' ? 15 : 30)) + 1)
@@ -758,14 +778,17 @@ export default function App() {
             ? (((effectiveTernaBall - 1) % (modeToUse === '75' ? 15 : 30)) + 1)
             : undefined);
 
-        const effectiveAmboBall = capturedAmboBall ?? manualAmboNum;
+        const effectiveAmboBall = p90Typed.ambo ?? capturedAmboBall ?? manualAmboNum;
         const effectiveAmboRow =
+          p90Typed.amboRow ??
           capturedAmboRow ??
           (effectiveAmboBall && effectiveAmboBall > 0
             ? (((effectiveAmboBall - 1) % (modeToUse === '75' ? 15 : 30)) + 1)
             : undefined);
 
-        const playerSummaries = s75Now?.playerSummaryList && s75Now.playerSummaryList.length > 0
+        const playerSummaries = p90Now
+          ? p90Now.playerSummaryList || []
+          : s75Now?.playerSummaryList && s75Now.playerSummaryList.length > 0
           ? s75Now.playerSummaryList
           : (s75Now?.players || []).map((p) => ({
               id: p.id,
@@ -800,6 +823,7 @@ export default function App() {
           drawnBallsPlayed: drawnNumbersPlayed,
           sheet75Override: s75Now,
           sheet90Override: s90Now,
+          planilla90Override: p90Now,
           operatorUid: opUid,
           operatorName: opName,
           operatorEmail: opEmail,
@@ -963,10 +987,19 @@ export default function App() {
           ? (sheet75Override as BingoSheetData)
           : undefined;
 
-      const s75Now = validSheet75Override || getStoredSheet75Snapshot();
-      const s90Now = getStoredSheet90Snapshot();
+      // Planilla 90 nueva (formato por columnas): sus datos mandan cuando se juega 90
+      const p90Now = isBingo90
+        ? isPlanilla90Snapshot(sheet75Override)
+          ? normalizePlanilla90(sheet75Override)
+          : getStoredPlanilla90Snapshot()
+        : null;
+      const p90Typed = getPlanilla90TypedBalls(p90Now);
+      const s75Now = p90Now ? null : validSheet75Override || getStoredSheet75Snapshot();
+      const s90Now = p90Now ? null : getStoredSheet90Snapshot();
 
-      const exactLines = isBingo90
+      const exactLines = p90Now
+        ? getPlanilla90Lines(p90Now)
+        : isBingo90
         ? (s90Now?.tables?.length ? s90Now.tables.length * 30 : 30)
         : (s75Now?.columns?.length
             ? s75Now.columns.reduce((sum, col) => sum + (Number(col.multiplier) || 1), 0)
@@ -983,9 +1016,13 @@ export default function App() {
       if (!customSeq && s75Now?.customSeqEntries) {
         customSeq = s75Now.customSeqEntries;
       }
+      if (p90Now) {
+        customSeq = p90Now.customSeqEntries || {};
+      }
 
-      const playerSummaries =
-        s75Now?.playerSummaryList && s75Now.playerSummaryList.length > 0
+      const playerSummaries = p90Now
+        ? p90Now.playerSummaryList || []
+        : s75Now?.playerSummaryList && s75Now.playerSummaryList.length > 0
           ? s75Now.playerSummaryList
           : (s75Now?.players || []).map((p) => ({
               id: p.id,
@@ -1001,13 +1038,13 @@ export default function App() {
 
       const completeItem = buildCompleteGameSequenceItem({
         round: roundNum,
-        ballNumber: winBallNum,
+        ballNumber: p90Typed.bingo ?? winBallNum,
         letter: winBallNum > 0 && modeToUse === '75' ? getBingo75Letter(winBallNum) : undefined,
-        rowLeader: winRow ?? lastWinnerInfoRef.current?.rowLeader,
+        rowLeader: p90Typed.bingoRow ?? winRow ?? lastWinnerInfoRef.current?.rowLeader,
         ternaBall: currentMatchTernaBallRef.current ?? undefined,
         ternaLeader: currentMatchTernaRowRef.current ?? undefined,
-        amboBall: currentMatchAmboBallRef.current ?? undefined,
-        amboLeader: currentMatchAmboRowRef.current ?? undefined,
+        amboBall: p90Typed.ambo ?? currentMatchAmboBallRef.current ?? undefined,
+        amboLeader: p90Typed.amboRow ?? currentMatchAmboRowRef.current ?? undefined,
         winningPlayerName: lastWinnerInfoRef.current?.playerName,
         tableNumber: lastWinnerInfoRef.current?.tableNumber,
         mode: modeToUse,
@@ -1015,6 +1052,7 @@ export default function App() {
         durationSeconds: getMatchElapsedSeconds() > 0 ? getMatchElapsedSeconds() : 60,
         drawnBallsPlayed: drawnNumbersPlayed,
         sheet75Override: s75Now,
+        planilla90Override: p90Now,
         operatorUid: opUid,
         operatorName: opName,
         operatorEmail: opEmail,
@@ -1029,12 +1067,12 @@ export default function App() {
         sequenceSnapshot: {
           customSeqEntries: customSeq,
           gameSequence: (isBingo90 ? gameSequence90 : gameSequence).slice(0, 30).map(toLightweightSequenceItem),
-          amboRow: currentMatchAmboRowRef.current ?? undefined,
+          amboRow: p90Typed.amboRow ?? currentMatchAmboRowRef.current ?? undefined,
           ternaRow: currentMatchTernaRowRef.current ?? undefined,
-          bingoRow: winRow,
-          amboBall: currentMatchAmboBallRef.current ?? undefined,
+          bingoRow: p90Typed.bingoRow ?? winRow,
+          amboBall: p90Typed.ambo ?? currentMatchAmboBallRef.current ?? undefined,
           ternaBall: currentMatchTernaBallRef.current ?? undefined,
-          bingoBall: winBallNum,
+          bingoBall: p90Typed.bingo ?? winBallNum,
         },
       });
 
