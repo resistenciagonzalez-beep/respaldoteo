@@ -541,7 +541,7 @@ export const Planilla90: React.FC<Planilla90Props> = ({
       <div className="flex-1 min-h-0 flex gap-1 p-1 relative">
         <div className="flex-1 min-w-0 min-h-0 flex flex-col">
           {/* Título de la planilla */}
-          <div className="flex-shrink-0 flex items-stretch border-[3px] border-b-0 border-black bg-white" style={{ fontSize: 'clamp(12px, 2.4vh, 26px)' }}>
+          <div className="flex-shrink-0 flex items-stretch border-[3px] border-b-0 border-black bg-white" style={{ fontSize: 'clamp(13px, 2.8vh, 32px)' }}>
             <div className="flex items-center px-2 bg-black text-yellow-300 font-black whitespace-nowrap">
               {fmtMoney(sheet.baseCost)} X {fmtMoney(sheet.basePrize)}
             </div>
@@ -570,7 +570,7 @@ export const Planilla90: React.FC<Planilla90Props> = ({
             />
           </div>
 
-          <div style={{ height: 'clamp(76px, 13vh, 150px)' }} className="flex-shrink-0 flex">
+          <div style={{ height: 'clamp(84px, 14vh, 170px)' }} className="flex-shrink-0 flex">
             <Planilla90SummaryBar
               summaries={summaries}
               selectedPlayerId={activePlayerId}
@@ -583,7 +583,7 @@ export const Planilla90: React.FC<Planilla90Props> = ({
         </div>
 
         {panelOpen && (
-          <div className="w-[270px] max-w-[85vw] flex-shrink-0 min-h-0 max-[899px]:absolute max-[899px]:right-1 max-[899px]:top-1 max-[899px]:bottom-1 max-[899px]:z-20 max-[899px]:shadow-2xl">
+          <div className="w-[215px] max-w-[80vw] flex-shrink-0 min-h-0 max-[899px]:absolute max-[899px]:right-1 max-[899px]:top-1 max-[899px]:bottom-1 max-[899px]:z-20 max-[899px]:shadow-2xl">
             <Planilla90Panel
               sheet={sheet}
               players={players}
