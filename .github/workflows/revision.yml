@@ -33,3 +33,6 @@ jobs:
 
       - name: Revision de tipos (errores de codigo)
         run: bunx tsc --noEmit
+
+      - name: Revision estricta de tipos (archivos ya limpios)
+        run: bunx tsc -p tsconfig.strict.json --noEmit
