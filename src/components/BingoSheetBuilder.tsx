@@ -2504,8 +2504,9 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     }
   }, [onSaveCurrentGame, sheet, playerSummaryList, customSeqEntries, notify]);
 
-  // Planilla 90 nueva: pantalla independiente (no comparte nada visual con la Planilla 75)
-  if (selectedSheetType === 'traditional-90') {
+  // Planilla 90 nueva: pantalla independiente (no comparte nada visual con la Planilla 75).
+  // (El "as" evita que TypeScript dé por hecho el tipo en el resto del archivo.)
+  if ((selectedSheetType as SheetViewType) === 'traditional-90') {
     return (
       <Planilla90
         currentUser={currentUser}
