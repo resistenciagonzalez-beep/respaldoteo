@@ -14,6 +14,8 @@ import {
   FileDown,
 } from 'lucide-react';
 import type { GameSequenceItem } from '../../types';
+import { isPlanilla90Snapshot } from '../../utils/planilla90Rules';
+import { Planilla90SnapshotView } from '../planilla90/Planilla90SnapshotView';
 
 export interface GalleryGameInspectorProps {
   selectedGame: GameSequenceItem;
@@ -90,7 +92,7 @@ export const GalleryGameInspector: React.FC<GalleryGameInspectorProps> = ({
 
         {/* Right: Mode 90 table switcher & Tab switcher */}
         <div className="flex items-center gap-1.5">
-          {(selectedGame.mode === '90' || selectedGame.sheetType === 'traditional-90') && activeTab === 'sheet' && (
+          {(selectedGame.mode === '90' || selectedGame.sheetType === 'traditional-90') && activeTab === 'sheet' && !isPlanilla90Snapshot(selectedGame.sheet75Snapshot) && (
             <div className="flex items-center bg-slate-100 rounded-lg p-0.5 border border-slate-300 text-[11px] font-bold">
               <button
                 type="button"
@@ -173,7 +175,12 @@ export const GalleryGameInspector: React.FC<GalleryGameInspectorProps> = ({
       <div id="gallery-sheet-export-target" className="flex-1 min-h-0 flex flex-col overflow-hidden bg-white p-1">
         {activeTab === 'sheet' ? (
           /* TAB 1: FULL SHEET INSPECTION ON A SINGLE SCREEN PLANE */
-          selectedGame.sheetType === 'traditional-90' || selectedGame.mode === '90' ? (
+          isPlanilla90Snapshot(selectedGame.sheet75Snapshot) ? (
+            /* Planilla 90 nueva (formato por columnas) */
+            <div className="flex-1 min-h-0 overflow-auto p-1">
+              <Planilla90SnapshotView game={selectedGame} snapshot={selectedGame.sheet75Snapshot!} />
+            </div>
+          ) : selectedGame.sheetType === 'traditional-90' || selectedGame.mode === '90' ? (
             /* 90 Traditional Sheet Snapshot */
             selectedGame.sheet90Snapshot ? (
               <div className={`flex-1 min-h-0 grid ${table90View === 'both' ? 'grid-cols-1 xl:grid-cols-2' : 'grid-cols-1'} gap-2 w-full overflow-hidden`}>
