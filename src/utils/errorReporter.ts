@@ -65,4 +65,10 @@ export function startErrorReporting(): void {
   window.addEventListener('unhandledrejection', (event) => {
     reportError(event.reason, 'promesa');
   });
+  // Política de seguridad de contenido: si el navegador detecta algo fuera de lo permitido,
+  // queda en la pestaña "Errores" (mientras está en modo aviso no se bloquea nada).
+  document.addEventListener('securitypolicyviolation', (event) => {
+    const mode = event.disposition === 'report' ? 'aviso' : 'bloqueo';
+    reportError(new Error(`Política de contenido (${mode}): ${event.effectiveDirective} -> ${event.blockedURI || 'en línea'}`), 'pagina');
+  });
 }
