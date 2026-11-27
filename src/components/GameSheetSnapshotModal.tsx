@@ -20,6 +20,8 @@ import {
 } from 'lucide-react';
 import { downloadGameDirectJpg, downloadGameDirectPdf } from '../utils/exportGameReport';
 import { formatTime12h } from '../utils/savedGamesStorage';
+import { isPlanilla90Snapshot } from '../utils/planilla90Rules';
+import { Planilla90SnapshotView } from './planilla90/Planilla90SnapshotView';
 
 interface GameSheetSnapshotModalProps {
   isOpen: boolean;
@@ -328,8 +330,13 @@ export const GameSheetSnapshotModal: React.FC<GameSheetSnapshotModalProps> = ({
           {/* TAB 1: SHEET VIEW */}
           {activeTab === 'sheet' && (
             <div className="space-y-4">
-              {/* If it's a 75-Ball Multiplier Sheet */}
-              {item.sheet75Snapshot ? (
+              {/* Planilla 90 nueva (formato por columnas) */}
+              {isPlanilla90Snapshot(item.sheet75Snapshot) ? (
+                <div className="bg-white p-3 sm:p-4 rounded-2xl border border-orange-200 shadow-sm">
+                  <Planilla90SnapshotView game={item} snapshot={item.sheet75Snapshot!} />
+                </div>
+              ) : /* If it's a 75-Ball Multiplier Sheet */
+              item.sheet75Snapshot ? (
                 <div className="bg-white p-3 sm:p-4 rounded-2xl border border-orange-200 shadow-sm space-y-3">
                   <div className="flex items-center justify-between border-b border-orange-100 pb-2">
                     <div>

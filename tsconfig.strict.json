@@ -19,6 +19,7 @@
     "src/utils/playerColors.ts",
     "src/utils/reportSafety.ts",
     "src/utils/safeStorage.ts",
+    "src/utils/planilla90Rules.ts",
     "src/utils/saveRules.ts",
     "src/utils/security.ts",
     "src/utils/sheet90Logic.ts",

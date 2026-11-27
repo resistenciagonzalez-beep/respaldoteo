@@ -7,6 +7,7 @@
  * savedGamesStorage.ts las usa y las vuelve a exportar con los mismos nombres.
  */
 import type { GameSequenceItem } from '../types';
+import { getPlanilla90Lines, isPlanilla90Snapshot } from './planilla90Rules';
 
 /**
  * Zona horaria oficial de la plataforma. Todas las fechas de carpetas y horas de guardado
@@ -240,6 +241,10 @@ export function getGameLines(game: GameSequenceItem): number {
   }
   const is90 = game.mode === '90' || game.sheetType === 'traditional-90';
   if (is90) {
+    // Planilla 90 nueva: suma de los multiplicadores de sus columnas
+    if (isPlanilla90Snapshot(game.sheet75Snapshot)) {
+      return getPlanilla90Lines(game.sheet75Snapshot);
+    }
     if (game.sheet90Snapshot) {
       const allTables =
         game.sheet90Snapshot.tables && game.sheet90Snapshot.tables.length > 0

@@ -1,6 +1,13 @@
 import { GameSequenceItem } from '../types';
 import { formatTime12h } from './savedGamesStorage';
 import { sanitizeReportData } from './reportSafety';
+import {
+  getActiveSeqEntry,
+  getMultiplierLabel,
+  getPlanilla90WinningRows,
+  getRowNumbers,
+  isPlanilla90Snapshot,
+} from './planilla90Rules';
 
 // ============================================================================
 // Herramientas de exportación (imagen y PDF) cargadas SOLO cuando hacen falta.
@@ -186,7 +193,54 @@ export function buildGameDocumentHtml(rawItem: GameSequenceItem): string {
 
   // Sheet 75 snapshot preview
   let sheetHtml = '';
-  if (!isBingo90 && item.sheet75Snapshot && item.sheet75Snapshot.columns) {
+  if (isPlanilla90Snapshot(item.sheet75Snapshot)) {
+    // Planilla 90 nueva: 30 filas (JUEGO r · r+30 · r+60) y columnas SOLO, DOBLE, TRIPLE...
+    const p90 = item.sheet75Snapshot!;
+    const cols = p90.columns;
+    const winRows = getPlanilla90WinningRows(p90, getActiveSeqEntry(p90));
+    const bingoRow = winRows.bingoRow ?? item.rowLeader;
+    const drawn = new Set(item.drawnBallsPlayed || []);
+    sheetHtml = `
+      <div style="margin-top: 16px; margin-bottom: 16px; background: #ffffff; border: 1.5px solid #fed7aa; border-radius: 10px; padding: 12px; overflow-x: auto;">
+        <div style="font-size: 12px; font-weight: 900; color: #9a3412; margin-bottom: 8px; text-transform: uppercase;">
+          COPIA COMPLETA DE PLANILLA 90 (FORMATO NUEVO • 30 FILAS)
+        </div>
+        <table style="width: 100%; border-collapse: collapse; font-size: 10px; text-align: center;">
+          <thead>
+            <tr style="background: #000000; color: #ffffff;">
+              <th style="padding: 6px 4px; border: 1px solid #334155; width: 90px;">JUEGO</th>
+              ${cols
+                .map((c) => `<th style="padding: 6px 4px; border: 1px solid #334155;">${escapeReportHtml(getMultiplierLabel(c.multiplier))}</th>`)
+                .join('')}
+            </tr>
+          </thead>
+          <tbody>
+            ${Array.from({ length: 30 }, (_, rIdx) => {
+              const rowNum = rIdx + 1;
+              const isWinning = rowNum === bingoRow;
+              const isAmbo = rowNum === winRows.amboRow;
+              const isPf = rowNum === winRows.pfRow;
+              const bg = isWinning ? '#fef3c7' : isAmbo ? '#e0f2fe' : isPf ? '#d1fae5' : rIdx % 2 === 0 ? '#fffaf5' : '#ffffff';
+              const nums = getRowNumbers(rowNum)
+                .map((n) => `<span style="${drawn.has(n) ? 'color:#dc2626;' : ''}">${n}</span>`)
+                .join(' · ');
+              return `
+                <tr style="background: ${bg};">
+                  <td style="padding: 4px; border: 1px solid #fed7aa; font-weight: 900;">${nums} ${isWinning ? '★' : ''}</td>
+                  ${cols
+                    .map((c) => {
+                      const pName = c.cells?.[rIdx]?.playerName || '';
+                      return `<td style="padding: 4px; border: 1px solid #fed7aa; color: ${pName ? '#1e293b' : '#94a3b8'}; font-size: 9.5px;">${escapeReportHtml(pName || '-')}</td>`;
+                    })
+                    .join('')}
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  } else if (!isBingo90 && item.sheet75Snapshot && item.sheet75Snapshot.columns) {
     const cols = item.sheet75Snapshot.columns;
     sheetHtml = `
       <div style="margin-top: 16px; margin-bottom: 16px; background: #ffffff; border: 1.5px solid #fed7aa; border-radius: 10px; padding: 12px; overflow-x: auto;">
