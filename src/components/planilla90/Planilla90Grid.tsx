@@ -150,7 +150,7 @@ export const Planilla90Grid: React.FC<Planilla90GridProps> = ({
           return (
             <div
               key={row}
-              className={`grid border-b last:border-b-0 border-black ${fill ? 'flex-1 min-h-0' : ''}`}
+              className={`grid border-b-2 last:border-b-0 border-black ${fill ? 'flex-1 min-h-0' : ''}`}
               style={{ gridTemplateColumns: gridCols, height: fill ? undefined : '22px' }}
             >
               {/* SECUENCIA: una casilla por partida */}
@@ -234,7 +234,7 @@ export const Planilla90Grid: React.FC<Planilla90GridProps> = ({
                   : isPf
                   ? 'inset 0 0 0 3px rgba(5,150,105,0.85)'
                   : undefined;
-                const cls = `relative flex items-center justify-center overflow-hidden border-r last:border-r-0 border-black ${
+                const cls = `relative flex items-center justify-end overflow-hidden border-r-2 last:border-r-0 border-black ${
                   col.hasRedDividerRight ? '!border-r-[4px] !border-r-red-600' : ''
                 } ${!hasPlayer ? rowBg : ''}`;
                 const style: React.CSSProperties = {
@@ -244,7 +244,7 @@ export const Planilla90Grid: React.FC<Planilla90GridProps> = ({
                 };
                 const label = hasPlayer ? (
                   <span
-                    className="font-black uppercase leading-none whitespace-nowrap px-[0.1em]"
+                    className="font-black uppercase leading-none whitespace-nowrap px-[0.1em] mx-auto"
                     style={{ color: cell?.textColor || '#000', fontSize: `min(1.15em, ${Math.floor(200 / len)}cqw)`, fontWeight: 900 }}
                   >
                     {name}
