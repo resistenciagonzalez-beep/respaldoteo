@@ -5,7 +5,7 @@
 import React, { useState } from 'react';
 import { Copy, Plus, Trash2, Users, Grid, DollarSign, Check } from 'lucide-react';
 import type { BingoSheetData, BingoSheetPlayer } from '../../types';
-import { VIBRANT_PLAYER_COLORS } from '../../utils/playerColors';
+import { VIBRANT_PLAYER_COLORS, getContrastTextColor } from '../../utils/playerColors';
 import {
   PLANILLA90_MAX_COLUMNS,
   PLANILLA90_MAX_MULTIPLIER,
@@ -48,19 +48,35 @@ const TEXT_COLORS: { hex: string; name: string }[] = [
   { hex: '#000000', name: 'Negro' },
   { hex: '#ffffff', name: 'Blanco' },
   { hex: '#475569', name: 'Gris' },
+  { hex: '#94a3b8', name: 'Gris claro' },
+  { hex: '#7f1d1d', name: 'Rojo oscuro' },
   { hex: '#dc2626', name: 'Rojo' },
-  { hex: '#ea580c', name: 'Naranja' },
-  { hex: '#facc15', name: 'Amarillo' },
-  { hex: '#16a34a', name: 'Verde' },
-  { hex: '#0d9488', name: 'Turquesa' },
-  { hex: '#2563eb', name: 'Azul' },
-  { hex: '#1e3a8a', name: 'Azul marino' },
-  { hex: '#7c3aed', name: 'Morado' },
-  { hex: '#db2777', name: 'Rosado' },
-  { hex: '#78350f', name: 'Café' },
+  { hex: '#f87171', name: 'Rojo claro' },
   { hex: '#be123c', name: 'Vino' },
+  { hex: '#9a3412', name: 'Naranja oscuro' },
+  { hex: '#ea580c', name: 'Naranja' },
+  { hex: '#fb923c', name: 'Naranja claro' },
+  { hex: '#78350f', name: 'Café' },
+  { hex: '#a16207', name: 'Mostaza' },
+  { hex: '#facc15', name: 'Amarillo' },
+  { hex: '#fef08a', name: 'Amarillo claro' },
+  { hex: '#d4af37', name: 'Dorado' },
+  { hex: '#14532d', name: 'Verde oscuro' },
+  { hex: '#16a34a', name: 'Verde' },
+  { hex: '#4ade80', name: 'Verde claro' },
   { hex: '#65a30d', name: 'Lima' },
+  { hex: '#134e4a', name: 'Turquesa oscuro' },
+  { hex: '#0d9488', name: 'Turquesa' },
   { hex: '#0891b2', name: 'Celeste' },
+  { hex: '#67e8f9', name: 'Celeste claro' },
+  { hex: '#1e3a8a', name: 'Azul marino' },
+  { hex: '#2563eb', name: 'Azul' },
+  { hex: '#60a5fa', name: 'Azul claro' },
+  { hex: '#4c1d95', name: 'Morado oscuro' },
+  { hex: '#7c3aed', name: 'Morado' },
+  { hex: '#c084fc', name: 'Lila' },
+  { hex: '#db2777', name: 'Rosado' },
+  { hex: '#f9a8d4', name: 'Rosado claro' },
 ];
 
 const btn = 'inline-flex items-center justify-center gap-1 rounded-lg font-black text-[10px] px-1.5 py-0.5 border transition-all active:scale-95 cursor-pointer';
@@ -194,7 +210,7 @@ export const Planilla90Panel: React.FC<Planilla90PanelProps> = (props) => {
                     className={`h-4 rounded-sm cursor-pointer flex items-center justify-center text-[8px] font-black ${
                       currentTextColor === c.hex.toLowerCase() ? 'ring-2 ring-black ring-offset-1' : 'border border-black/40'
                     }`}
-                    style={{ backgroundColor: c.hex, color: c.hex === '#ffffff' || c.hex === '#facc15' ? '#000' : '#fff' }}
+                    style={{ backgroundColor: c.hex, color: getContrastTextColor(c.hex) }}
                     title={c.name}
                   >
                     A
