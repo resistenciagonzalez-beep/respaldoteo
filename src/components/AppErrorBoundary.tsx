@@ -1,4 +1,5 @@
 import React from 'react';
+import { reportError } from '../utils/errorReporter';
 
 /**
  * Red de seguridad de la plataforma.
@@ -32,6 +33,8 @@ export class AppErrorBoundary extends React.Component<AppErrorBoundaryProps, App
   componentDidCatch(error: unknown, info: React.ErrorInfo): void {
     // Queda registrado en la consola del navegador para poder revisarlo después
     console.error('[RED DE SEGURIDAD] Error en la pantalla:', error, info && info.componentStack);
+    // Aviso para los administradores (pestaña "Errores" del Panel)
+    reportError(error, 'pantalla');
   }
 
   private handleRetry = (): void => {

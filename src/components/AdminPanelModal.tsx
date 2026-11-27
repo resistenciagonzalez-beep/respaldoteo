@@ -46,6 +46,7 @@ import { AdminGameDetailModal } from './adminPanel/AdminGameDetailModal';
 import { AdminStatsTab } from './adminPanel/AdminStatsTab';
 import { AdminUsersList } from './adminPanel/AdminUsersList';
 import { AdminGameCard } from './adminPanel/AdminGameCard';
+import { AdminErrorLog } from './adminPanel/AdminErrorLog';
 
 interface AdminPanelModalProps {
   isOpen: boolean;
@@ -58,7 +59,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 }) => {
   const { currentUser, isAdmin, logActivity } = useAuth();
 
-  const [activeTab, setActiveTab] = useState<'saved_games' | 'activity' | 'users' | 'stats'>('saved_games');
+  const [activeTab, setActiveTab] = useState<'saved_games' | 'activity' | 'users' | 'stats' | 'errors'>('saved_games');
   const [usersList, setUsersList] = useState<AppUser[]>([]);
   const [activitiesList, setActivitiesList] = useState<ActivityLogItem[]>([]);
   const [savedGamesList, setSavedGamesList] = useState<GameSequenceItem[]>([]);
@@ -1196,6 +1197,19 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
             <BarChart3 className="w-4 h-4 text-amber-600" />
             <span>Métricas del Sistema</span>
           </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('errors')}
+            className={`py-2.5 px-3.5 text-xs font-black border-b-2 flex items-center gap-1.5 transition-all cursor-pointer ${
+              activeTab === 'errors'
+                ? 'border-orange-500 text-orange-950'
+                : 'border-transparent text-orange-900/60 hover:text-orange-950'
+            }`}
+          >
+            <ShieldAlert className="w-4 h-4 text-rose-600" />
+            <span>Errores</span>
+          </button>
         </div>
 
         {/* Feedback Banner */}
@@ -1659,6 +1673,9 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
         {/* ============================================================= */}
         {/* TAB 4: MÉTRICAS Y RESUMEN                                     */}
         {/* ============================================================= */}
+        {/* Registro de errores de los dispositivos (solo se conecta mientras la pestaña está abierta) */}
+        {activeTab === 'errors' && <AdminErrorLog />}
+
         {activeTab === 'stats' && (
           <AdminStatsTab
             todayLinesTotal={todayLinesTotal}

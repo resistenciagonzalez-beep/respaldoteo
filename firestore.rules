@@ -5,7 +5,8 @@ rules_version = '2';
 // - Las operadoras solo ven y guardan SUS partidas y turnos (campo ownerUid).
 // - Los administradores ven todo.
 // - Solo los administradores pueden borrar partidas, carpetas o usuarios, y cambiar rangos.
-// - Las cuentas nuevas quedan pendientes hasta que un administrador las aprueba.
+// - Las cuentas nuevas (y las antiguas que se pasan al sistema nuevo) quedan pendientes hasta que un administrador las aprueba.
+// - Los dispositivos pueden dejar avisos de error cortos; solo los administradores los leen.
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -44,21 +45,13 @@ service cloud.firestore {
         ];
     }
 
-    // Correos de administración (para que su cuenta nueva quede activa de una vez)
+    // Correos de administración YA verificados (para que su cuenta nueva quede activa de una vez)
     function isAdminListEmail() {
-      return isSignedIn() && request.auth.token.email in [
+      return isSignedIn() && request.auth.token.email_verified == true && request.auth.token.email in [
         'resistenciagonzalez@gmail.com',
         'genesis.vargas0619@gmail.com',
         'bingoteteoo@gmail.com'
       ];
-    }
-
-    // Cuenta antigua (anterior a Firebase Authentication) que se está migrando: ya estaba aprobada
-    function isLegacyMigration() {
-      return request.resource.data.get('legacyIds', []) is list
-        && request.resource.data.get('legacyIds', []).size() > 0
-        && exists(userPath(request.resource.data.legacyIds[0]))
-        && get(userPath(request.resource.data.legacyIds[0])).data.get('email', '') == request.auth.token.email;
     }
 
     function isValidId(id) {
@@ -89,7 +82,7 @@ service cloud.firestore {
         && request.auth.uid == userId
         && request.resource.data.email == request.auth.token.email
         && (request.resource.data.get('status', '') == 'pending'
-            || (request.resource.data.get('status', '') == 'active' && (isAdminListEmail() || isLegacyMigration())))
+            || (request.resource.data.get('status', '') == 'active' && isAdminListEmail()))
         && !('password' in request.resource.data)
         && !('passwordHash' in request.resource.data)
         && (request.resource.data.get('role', 'operator') == 'operator'
@@ -163,6 +156,23 @@ service cloud.firestore {
         && request.resource.data.action is string
         && request.resource.data.actionType is string;
       allow update, delete: if false;
+    }
+
+    // 7. Registro de errores de los dispositivos (lo leen y borran solo los administradores)
+    match /error_logs/{logId} {
+      allow read, delete: if isAdmin();
+      allow create: if isSignedIn()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.keys().hasOnly(['message', 'detail', 'source', 'path', 'device', 'build', 'uid', 'email', 'createdAtMs', 'createdAt'])
+        && request.resource.data.source in ['pantalla', 'pagina', 'promesa']
+        && request.resource.data.message is string && request.resource.data.message.size() <= 400
+        && request.resource.data.detail is string && request.resource.data.detail.size() <= 1700
+        && request.resource.data.device is string && request.resource.data.device.size() <= 250
+        && request.resource.data.path is string && request.resource.data.path.size() <= 150
+        && request.resource.data.build is string && request.resource.data.build.size() <= 100
+        && request.resource.data.email is string && request.resource.data.email.size() <= 150
+        && request.resource.data.createdAtMs is number;
+      allow update: if false;
     }
 
     // Todo lo demas esta bloqueado
