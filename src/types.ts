@@ -143,8 +143,13 @@ export interface BingoSheetData {
   columns: BingoSheetColumn[];
   players: BingoSheetPlayer[];
   background?: BingoSheetBackground;
-  customSeqEntries?: Record<number, { ambo?: number | string; terna?: number | string; bingo?: number | string }>;
+  customSeqEntries?: Record<number, { pf?: number | string; ambo?: number | string; terna?: number | string; bingo?: number | string }>;
   playerSummaryList?: PlayerSummarySnapshotItem[];
+  // Solo la Planilla 90 nueva (formato por columnas de 30 filas):
+  layout?: 'planilla90';
+  pfEnabled?: boolean; // Paga P.F (primera ficha)
+  basePfPrize?: number; // Premio P.F por X1
+  activeSeqSlot?: number; // Casilla de la secuencia que corresponde a la partida en curso
 }
 
 // Work Shift / Turno of an operator
@@ -181,6 +186,7 @@ export type FirestoreTimestampLike =
   | null;
 
 export type CustomSequenceEntry = {
+  pf?: number | string; // P.F (primera ficha) - solo Planilla 90
   ambo?: number | string;
   terna?: number | string;
   bingo?: number | string;
