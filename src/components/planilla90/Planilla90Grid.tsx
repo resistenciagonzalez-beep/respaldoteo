@@ -234,7 +234,7 @@ export const Planilla90Grid: React.FC<Planilla90GridProps> = ({
                   : isPf
                   ? 'inset 0 0 0 3px rgba(5,150,105,0.85)'
                   : undefined;
-                const cls = `relative flex items-center justify-end overflow-hidden border-r-2 last:border-r-0 border-black ${
+                const cls = `relative flex items-center justify-start overflow-hidden border-r-2 last:border-r-0 border-black ${
                   col.hasRedDividerRight ? '!border-r-[4px] !border-r-red-600' : ''
                 } ${!hasPlayer ? rowBg : ''}`;
                 const style: React.CSSProperties = {
