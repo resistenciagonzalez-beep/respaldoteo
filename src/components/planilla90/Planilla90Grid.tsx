@@ -27,6 +27,8 @@ interface Planilla90GridProps {
   onCellClick?: (columnIndex: number, rowIndex: number) => void;
   onHeaderClick?: (columnIndex: number) => void;
   onSeqChange?: (slot: number, field: Planilla90SeqField, value: string) => void;
+  /** Tocar un número de JUEGO para subrayarlo (o quitarle la marca) */
+  onNumberClick?: (num: number) => void;
 }
 
 const SEQ_FIELDS: { field: Planilla90SeqField; label: string; enabledKey: 'pfEnabled' | 'amboEnabled' | 'bingoEnabled' }[] = [
@@ -49,6 +51,7 @@ export const Planilla90Grid: React.FC<Planilla90GridProps> = ({
   onCellClick,
   onHeaderClick,
   onSeqChange,
+  onNumberClick,
 }) => {
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const [rowPx, setRowPx] = useState<number>(fill ? 24 : 22);
@@ -72,6 +75,7 @@ export const Planilla90Grid: React.FC<Planilla90GridProps> = ({
   const seqWidth = `${Math.max(1, activeSeq.length) * 3}em`;
   const gridCols = `${seqWidth} 7.8em repeat(${sheet.columns.length}, minmax(0, 1fr))`;
   const entries = sheet.customSeqEntries || {};
+  const marked = new Set(sheet.markedNumbers || []);
   const prizeOf = (field: Planilla90SeqField) =>
     field === 'pf' ? sheet.basePfPrize : field === 'ambo' ? sheet.baseAmboPrize : sheet.basePrize;
 
@@ -187,12 +191,30 @@ export const Planilla90Grid: React.FC<Planilla90GridProps> = ({
               <div className={`flex items-center justify-around border-r-[3px] border-black font-black tabular-nums ${rowBg || 'bg-white'}`}>
                 {getRowNumbers(row).map((n) => {
                   const drawn = drawnNumbers.has(n);
-                  return (
-                    <span
+                  const isMarked = marked.has(n);
+                  const cls = `leading-none rounded px-[0.1em] ${drawn ? 'text-white bg-red-600' : 'text-black'}`;
+                  // Subrayado tipo marcador rojo medio transparente: el número se sigue viendo
+                  const style: React.CSSProperties = {
+                    fontSize: '1.05em',
+                    fontWeight: 900,
+                    ...(isMarked && !drawn
+                      ? { backgroundColor: 'rgba(239, 68, 68, 0.45)', boxShadow: 'inset 0 -0.18em 0 rgba(185, 28, 28, 0.75)' }
+                      : {}),
+                    ...(isMarked && drawn ? { boxShadow: '0 0 0 2px rgba(0,0,0,0.6)' } : {}),
+                  };
+                  return onNumberClick ? (
+                    <button
                       key={n}
-                      className={`leading-none ${drawn ? 'text-white bg-red-600 rounded px-[0.1em]' : 'text-black'}`}
-                      style={{ fontSize: '1.05em', fontWeight: 900 }}
+                      type="button"
+                      onClick={() => onNumberClick(n)}
+                      className={`${cls} cursor-pointer hover:bg-red-200/60 active:scale-95`}
+                      style={style}
+                      title={isMarked ? `Quitar la marca del ${n}` : `Subrayar el ${n}`}
                     >
+                      {n}
+                    </button>
+                  ) : (
+                    <span key={n} className={cls} style={style}>
                       {n}
                     </span>
                   );
