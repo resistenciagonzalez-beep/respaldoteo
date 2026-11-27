@@ -5,6 +5,7 @@ import { AuthProvider } from './hooks/useAuth.tsx';
 import { AppErrorBoundary } from './components/AppErrorBoundary.tsx';
 import { UpdateAvailableBanner } from './components/UpdateAvailableBanner.tsx';
 import { setupPwa } from './utils/pwa';
+import { startErrorReporting } from './utils/errorReporter';
 import './index.css';
 
 createRoot(document.getElementById('root')!).render(
@@ -21,6 +22,9 @@ createRoot(document.getElementById('root')!).render(
     </AppErrorBoundary>
   </StrictMode>,
 );
+
+// Registro de errores para administradores (con límite, nunca afecta el juego)
+startErrorReporting();
 
 // App instalable: modo sin señal, datos protegidos y pantalla encendida (solo en la app instalada)
 setupPwa();
