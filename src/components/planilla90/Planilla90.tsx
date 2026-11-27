@@ -77,6 +77,13 @@ export interface Planilla90Props {
   onToggleFullscreen?: () => void;
 }
 
+interface ConfirmState {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  onConfirm: () => void;
+}
+
 interface ResetDetail {
   keepPlayers?: boolean;
   keepSequence?: boolean;
@@ -160,6 +167,9 @@ export const Planilla90: React.FC<Planilla90Props> = ({
   useEffect(() => writeUiFlag('panel', panelOpen), [panelOpen]);
   useEffect(() => writeUiFlag('bar', barOpen), [barOpen]);
   const [toast, setToast] = useState<string | null>(null);
+  // Aviso de confirmación dentro de la app (no usa los avisos del navegador, que sacan de pantalla completa)
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
+  const askConfirm = (c: ConfirmState) => setConfirmState(c);
   const [isSaving, setIsSaving] = useState(false);
   const undoStack = useRef<BingoSheetData[]>([]);
   const [undoCount, setUndoCount] = useState(0);
@@ -349,11 +359,21 @@ export const Planilla90: React.FC<Planilla90Props> = ({
     const col = sheet.columns[cIdx];
     if (!col || sheet.columns.length <= 1) return;
     const used = col.cells.some((c) => c.playerId || c.playerName);
-    if (used && !window.confirm('Esta columna tiene casillas asignadas. ¿Quitarla de todas formas?')) return;
-    update((prev) => ({
-      ...prev,
-      columns: prev.columns.filter((_, ci) => ci !== cIdx).map((c, i) => ({ ...c, colNumber: i + 1 })),
-    }));
+    const remove = () =>
+      update((prev) => ({
+        ...prev,
+        columns: prev.columns.filter((_, ci) => ci !== cIdx).map((c, i) => ({ ...c, colNumber: i + 1 })),
+      }));
+    if (used) {
+      askConfirm({
+        title: 'Quitar columna',
+        message: `La columna ${cIdx + 1} (${getMultiplierLabel(col.multiplier)}) tiene casillas asignadas. ¿Quitarla de todas formas?`,
+        confirmLabel: 'Sí, quitar',
+        onConfirm: remove,
+      });
+      return;
+    }
+    remove();
   };
 
   const handleToggleDivider = (cIdx: number) =>
@@ -422,16 +442,27 @@ export const Planilla90: React.FC<Planilla90Props> = ({
     if (!p) return;
     const key = getPlayerKey(p.id, p.name);
     const cells = sheet.columns.reduce((n, c) => n + c.cells.filter((cell) => getPlayerKey(cell.playerId, cell.playerName) === key && (cell.playerId || cell.playerName)).length, 0);
-    if (cells > 0 && !window.confirm(`${p.name} tiene ${cells} casilla(s). ¿Quitarlo y vaciar sus casillas?`)) return;
-    update((prev) => ({
-      ...prev,
-      players: prev.players.filter((x) => getPlayerKey(x.id, x.name) !== key),
-      columns: prev.columns.map((col) => ({
-        ...col,
-        cells: col.cells.map((c) => ((c.playerId || c.playerName) && getPlayerKey(c.playerId, c.playerName) === key ? { rowNumber: c.rowNumber } : c)),
-      })),
-    }));
-    if (activePlayerId === id) setActivePlayerId(null);
+    const remove = () => {
+      update((prev) => ({
+        ...prev,
+        players: prev.players.filter((x) => getPlayerKey(x.id, x.name) !== key),
+        columns: prev.columns.map((col) => ({
+          ...col,
+          cells: col.cells.map((c) => ((c.playerId || c.playerName) && getPlayerKey(c.playerId, c.playerName) === key ? { rowNumber: c.rowNumber } : c)),
+        })),
+      }));
+      setActivePlayerId((cur) => (cur === id ? null : cur));
+    };
+    if (cells > 0) {
+      askConfirm({
+        title: 'Quitar jugador',
+        message: `${p.name} tiene ${cells} casilla(s) anotada(s). ¿Quitarlo y vaciar sus casillas?`,
+        confirmLabel: 'Sí, quitar',
+        onConfirm: remove,
+      });
+      return;
+    }
+    remove();
   };
 
   const handleSetPlayerColor = (id: string, color: string) => {
@@ -726,6 +757,44 @@ export const Planilla90: React.FC<Planilla90Props> = ({
           </div>
         )}
       </div>
+
+      {confirmState && (
+        <div
+          className="no-print fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setConfirmState(null)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl border-[3px] border-black bg-[#fffaf5] p-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-black text-orange-950">{confirmState.title}</h3>
+            <p className="mt-2 text-sm font-bold text-slate-700">{confirmState.message}</p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                autoFocus
+                onClick={() => setConfirmState(null)}
+                className="px-3 py-1.5 rounded-lg border-2 border-slate-300 bg-white text-sm font-black text-slate-800 cursor-pointer hover:bg-slate-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const action = confirmState.onConfirm;
+                  setConfirmState(null);
+                  action();
+                }}
+                className="px-3 py-1.5 rounded-lg border-2 border-red-700 bg-red-600 text-sm font-black text-white cursor-pointer hover:bg-red-700"
+              >
+                {confirmState.confirmLabel}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {toast && (
         <div className="no-print fixed top-12 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl bg-slate-900 text-white text-sm font-bold shadow-2xl">
