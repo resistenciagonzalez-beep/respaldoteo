@@ -182,6 +182,9 @@ export function normalizePlanilla90(raw: unknown): BingoSheetData {
     players: Array.isArray(r.players) ? r.players : [],
     customSeqEntries: r.customSeqEntries && typeof r.customSeqEntries === 'object' ? r.customSeqEntries : {},
     activeSeqSlot: typeof r.activeSeqSlot === 'number' && r.activeSeqSlot > 0 ? r.activeSeqSlot : undefined,
+    markedNumbers: Array.isArray(r.markedNumbers)
+      ? r.markedNumbers.filter((n, i, arr) => Number.isInteger(n) && n >= 1 && n <= 90 && arr.indexOf(n) === i)
+      : [],
     playerSummaryList: r.playerSummaryList,
   };
 }
@@ -411,5 +414,68 @@ export function clearPlanilla90Cells(sheet: BingoSheetData, keepPlayers: boolean
     players: keepPlayers ? sheet.players.map((p) => ({ ...p, paid: false })) : [],
     columns: sheet.columns.map((col) => ({ ...col, cells: emptyCells() })),
     playerSummaryList: undefined,
+    markedNumbers: [],
+  };
+}
+
+/**
+ * Secuencia que sale de los números subrayados en JUEGO (en el orden en que se marcaron):
+ *  - P.F: la fila del primer número subrayado.
+ *  - A: la primera fila que llega a 2 números subrayados.
+ *  - B: la primera fila que llega a 3 números subrayados.
+ * En cada casilla se anota el primer número de esa fila (1 a 30). Solo lo que esté activo.
+ */
+export function deriveSequenceFromMarks(
+  marks: number[],
+  enabled: { pf: boolean; ambo: boolean; bingo: boolean }
+): { pf?: number; ambo?: number; bingo?: number } {
+  const counts = new Map<number, number>();
+  let pf: number | undefined;
+  let ambo: number | undefined;
+  let bingo: number | undefined;
+  for (const n of marks) {
+    const row = getRowFromBall(n);
+    if (row === null) continue;
+    if (pf === undefined) pf = row;
+    const c = (counts.get(row) || 0) + 1;
+    counts.set(row, c);
+    if (c === 2 && ambo === undefined) ambo = row;
+    if (c === 3 && bingo === undefined) bingo = row;
+  }
+  const out: { pf?: number; ambo?: number; bingo?: number } = {};
+  if (enabled.pf && pf !== undefined) out.pf = pf;
+  if (enabled.ambo && ambo !== undefined) out.ambo = ambo;
+  if (enabled.bingo && bingo !== undefined) out.bingo = bingo;
+  return out;
+}
+
+/**
+ * Marca o desmarca un número de JUEGO y anota sola la secuencia (P.F / A / B) de la partida en curso.
+ * La partida en curso es la casilla activa de la secuencia o, si no hay, la primera vacía.
+ */
+export function togglePlanilla90Mark(sheet: BingoSheetData, num: number): BingoSheetData {
+  if (!Number.isInteger(num) || num < 1 || num > 90) return sheet;
+  const prevMarks = Array.isArray(sheet.markedNumbers) ? sheet.markedNumbers : [];
+  const marks = prevMarks.includes(num) ? prevMarks.filter((n) => n !== num) : [...prevMarks, num];
+  const slot = sheet.activeSeqSlot ?? getFirstEmptySeqSlot(sheet.customSeqEntries);
+  const derived = deriveSequenceFromMarks(marks, {
+    pf: Boolean(sheet.pfEnabled),
+    ambo: Boolean(sheet.amboEnabled),
+    bingo: sheet.bingoEnabled !== false,
+  });
+  const entries = { ...(sheet.customSeqEntries || {}) };
+  const entry = { ...(entries[slot] || {}) };
+  (['pf', 'ambo', 'bingo'] as const).forEach((field) => {
+    if (derived[field] !== undefined) entry[field] = derived[field];
+    else delete entry[field];
+  });
+  const isEmpty = entry.pf === undefined && entry.ambo === undefined && entry.bingo === undefined && entry.terna === undefined;
+  if (isEmpty) delete entries[slot];
+  else entries[slot] = entry;
+  return {
+    ...sheet,
+    markedNumbers: marks,
+    customSeqEntries: entries,
+    activeSeqSlot: isEmpty && marks.length === 0 ? undefined : slot,
   };
 }
