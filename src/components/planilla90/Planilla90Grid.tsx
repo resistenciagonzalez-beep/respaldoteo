@@ -66,11 +66,11 @@ export const Planilla90Grid: React.FC<Planilla90GridProps> = ({
     return () => ro.disconnect();
   }, [fill]);
 
-  // Letra grande: casi todo el alto de la fila (máx. 40 px)
-  const fontPx = Math.round(Math.min(40, Math.max(10, rowPx * 0.8)));
+  // Letra grande: casi todo el alto de la fila (máx. 46 px)
+  const fontPx = Math.round(Math.min(46, Math.max(11, rowPx * 0.9)));
   const activeSeq = SEQ_FIELDS.filter((f) => (f.enabledKey === 'bingoEnabled' ? sheet.bingoEnabled !== false : Boolean(sheet[f.enabledKey])));
-  const seqWidth = `${Math.max(1, activeSeq.length) * 2.4}em`;
-  const gridCols = `${seqWidth} 6.6em repeat(${sheet.columns.length}, minmax(0, 1fr))`;
+  const seqWidth = `${Math.max(1, activeSeq.length) * 3}em`;
+  const gridCols = `${seqWidth} 7.8em repeat(${sheet.columns.length}, minmax(0, 1fr))`;
   const entries = sheet.customSeqEntries || {};
   const prizeOf = (field: Planilla90SeqField) =>
     field === 'pf' ? sheet.basePfPrize : field === 'ambo' ? sheet.baseAmboPrize : sheet.basePrize;
@@ -105,7 +105,7 @@ export const Planilla90Grid: React.FC<Planilla90GridProps> = ({
         {sheet.columns.map((col, cIdx) => {
           const mult = Number(col.multiplier) || 1;
           const content = (
-            <span className="font-black text-black leading-none whitespace-nowrap" style={{ fontSize: `min(1.1em, ${mult >= 4 ? 16 : 19}cqw)` }}>
+            <span className="font-black text-black leading-none whitespace-nowrap" style={{ fontSize: `min(1.2em, ${mult >= 4 ? 17 : 20}cqw)` }}>
               {getMultiplierLabel(mult)}
             </span>
           );
@@ -168,14 +168,14 @@ export const Planilla90Grid: React.FC<Planilla90GridProps> = ({
                       onChange={(e) => onSeqChange(slot, f.field, e.target.value)}
                       placeholder="-"
                       className="w-full h-full min-w-0 bg-transparent text-center font-black text-black leading-none border-r last:border-r-0 border-slate-400 focus:outline-none focus:bg-yellow-100 placeholder:text-slate-300"
-                      style={{ fontSize: '0.92em' }}
+                      style={{ fontSize: '1em', fontWeight: 900 }}
                       title={`Anotar bola de ${f.label} de la partida #${slot}`}
                     />
                   ) : (
                     <span
                       key={f.field}
                       className="flex items-center justify-center font-black text-black border-r last:border-r-0 border-slate-400"
-                      style={{ fontSize: '0.92em' }}
+                      style={{ fontSize: '1em' }}
                     >
                       {value || ''}
                     </span>
@@ -191,7 +191,7 @@ export const Planilla90Grid: React.FC<Planilla90GridProps> = ({
                     <span
                       key={n}
                       className={`leading-none ${drawn ? 'text-white bg-red-600 rounded px-[0.1em]' : 'text-black'}`}
-                      style={{ fontSize: '1em', fontWeight: 900 }}
+                      style={{ fontSize: '1.05em', fontWeight: 900 }}
                     >
                       {n}
                     </span>
@@ -223,7 +223,7 @@ export const Planilla90Grid: React.FC<Planilla90GridProps> = ({
                 const label = hasPlayer ? (
                   <span
                     className="font-black uppercase leading-none whitespace-nowrap px-[0.1em]"
-                    style={{ color: cell?.textColor || '#000', fontSize: `min(1.05em, ${Math.floor(185 / len)}cqw)`, fontWeight: 900 }}
+                    style={{ color: cell?.textColor || '#000', fontSize: `min(1.15em, ${Math.floor(200 / len)}cqw)`, fontWeight: 900 }}
                   >
                     {name}
                   </span>

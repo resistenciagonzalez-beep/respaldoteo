@@ -23,7 +23,7 @@ export const Planilla90SummaryBar: React.FC<Planilla90SummaryBarProps> = ({
   compact = false,
 }) => {
   const labelCls = 'flex items-center px-2 font-black text-white bg-black border-b border-slate-600 last:border-b-0';
-  const fontSize = compact ? 12 : 'clamp(13px, 2.4vh, 28px)';
+  const fontSize = compact ? 12 : 'clamp(14px, 2.7vh, 32px)';
 
   return (
     <div className="w-full border-[3px] border-t-0 border-black bg-white flex flex-shrink-0 overflow-hidden" style={{ fontSize }}>

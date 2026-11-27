@@ -23,7 +23,7 @@ interface Planilla90PanelProps {
   summaries: Planilla90PlayerSummary[];
   activePlayerId: string | null;
   onSelectPlayer: (id: string | null) => void;
-  onAddPlayer: (name: string) => void;
+  onAddPlayer: (name: string, color?: string) => void;
   onDeletePlayer: (id: string) => void;
   onSetPlayerColor: (id: string, color: string) => void;
   onMismos: (player: BingoSheetPlayer) => void;
@@ -47,13 +47,24 @@ export const Planilla90Panel: React.FC<Planilla90PanelProps> = (props) => {
   const [tab, setTab] = useState<PanelTab>('players');
   const [newName, setNewName] = useState('');
   const [colorFor, setColorFor] = useState<string | null>(null);
+  // Color elegido en la paleta para el próximo jugador nuevo (si no hay jugador seleccionado)
+  const [newColor, setNewColor] = useState<string | null>(null);
+  const activePlayer = players.find((p) => p.id === activePlayerId) || null;
 
   const submitPlayer = () => {
     const name = newName.trim();
     if (!name) return;
-    props.onAddPlayer(name);
+    props.onAddPlayer(name, newColor || undefined);
     setNewName('');
+    setNewColor(null);
   };
+
+  // Paleta siempre visible: pinta al jugador seleccionado, o guarda el color para el próximo jugador nuevo
+  const pickColor = (hex: string) => {
+    if (activePlayer) props.onSetPlayerColor(activePlayer.id, hex);
+    else setNewColor(hex === newColor ? null : hex);
+  };
+  const currentPaletteColor = (activePlayer ? activePlayer.color : newColor || '').toLowerCase();
 
   const tabBtn = (id: PanelTab, label: string, Icon: typeof Users) => (
     <button
@@ -94,11 +105,36 @@ export const Planilla90Panel: React.FC<Planilla90PanelProps> = (props) => {
                 <Plus className="w-4 h-4" />
               </button>
             </div>
+            <div className="rounded-lg border-2 border-slate-200 bg-white p-1">
+              <div className="flex items-center gap-1 mb-1">
+                <span
+                  className="w-4 h-4 rounded border-2 border-black flex-shrink-0"
+                  style={{ backgroundColor: currentPaletteColor || '#ffffff' }}
+                />
+                <span className="text-[10px] font-black text-slate-700 leading-tight truncate">
+                  {activePlayer ? `Color de ${activePlayer.name}` : newColor ? 'Color del próximo jugador' : 'Paleta de colores'}
+                </span>
+              </div>
+              <div className="grid grid-cols-10 gap-0.5">
+                {VIBRANT_PLAYER_COLORS.map((c) => (
+                  <button
+                    key={c.hex}
+                    type="button"
+                    onClick={() => pickColor(c.hex)}
+                    className={`h-4 rounded-sm cursor-pointer ${
+                      currentPaletteColor === c.hex.toLowerCase() ? 'ring-2 ring-black ring-offset-1' : 'border border-black/40'
+                    }`}
+                    style={{ backgroundColor: c.hex }}
+                    title={c.name}
+                  />
+                ))}
+              </div>
+            </div>
             <button type="button" onClick={props.onMismosAll} className={`${btn} w-full bg-blue-600 text-white border-blue-700 py-1.5`} title="Copiar las casillas de la partida anterior a todos">
               <Copy className="w-3.5 h-3.5" /> Mismos a todos
             </button>
             <p className="text-[10px] font-bold text-slate-500 leading-tight">
-              Elige un jugador y toca las casillas de la planilla para asignarlas. Toca de nuevo para quitarla.
+              Elige un jugador y toca las casillas para asignarlas (otra vez para quitarla). La paleta cambia el color del jugador elegido.
             </p>
             <div className="space-y-1">
               {players.length === 0 && <p className="text-xs font-bold text-slate-400 text-center py-2">Sin jugadores todavía.</p>}

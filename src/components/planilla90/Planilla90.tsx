@@ -356,7 +356,7 @@ export const Planilla90: React.FC<Planilla90Props> = ({
     }));
 
   // ---------- Jugadores ----------
-  const handleAddPlayer = (rawName: string) => {
+  const handleAddPlayer = (rawName: string, chosenColor?: string) => {
     const name = sanitizePlayerName(rawName).toUpperCase();
     if (!name) return;
     const key = getPlayerKey(undefined, name);
@@ -368,11 +368,13 @@ export const Planilla90: React.FC<Planilla90Props> = ({
     }
     const used = new Set(players.map((p) => p.color.toLowerCase()));
     const spec = VIBRANT_PLAYER_COLORS.find((c) => !used.has(c.hex.toLowerCase())) || VIBRANT_PLAYER_COLORS[players.length % VIBRANT_PLAYER_COLORS.length];
+    // Si se eligió un color en la paleta del panel, se usa ese; si no, el siguiente libre
+    const color = chosenColor || spec.hex;
     const player: BingoSheetPlayer = {
       id: `p90_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
       name,
-      color: spec.hex,
-      textColor: spec.text,
+      color,
+      textColor: chosenColor ? getContrastTextColor(chosenColor) : spec.text,
     };
     update((prev) => ({ ...prev, players: [...prev.players, player] }));
     setActivePlayerId(player.id);
@@ -541,7 +543,7 @@ export const Planilla90: React.FC<Planilla90Props> = ({
       <div className="flex-1 min-h-0 flex gap-1 p-1 relative">
         <div className="flex-1 min-w-0 min-h-0 flex flex-col">
           {/* Título de la planilla */}
-          <div className="flex-shrink-0 flex items-stretch border-[3px] border-b-0 border-black bg-white" style={{ fontSize: 'clamp(13px, 2.8vh, 32px)' }}>
+          <div className="flex-shrink-0 flex items-stretch border-[3px] border-b-0 border-black bg-white" style={{ fontSize: 'clamp(14px, 3.2vh, 38px)' }}>
             <div className="flex items-center px-2 bg-black text-yellow-300 font-black whitespace-nowrap">
               {fmtMoney(sheet.baseCost)} X {fmtMoney(sheet.basePrize)}
             </div>
@@ -570,7 +572,7 @@ export const Planilla90: React.FC<Planilla90Props> = ({
             />
           </div>
 
-          <div style={{ height: 'clamp(84px, 14vh, 170px)' }} className="flex-shrink-0 flex">
+          <div style={{ height: 'clamp(92px, 15vh, 190px)' }} className="flex-shrink-0 flex">
             <Planilla90SummaryBar
               summaries={summaries}
               selectedPlayerId={activePlayerId}
