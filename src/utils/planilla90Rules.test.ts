@@ -3,6 +3,8 @@ import type { BingoSheetData } from '../types';
 import {
   calculatePlanilla90Financials,
   clearPlanilla90Cells,
+  deriveSequenceFromMarks,
+  togglePlanilla90Mark,
   createDefaultPlanilla90,
   getFirstCompletedRow,
   getFirstEmptySeqSlot,
@@ -151,5 +153,41 @@ describe('planilla 90: premios', () => {
     expect(next.columns[0].cells[0].playerName).toBeUndefined();
     expect(next.players[0].paid).toBe(false);
     expect(clearPlanilla90Cells(s, false).players).toHaveLength(0);
+  });
+});
+
+describe('planilla 90: números subrayados', () => {
+  const all = { pf: true, ambo: true, bingo: true };
+
+  test('P.F, ambo y bingo salen del orden de las marcas', () => {
+    // 35 (fila 5) primero; luego fila 7 completa sus 2 y 3 números
+    expect(deriveSequenceFromMarks([35, 7, 37, 67], all)).toEqual({ pf: 5, ambo: 7, bingo: 7 });
+    expect(deriveSequenceFromMarks([35], all)).toEqual({ pf: 5 });
+    expect(deriveSequenceFromMarks([35, 65], { pf: false, ambo: true, bingo: true })).toEqual({ ambo: 5 });
+    expect(deriveSequenceFromMarks([], all)).toEqual({});
+  });
+
+  test('marcar anota la secuencia de la partida en curso y desmarcar la quita', () => {
+    let s = createDefaultPlanilla90(); // P.F apagado por defecto
+    s.pfEnabled = true;
+    s.customSeqEntries = { 1: { bingo: 9 } };
+    s = togglePlanilla90Mark(s, 32);
+    expect(s.activeSeqSlot).toBe(2);
+    expect(s.customSeqEntries?.[2]).toEqual({ pf: 2 });
+    s = togglePlanilla90Mark(s, 62);
+    s = togglePlanilla90Mark(s, 2);
+    expect(s.customSeqEntries?.[2]).toEqual({ pf: 2, ambo: 2, bingo: 2 });
+    s = togglePlanilla90Mark(s, 2);
+    expect(s.customSeqEntries?.[2]).toEqual({ pf: 2, ambo: 2 });
+    s = togglePlanilla90Mark(togglePlanilla90Mark(s, 32), 62);
+    expect(s.markedNumbers).toEqual([]);
+    expect(s.customSeqEntries?.[2]).toBeUndefined();
+    expect(s.activeSeqSlot).toBeUndefined();
+    expect(s.customSeqEntries?.[1]).toEqual({ bingo: 9 });
+  });
+
+  test('nueva partida borra las marcas', () => {
+    const s = togglePlanilla90Mark(createDefaultPlanilla90(), 10);
+    expect(clearPlanilla90Cells(s, true).markedNumbers).toEqual([]);
   });
 });
