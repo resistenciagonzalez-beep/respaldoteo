@@ -23,9 +23,12 @@ interface Planilla90PanelProps {
   summaries: Planilla90PlayerSummary[];
   activePlayerId: string | null;
   onSelectPlayer: (id: string | null) => void;
-  onAddPlayer: (name: string, color?: string) => void;
+  onAddPlayer: (name: string, color?: string, textColor?: string) => void;
   onDeletePlayer: (id: string) => void;
   onSetPlayerColor: (id: string, color: string) => void;
+  onSetPlayerTextColor: (id: string, textColor: string) => void;
+  /** Flechita para ocultar el panel */
+  onHide?: () => void;
   onMismos: (player: BingoSheetPlayer) => void;
   onMismosAll: () => void;
   onFillColumn: (columnIndex: number) => void;
@@ -40,6 +43,26 @@ interface Planilla90PanelProps {
   onClearWon: (id: string) => void;
 }
 
+/** Colores para la letra de los nombres en las casillas. */
+const TEXT_COLORS: { hex: string; name: string }[] = [
+  { hex: '#000000', name: 'Negro' },
+  { hex: '#ffffff', name: 'Blanco' },
+  { hex: '#475569', name: 'Gris' },
+  { hex: '#dc2626', name: 'Rojo' },
+  { hex: '#ea580c', name: 'Naranja' },
+  { hex: '#facc15', name: 'Amarillo' },
+  { hex: '#16a34a', name: 'Verde' },
+  { hex: '#0d9488', name: 'Turquesa' },
+  { hex: '#2563eb', name: 'Azul' },
+  { hex: '#1e3a8a', name: 'Azul marino' },
+  { hex: '#7c3aed', name: 'Morado' },
+  { hex: '#db2777', name: 'Rosado' },
+  { hex: '#78350f', name: 'Café' },
+  { hex: '#be123c', name: 'Vino' },
+  { hex: '#65a30d', name: 'Lima' },
+  { hex: '#0891b2', name: 'Celeste' },
+];
+
 const btn = 'inline-flex items-center justify-center gap-1 rounded-lg font-black text-[10px] px-1.5 py-0.5 border transition-all active:scale-95 cursor-pointer';
 
 export const Planilla90Panel: React.FC<Planilla90PanelProps> = (props) => {
@@ -49,14 +72,16 @@ export const Planilla90Panel: React.FC<Planilla90PanelProps> = (props) => {
   const [colorFor, setColorFor] = useState<string | null>(null);
   // Color elegido en la paleta para el próximo jugador nuevo (si no hay jugador seleccionado)
   const [newColor, setNewColor] = useState<string | null>(null);
+  const [newTextColor, setNewTextColor] = useState<string | null>(null);
   const activePlayer = players.find((p) => p.id === activePlayerId) || null;
 
   const submitPlayer = () => {
     const name = newName.trim();
     if (!name) return;
-    props.onAddPlayer(name, newColor || undefined);
+    props.onAddPlayer(name, newColor || undefined, newTextColor || undefined);
     setNewName('');
     setNewColor(null);
+    setNewTextColor(null);
   };
 
   // Paleta siempre visible: pinta al jugador seleccionado, o guarda el color para el próximo jugador nuevo
@@ -65,6 +90,14 @@ export const Planilla90Panel: React.FC<Planilla90PanelProps> = (props) => {
     else setNewColor(hex === newColor ? null : hex);
   };
   const currentPaletteColor = (activePlayer ? activePlayer.color : newColor || '').toLowerCase();
+
+  // Paleta de color de letra: igual, para el jugador elegido o el próximo jugador nuevo
+  const pickTextColor = (hex: string) => {
+    if (activePlayer) props.onSetPlayerTextColor(activePlayer.id, hex);
+    else setNewTextColor(hex === newTextColor ? null : hex);
+  };
+  const currentTextColor = (activePlayer ? activePlayer.textColor || '#000000' : newTextColor || '').toLowerCase();
+  const previewBg = (activePlayer ? activePlayer.color : newColor) || '#ffffff';
 
   const tabBtn = (id: PanelTab, label: string, Icon: typeof Users) => (
     <button
@@ -82,6 +115,16 @@ export const Planilla90Panel: React.FC<Planilla90PanelProps> = (props) => {
   return (
     <aside className="no-print h-full min-h-0 flex flex-col bg-[#fffaf5] border-[3px] border-black rounded-none overflow-hidden">
       <div className="flex gap-1 p-1 bg-orange-100 border-b-2 border-black flex-shrink-0">
+        {props.onHide && (
+          <button
+            type="button"
+            onClick={props.onHide}
+            className="flex-shrink-0 w-6 flex items-center justify-center rounded-lg bg-black text-yellow-300 font-black text-xs cursor-pointer hover:bg-zinc-800"
+            title="Ocultar el panel"
+          >
+            ▶
+          </button>
+        )}
         {tabBtn('players', 'Jugadores', Users)}
         {tabBtn('columns', 'Columnas', Grid)}
         {tabBtn('rates', 'Tarifas', DollarSign)}
@@ -127,6 +170,35 @@ export const Planilla90Panel: React.FC<Planilla90PanelProps> = (props) => {
                     style={{ backgroundColor: c.hex }}
                     title={c.name}
                   />
+                ))}
+              </div>
+            </div>
+            <div className="rounded-lg border-2 border-slate-200 bg-white p-1">
+              <div className="flex items-center gap-1 mb-1">
+                <span
+                  className="px-1 rounded border-2 border-black flex-shrink-0 text-[10px] font-black leading-tight"
+                  style={{ backgroundColor: previewBg, color: currentTextColor || '#000000' }}
+                >
+                  Aa
+                </span>
+                <span className="text-[10px] font-black text-slate-700 leading-tight truncate">
+                  {activePlayer ? `Letra de ${activePlayer.name}` : newTextColor ? 'Letra del próximo jugador' : 'Color de letra'}
+                </span>
+              </div>
+              <div className="grid grid-cols-8 gap-0.5">
+                {TEXT_COLORS.map((c) => (
+                  <button
+                    key={c.hex}
+                    type="button"
+                    onClick={() => pickTextColor(c.hex)}
+                    className={`h-4 rounded-sm cursor-pointer flex items-center justify-center text-[8px] font-black ${
+                      currentTextColor === c.hex.toLowerCase() ? 'ring-2 ring-black ring-offset-1' : 'border border-black/40'
+                    }`}
+                    style={{ backgroundColor: c.hex, color: c.hex === '#ffffff' || c.hex === '#facc15' ? '#000' : '#fff' }}
+                    title={c.name}
+                  >
+                    A
+                  </button>
                 ))}
               </div>
             </div>

@@ -413,7 +413,7 @@ export const Planilla90: React.FC<Planilla90Props> = ({
     }));
 
   // ---------- Jugadores ----------
-  const handleAddPlayer = (rawName: string, chosenColor?: string) => {
+  const handleAddPlayer = (rawName: string, chosenColor?: string, chosenTextColor?: string) => {
     const name = sanitizePlayerName(rawName).toUpperCase();
     if (!name) return;
     const key = getPlayerKey(undefined, name);
@@ -431,7 +431,7 @@ export const Planilla90: React.FC<Planilla90Props> = ({
       id: `p90_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
       name,
       color,
-      textColor: chosenColor ? getContrastTextColor(chosenColor) : spec.text,
+      textColor: chosenTextColor || (chosenColor ? getContrastTextColor(chosenColor) : spec.text),
     };
     update((prev) => ({ ...prev, players: [...prev.players, player] }));
     setActivePlayerId(player.id);
@@ -480,6 +480,26 @@ export const Planilla90: React.FC<Planilla90Props> = ({
         columns: prev.columns.map((col) => ({
           ...col,
           cells: col.cells.map((c) => ((c.playerId || c.playerName) && getPlayerKey(c.playerId, c.playerName) === key ? { ...c, color, textColor } : c)),
+        })),
+      };
+    });
+  };
+
+  /** Cambia solo el color de la letra del jugador (en la lista y en todas sus casillas). */
+  const handleSetPlayerTextColor = (id: string, textColor: string) => {
+    const p = players.find((x) => x.id === id);
+    if (!p) return;
+    const key = getPlayerKey(p.id, p.name);
+    update((prev) => {
+      const inList = prev.players.some((x) => getPlayerKey(x.id, x.name) === key);
+      return {
+        ...prev,
+        players: inList
+          ? prev.players.map((x) => (getPlayerKey(x.id, x.name) === key ? { ...x, textColor } : x))
+          : [...prev.players, { ...p, textColor }],
+        columns: prev.columns.map((col) => ({
+          ...col,
+          cells: col.cells.map((c) => ((c.playerId || c.playerName) && getPlayerKey(c.playerId, c.playerName) === key ? { ...c, textColor } : c)),
         })),
       };
     });
@@ -579,7 +599,7 @@ export const Planilla90: React.FC<Planilla90Props> = ({
         <button
           type="button"
           onClick={() => setToolbarOpen(true)}
-          className="no-print fixed top-1 right-1 z-40 px-2 py-0.5 rounded-md border-2 border-black bg-orange-500 text-white text-[10px] font-black shadow-lg opacity-60 hover:opacity-100 cursor-pointer"
+          className="no-print fixed bottom-1 left-1 z-40 px-2 py-0.5 rounded-md border-2 border-black bg-orange-500 text-white text-[10px] font-black shadow-lg opacity-60 hover:opacity-100 cursor-pointer"
           title="Mostrar los botones de arriba"
         >
           ▼ BOTONES
@@ -732,6 +752,8 @@ export const Planilla90: React.FC<Planilla90Props> = ({
               onAddPlayer={handleAddPlayer}
               onDeletePlayer={handleDeletePlayer}
               onSetPlayerColor={handleSetPlayerColor}
+              onSetPlayerTextColor={handleSetPlayerTextColor}
+              onHide={() => setPanelOpen(false)}
               onMismos={(p) => runMismos(p)}
               onMismosAll={() => runMismos()}
               onFillColumn={handleFillColumn}
