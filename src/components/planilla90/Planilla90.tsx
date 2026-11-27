@@ -599,7 +599,10 @@ export const Planilla90: React.FC<Planilla90Props> = ({
         <button
           type="button"
           onClick={() => setToolbarOpen(true)}
-          className="no-print fixed bottom-1 left-1 z-40 px-2 py-0.5 rounded-md border-2 border-black bg-orange-500 text-white text-[10px] font-black shadow-lg opacity-60 hover:opacity-100 cursor-pointer"
+          className={`no-print fixed top-1 z-40 px-2 py-0.5 rounded-md border-2 border-black bg-orange-500 text-white text-[10px] font-black shadow-lg opacity-60 hover:opacity-100 cursor-pointer ${
+            // Arriba a la derecha, pero sin tapar el panel ni la tira "◀ PANEL"
+            panelOpen ? 'right-8 min-[900px]:right-[232px]' : 'right-8'
+          }`}
           title="Mostrar los botones de arriba"
         >
           ▼ BOTONES
