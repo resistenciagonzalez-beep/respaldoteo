@@ -518,10 +518,21 @@ export const Planilla90: React.FC<Planilla90Props> = ({
       baseCost: sheet.baseCost,
       basePrize: sheet.basePrize,
     });
+    // La planilla 90 admite hasta 16 columnas: lo que no quepa se avisa en vez de perderse sin decir nada
+    const sinEspacio: string[] = [];
+    result.updatedColumns.slice(PLANILLA90_MAX_COLUMNS).forEach((col) => {
+      col.cells.forEach((c, idx) => {
+        if (c && (c.playerId || c.playerName)) sinEspacio.push(`${c.playerName || 'Jugador'} ${c.rowNumber || idx + 1}`);
+      });
+    });
     if (result.success && (result.totalAssigned > 0 || result.newPlayersAdded > 0)) {
       update((prev) => normalizePlanilla90({ ...prev, columns: result.updatedColumns, players: result.updatedPlayers }));
     }
-    notify(result.message);
+    notify(
+      sinEspacio.length > 0
+        ? `${result.message} No cupieron (máximo ${PLANILLA90_MAX_COLUMNS} columnas): ${sinEspacio.join(', ')}.`
+        : result.message
+    );
   };
 
   const handleMarkPaid = (id: string) => {
