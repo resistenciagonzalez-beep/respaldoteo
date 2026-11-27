@@ -40,7 +40,7 @@ interface Planilla90PanelProps {
   onClearWon: (id: string) => void;
 }
 
-const btn = 'inline-flex items-center justify-center gap-1 rounded-lg font-black text-[11px] px-2 py-1 border transition-all active:scale-95 cursor-pointer';
+const btn = 'inline-flex items-center justify-center gap-1 rounded-lg font-black text-[10px] px-1.5 py-0.5 border transition-all active:scale-95 cursor-pointer';
 
 export const Planilla90Panel: React.FC<Planilla90PanelProps> = (props) => {
   const { sheet, players, summaries, activePlayerId } = props;
@@ -59,11 +59,11 @@ export const Planilla90Panel: React.FC<Planilla90PanelProps> = (props) => {
     <button
       type="button"
       onClick={() => setTab(id)}
-      className={`flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg text-[11px] font-black cursor-pointer ${
+      className={`flex-1 flex items-center justify-center gap-0.5 py-1 rounded-lg text-[10px] font-black cursor-pointer ${
         tab === id ? 'bg-orange-500 text-white' : 'text-orange-950 hover:bg-orange-200/70'
       }`}
     >
-      <Icon className="w-3.5 h-3.5" />
+      <Icon className="w-3 h-3" />
       {label}
     </button>
   );
@@ -76,7 +76,7 @@ export const Planilla90Panel: React.FC<Planilla90PanelProps> = (props) => {
         {tabBtn('rates', 'Tarifas', DollarSign)}
       </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto p-2 space-y-2">
+      <div className="flex-1 min-h-0 overflow-y-auto p-1.5 space-y-1.5">
         {tab === 'players' && (
           <>
             <div className="flex gap-1">
