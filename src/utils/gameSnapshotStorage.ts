@@ -10,6 +10,7 @@ import {
 } from '../types';
 import { getBingo75Letter } from './ballColors';
 import { safeSetItem, safeGetItem } from './safeStorage';
+import { calculatePlanilla90Financials, isPlanilla90Snapshot } from './planilla90Rules';
 import {
   getOperatorStorageKey,
   isGameOfOperator,
@@ -96,13 +97,13 @@ export function getPreviousGameSheet75(user?: AppUser | null): BingoSheetData | 
     const gallery = getSavedGamesGallery();
     if (user) {
       for (const g of gallery) {
-        if (isGameOfOperator(g, user) && g.sheet75Snapshot && hasAssignedCells75(g.sheet75Snapshot)) {
+        if (isGameOfOperator(g, user) && g.sheet75Snapshot && !isPlanilla90Snapshot(g.sheet75Snapshot) && hasAssignedCells75(g.sheet75Snapshot)) {
           return g.sheet75Snapshot;
         }
       }
     }
     for (const g of gallery) {
-      if (g.sheet75Snapshot && hasAssignedCells75(g.sheet75Snapshot)) {
+      if (g.sheet75Snapshot && !isPlanilla90Snapshot(g.sheet75Snapshot) && hasAssignedCells75(g.sheet75Snapshot)) {
         return g.sheet75Snapshot;
       }
     }
@@ -518,6 +519,8 @@ export function buildCompleteGameSequenceItem(params: {
   drawnBallsPlayed: number[];
   sheet75Override?: BingoSheetData | null;
   sheet90Override?: Traditional90SheetData | null;
+  /** Planilla 90 nueva (formato por columnas). Si viene, la partida 90 se guarda con este formato. */
+  planilla90Override?: BingoSheetData | null;
   customCollected?: number;
   customPrizes?: number;
   operatorUid?: string;
@@ -552,6 +555,7 @@ export function buildCompleteGameSequenceItem(params: {
     drawnBallsPlayed,
     sheet75Override,
     sheet90Override,
+    planilla90Override,
     operatorUid,
     operatorName,
     operatorEmail,
@@ -607,7 +611,21 @@ export function buildCompleteGameSequenceItem(params: {
       sheet75Snapshot.customSeqEntries = sequenceSnapshot.customSeqEntries;
     }
   }
-  if (sheetType === 'traditional-90' || mode === '90') {
+  const isNew90 = (sheetType === 'traditional-90' || mode === '90') && isPlanilla90Snapshot(planilla90Override);
+  if (isNew90 && planilla90Override) {
+    // Planilla 90 nueva: se guarda como planilla por columnas (sheet75Snapshot con layout 'planilla90')
+    sheet75Snapshot = JSON.parse(JSON.stringify(planilla90Override)) as BingoSheetData;
+    const fin = calculatePlanilla90Financials(sheet75Snapshot, rowLeader);
+    totalCollected = params.customCollected ?? fin.totalCollected;
+    totalPrizesPaid = params.customPrizes ?? fin.totalPrizesPaid;
+    netProfit = totalCollected - totalPrizesPaid;
+    if (playerSummarySnapshot && playerSummarySnapshot.length > 0) {
+      sheet75Snapshot.playerSummaryList = playerSummarySnapshot;
+    }
+    if (sequenceSnapshot?.customSeqEntries) {
+      sheet75Snapshot.customSeqEntries = sequenceSnapshot.customSeqEntries;
+    }
+  } else if (sheetType === 'traditional-90' || mode === '90') {
     sheet90Snapshot = sheet90Override || getStoredSheet90Snapshot() || createDefaultSheet90();
     const fin = calculateSheet90Financials(sheet90Snapshot || null, tableNumber);
     totalCollected = params.customCollected ?? fin.totalCollected;
