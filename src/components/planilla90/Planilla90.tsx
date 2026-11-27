@@ -86,7 +86,7 @@ const MAX_UNDO = 30;
 const UI_KEY = 'bingo_planilla90_ui_v1';
 
 /** Lee si el panel o la barra estaban visibles la última vez (null = sin dato). */
-function readUiFlag(name: 'panel' | 'bar'): boolean | null {
+function readUiFlag(name: 'panel' | 'bar' | 'toolbar'): boolean | null {
   try {
     const raw = safeGetItem(UI_KEY);
     const obj = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
@@ -96,7 +96,7 @@ function readUiFlag(name: 'panel' | 'bar'): boolean | null {
   }
 }
 
-function writeUiFlag(name: 'panel' | 'bar', value: boolean): void {
+function writeUiFlag(name: 'panel' | 'bar' | 'toolbar', value: boolean): void {
   try {
     const raw = safeGetItem(UI_KEY);
     const obj = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
@@ -154,6 +154,8 @@ export const Planilla90: React.FC<Planilla90Props> = ({
     return typeof window === 'undefined' || window.innerWidth >= 900;
   });
   const [barOpen, setBarOpen] = useState<boolean>(() => readUiFlag('bar') ?? true);
+  const [toolbarOpen, setToolbarOpen] = useState<boolean>(() => readUiFlag('toolbar') ?? true);
+  useEffect(() => writeUiFlag('toolbar', toolbarOpen), [toolbarOpen]);
   useEffect(() => writeUiFlag('panel', panelOpen), [panelOpen]);
   useEffect(() => writeUiFlag('bar', barOpen), [barOpen]);
   const [toast, setToast] = useState<string | null>(null);
@@ -540,7 +542,18 @@ export const Planilla90: React.FC<Planilla90Props> = ({
 
   return (
     <div className="fixed inset-0 z-30 flex flex-col bg-[#fffaf5] overflow-hidden" style={{ height: '100dvh' }}>
-      {/* Barra de botones compacta */}
+      {/* Barra de botones compacta (se puede ocultar) */}
+      {!toolbarOpen && (
+        <button
+          type="button"
+          onClick={() => setToolbarOpen(true)}
+          className="no-print fixed top-1 right-1 z-40 px-2 py-0.5 rounded-md border-2 border-black bg-orange-500 text-white text-[10px] font-black shadow-lg opacity-60 hover:opacity-100 cursor-pointer"
+          title="Mostrar los botones de arriba"
+        >
+          ▼ BOTONES
+        </button>
+      )}
+      {toolbarOpen && (
       <div className="no-print flex-shrink-0 flex items-center gap-1 px-1 py-1 bg-[#fffaf5] border-b border-orange-200 overflow-x-auto">
         <button type="button" onClick={onBackToGame} className={`${tb} bg-orange-100 text-orange-950 border-orange-300`} title="Volver al bolillero">
           <ArrowLeft className="w-3.5 h-3.5" /> Bolillero
@@ -599,25 +612,31 @@ export const Planilla90: React.FC<Planilla90Props> = ({
         >
           <Settings className="w-3.5 h-3.5" /> Panel
         </button>
+        <button
+          type="button"
+          onClick={() => setToolbarOpen(false)}
+          className={`${tb} bg-black text-yellow-300 border-black`}
+          title="Ocultar esta fila de botones"
+        >
+          <EyeOff className="w-3.5 h-3.5" /> Ocultar
+        </button>
       </div>
+      )}
 
       {/* Planilla + panel */}
       <div className="flex-1 min-h-0 flex gap-1 p-1 relative">
         <div className="flex-1 min-w-0 min-h-0 flex flex-col">
-          {/* Título de la planilla */}
+          {/* Encabezado: premios a la izquierda y el título centrado en el resto */}
           <div className="flex-shrink-0 flex items-stretch border-[3px] border-b-0 border-black bg-white" style={{ fontSize: 'clamp(14px, 3.2vh, 38px)' }}>
-            <div className="flex items-center px-2 bg-black text-yellow-300 font-black whitespace-nowrap">
-              {fmtMoney(sheet.baseCost)} X {fmtMoney(sheet.basePrize)}
-            </div>
-            <div className="flex-1 min-w-0 flex items-center justify-center px-2 font-black uppercase text-black truncate">
-              {sheet.title}
-            </div>
-            <div className="flex items-center gap-2 px-2 bg-[#facc15] font-black text-black whitespace-nowrap" style={{ fontSize: '0.8em' }}>
+            <div className="flex items-center gap-[0.5em] px-2 bg-[#facc15] font-black text-black whitespace-nowrap" style={{ fontSize: '0.8em' }}>
               <span>GANA:</span>
               {pfOn && <span>P.F {fmtMoney(sheet.basePfPrize)}</span>}
               {amboOn && <span>AMBO {fmtMoney(sheet.baseAmboPrize)}</span>}
               {sheet.bingoEnabled !== false && <span>BINGO {fmtMoney(sheet.basePrize)}</span>}
               <span className="px-1.5 rounded bg-[#581c87] text-white">{lines} LÍN</span>
+            </div>
+            <div className="flex-1 min-w-0 flex items-center justify-center px-2 font-black uppercase text-black truncate">
+              {sheet.title}
             </div>
           </div>
 
