@@ -52,7 +52,7 @@ import { SheetBackgroundSettings } from './SheetBackgroundSettings';
 import { SHEET_BACKGROUND_PRESETS } from '../utils/sheetBackgroundPresets';
 import { GameSequenceBar } from './GameSequenceBar';
 import { BingoWinningRowBanner } from './BingoWinningRowBanner';
-import { BingoTraditional90Sheet } from './BingoTraditional90Sheet';
+import { Planilla90 } from './planilla90/Planilla90';
 import { GameSheetSnapshotModal } from './GameSheetSnapshotModal';
 import { SyncStatusIndicator } from './SyncStatusIndicator';
 import { FLUORESCENT_TEXT_COLORS } from '../utils/playerColors';
@@ -196,6 +196,8 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
   currentMatchBingoRow = null,
   gameObjectives,
   onToggleObjective,
+  isFullscreen,
+  onToggleFullscreen,
 }) => {
   // Sheet type selector: 15-row Multipliers OR Traditional 90 Triples (from photo)
   const isAdmin = currentUser?.role === 'admin';
@@ -2502,6 +2504,27 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
     }
   }, [onSaveCurrentGame, sheet, playerSummaryList, customSeqEntries, notify]);
 
+  // Planilla 90 nueva: pantalla independiente (no comparte nada visual con la Planilla 75)
+  if (selectedSheetType === 'traditional-90') {
+    return (
+      <Planilla90
+        currentUser={currentUser}
+        isAdmin={isAdmin}
+        drawnBalls={drawnBalls}
+        currentMatchRound={currentMatchRound}
+        savedGamesCount={savedGamesCount}
+        isFullscreen={isFullscreen}
+        onBackToGame={onBackToGame}
+        onSwitchTo75={isAdmin ? () => handleSelectSheetType('multipliers-15') : undefined}
+        onOpenAdmin={onOpenAdmin}
+        onSaveCurrentGame={onSaveCurrentGame}
+        onStartNewGame={onStartNewGame}
+        onOpenSavedGamesGallery={onOpenSavedGamesGallery}
+        onToggleFullscreen={onToggleFullscreen}
+      />
+    );
+  }
+
   return (
     <div
       className="min-h-screen flex flex-col font-sans selection:bg-orange-500 selection:text-white"
@@ -3260,37 +3283,7 @@ export const BingoSheetBuilder: React.FC<BingoSheetBuilderProps> = ({
       )}
 
       {/* Main Content Area */}
-      {selectedSheetType === 'traditional-90' ? (
-        /* TRADITIONAL 90-BALL DUAL/MULTI TABLES FORMAT WITH INTEGRATED BOLILLERO 90 */
-        <div className={`flex-1 w-full max-w-[1700px] mx-auto ${areTopNavsHidden ? 'p-1' : 'p-2 sm:p-3'} flex flex-col items-center`}>
-          <BingoTraditional90Sheet
-            drawnBalls={drawnBalls}
-            players={sheet.players}
-            onUpdatePlayers={(newPlayers) => setSheet((prev) => ({ ...prev, players: newPlayers }))}
-            currentUser={currentUser}
-            onStopBolillero={onStopBolillero}
-            onBingoCompleted={onBingoCompleted}
-            autoHighlightDrawn={autoHighlightDrawn}
-            onToggleAutoHighlightDrawn={onToggleAutoHighlightDrawn}
-            currentBall={currentBall}
-            onDrawBall={onDrawBall}
-            isPlaying={isPlaying}
-            onTogglePlay={onTogglePlay}
-            onResetGame={onResetGame}
-            settings={settings}
-            onUpdateSettings={onUpdateSettings}
-            gameSequence90={gameSequence90}
-            onOpenGameSnapshot={onOpenGameSnapshot}
-            onClearSequence90={onClearSequence90}
-            totalBalls={totalBalls}
-            areBuilderHeadersHidden={areTopNavsHidden}
-            onToggleBuilderHeaders={() => setAreTopNavsHidden((prev) => !prev)}
-            onStartNewGame={onStartNewGame}
-            onOpenSavedGamesGallery={onOpenSavedGamesGallery}
-            savedGamesCount={savedGamesCount}
-          />
-        </div>
-      ) : (
+      {selectedSheetType !== 'traditional-90' && (
         /* OFFICIAL 1-15 MULTIPLIERS FORMAT */
         <div
           className={`flex-1 w-full ${
