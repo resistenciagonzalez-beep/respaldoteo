@@ -66,10 +66,11 @@ export const Planilla90Grid: React.FC<Planilla90GridProps> = ({
     return () => ro.disconnect();
   }, [fill]);
 
-  const fontPx = Math.round(Math.min(30, Math.max(9, rowPx * 0.66)));
+  // Letra grande: casi todo el alto de la fila (máx. 40 px)
+  const fontPx = Math.round(Math.min(40, Math.max(10, rowPx * 0.8)));
   const activeSeq = SEQ_FIELDS.filter((f) => (f.enabledKey === 'bingoEnabled' ? sheet.bingoEnabled !== false : Boolean(sheet[f.enabledKey])));
-  const seqWidth = `${Math.max(1, activeSeq.length) * 2.7}em`;
-  const gridCols = `${seqWidth} 7.4em repeat(${sheet.columns.length}, minmax(0, 1fr))`;
+  const seqWidth = `${Math.max(1, activeSeq.length) * 2.4}em`;
+  const gridCols = `${seqWidth} 6.6em repeat(${sheet.columns.length}, minmax(0, 1fr))`;
   const entries = sheet.customSeqEntries || {};
   const prizeOf = (field: Planilla90SeqField) =>
     field === 'pf' ? sheet.basePfPrize : field === 'ambo' ? sheet.baseAmboPrize : sheet.basePrize;
@@ -104,7 +105,7 @@ export const Planilla90Grid: React.FC<Planilla90GridProps> = ({
         {sheet.columns.map((col, cIdx) => {
           const mult = Number(col.multiplier) || 1;
           const content = (
-            <span className="font-black text-black leading-none whitespace-nowrap" style={{ fontSize: `min(1.05em, ${mult >= 4 ? 15 : 17}cqw)` }}>
+            <span className="font-black text-black leading-none whitespace-nowrap" style={{ fontSize: `min(1.1em, ${mult >= 4 ? 16 : 19}cqw)` }}>
               {getMultiplierLabel(mult)}
             </span>
           );
@@ -189,8 +190,8 @@ export const Planilla90Grid: React.FC<Planilla90GridProps> = ({
                   return (
                     <span
                       key={n}
-                      className={`leading-none ${drawn ? 'text-white bg-red-600 rounded px-[0.12em]' : 'text-black'}`}
-                      style={{ fontSize: '0.95em' }}
+                      className={`leading-none ${drawn ? 'text-white bg-red-600 rounded px-[0.1em]' : 'text-black'}`}
+                      style={{ fontSize: '1em', fontWeight: 900 }}
                     >
                       {n}
                     </span>
@@ -222,7 +223,7 @@ export const Planilla90Grid: React.FC<Planilla90GridProps> = ({
                 const label = hasPlayer ? (
                   <span
                     className="font-black uppercase leading-none whitespace-nowrap px-[0.1em]"
-                    style={{ color: cell?.textColor || '#000', fontSize: `min(0.95em, ${Math.floor(170 / len)}cqw)` }}
+                    style={{ color: cell?.textColor || '#000', fontSize: `min(1.05em, ${Math.floor(185 / len)}cqw)`, fontWeight: 900 }}
                   >
                     {name}
                   </span>
