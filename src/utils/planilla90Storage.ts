@@ -64,9 +64,12 @@ export function savePreviousPlanilla90(sheet: BingoSheetData): void {
 
 /**
  * Planilla de la partida anterior para el botón "Mismos":
- * primero la última partida 90 guardada de esta operadora (formato nuevo), si no, la copia local.
+ * primero la copia local que se guarda al empezar cada partida nueva (siempre es la inmediatamente anterior,
+ * aunque no se haya guardado en la galería); si no existe, la última partida 90 guardada de esta operadora.
  */
 export function getPreviousPlanilla90(user?: AppUser | null, currentRound?: number): BingoSheetData | null {
+  const local = readJson(STORAGE_KEY_PLANILLA90_PREVIOUS);
+  if (local && isPlanilla90Snapshot(local) && hasAssignedCells(local as BingoSheetData)) return normalizePlanilla90(local);
   try {
     const today = getCurrentLocalDateKey();
     const found = getSavedGamesGallery().find((g) => {
@@ -82,8 +85,7 @@ export function getPreviousPlanilla90(user?: AppUser | null, currentRound?: numb
   } catch (e) {
     console.warn('No se pudo buscar la partida 90 anterior', e);
   }
-  const local = readJson(STORAGE_KEY_PLANILLA90_PREVIOUS);
-  return local && isPlanilla90Snapshot(local) ? normalizePlanilla90(local) : null;
+  return null;
 }
 
 function readRecord(key: string): Record<string, number> {
