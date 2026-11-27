@@ -1,0 +1,30 @@
+// Revisión ESTRICTA de tipos para los archivos que ya están limpios.
+// Se agrega un archivo aquí cuando queda sin errores; nunca se quita.
+// GitHub la ejecuta en cada cambio (ver .github/workflows/revision.yml).
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "types": ["vite/client", "node"]
+  },
+  "include": [],
+  "files": [
+    "src/types.ts",
+    "src/utils/audio.ts",
+    "src/utils/bingoNicknames.ts",
+    "src/utils/ballColors.ts",
+    "src/utils/errorReportRules.ts",
+    "src/utils/gameNormalizer.ts",
+    "src/utils/offlinePersistenceEngine.ts",
+    "src/utils/playerColors.ts",
+    "src/utils/reportSafety.ts",
+    "src/utils/safeStorage.ts",
+    "src/utils/saveRules.ts",
+    "src/utils/security.ts",
+    "src/utils/sheet90Logic.ts",
+    "src/utils/sheetBackgroundPresets.ts",
+    "src/utils/trustedClock.ts",
+    "src/utils/userStorage.ts",
+    "tools/pngIcons.ts"
+  ]
+}
