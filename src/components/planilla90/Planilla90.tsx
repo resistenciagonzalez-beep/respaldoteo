@@ -43,6 +43,7 @@ import {
   getPlanilla90WinningRows,
   getPlayerKey,
   normalizePlanilla90,
+  togglePlanilla90Mark,
   type Planilla90Balances,
   type Planilla90PlayerSummary,
 } from '../../utils/planilla90Rules';
@@ -650,6 +651,7 @@ export const Planilla90: React.FC<Planilla90Props> = ({
               onCellClick={handleCellClick}
               onHeaderClick={handleHeaderClick}
               onSeqChange={handleSeqChange}
+              onNumberClick={(n) => update((prev) => togglePlanilla90Mark(prev, n))}
             />
           </div>
 
