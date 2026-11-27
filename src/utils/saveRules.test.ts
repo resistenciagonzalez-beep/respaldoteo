@@ -198,4 +198,9 @@ describe('Guardado: líneas jugadas', () => {
     const sheet90 = { tables: [{}, {}, {}] };
     expect(getGameLines(game({ mode: '90', sheet90Snapshot: sheet90 as never }))).toBe(90);
   });
+
+  test('90 bolas formato nuevo: suma los multiplicadores de sus columnas', () => {
+    const p90 = { layout: 'planilla90', columns: [{ multiplier: 2 }, { multiplier: 1 }, { multiplier: 5 }] };
+    expect(getGameLines(game({ mode: '90', sheet75Snapshot: p90 as never }))).toBe(8);
+  });
 });
