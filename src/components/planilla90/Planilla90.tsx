@@ -13,6 +13,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft,
   Copy,
+  Eye,
+  EyeOff,
   FolderOpen,
   Grid,
   Maximize2,
@@ -56,6 +58,7 @@ import { Planilla90Grid, type Planilla90SeqField } from './Planilla90Grid';
 import { Planilla90SummaryBar } from './Planilla90SummaryBar';
 import { Planilla90Panel, type Planilla90RateField, type Planilla90ToggleField } from './Planilla90Panel';
 import { SyncStatusIndicator } from '../SyncStatusIndicator';
+import { safeGetItem, safeSetItem } from '../../utils/safeStorage';
 
 export interface Planilla90Props {
   currentUser?: AppUser | null;
@@ -80,6 +83,29 @@ interface ResetDetail {
 }
 
 const MAX_UNDO = 30;
+const UI_KEY = 'bingo_planilla90_ui_v1';
+
+/** Lee si el panel o la barra estaban visibles la última vez (null = sin dato). */
+function readUiFlag(name: 'panel' | 'bar'): boolean | null {
+  try {
+    const raw = safeGetItem(UI_KEY);
+    const obj = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+    return typeof obj[name] === 'boolean' ? (obj[name] as boolean) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeUiFlag(name: 'panel' | 'bar', value: boolean): void {
+  try {
+    const raw = safeGetItem(UI_KEY);
+    const obj = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+    obj[name] = value;
+    safeSetItem(UI_KEY, JSON.stringify(obj));
+  } catch {
+    /* sin almacenamiento: no pasa nada */
+  }
+}
 
 /** Resumen de jugadores tal como se guarda junto con la partida. */
 function toSnapshotSummaries(list: Planilla90PlayerSummary[]): PlayerSummarySnapshotItem[] {
@@ -121,7 +147,15 @@ export const Planilla90: React.FC<Planilla90Props> = ({
   const [sheet, setSheet] = useState<BingoSheetData>(() => loadPlanilla90());
   const [balances, setBalances] = useState<Planilla90Balances>(() => loadPlanilla90Balances());
   const [activePlayerId, setActivePlayerId] = useState<string | null>(null);
-  const [panelOpen, setPanelOpen] = useState<boolean>(() => typeof window === 'undefined' || window.innerWidth >= 900);
+  // Panel y barra de ganadores se pueden ocultar; se recuerda la elección en este dispositivo
+  const [panelOpen, setPanelOpen] = useState<boolean>(() => {
+    const saved = readUiFlag('panel');
+    if (saved !== null) return saved;
+    return typeof window === 'undefined' || window.innerWidth >= 900;
+  });
+  const [barOpen, setBarOpen] = useState<boolean>(() => readUiFlag('bar') ?? true);
+  useEffect(() => writeUiFlag('panel', panelOpen), [panelOpen]);
+  useEffect(() => writeUiFlag('bar', barOpen), [barOpen]);
   const [toast, setToast] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const undoStack = useRef<BingoSheetData[]>([]);
@@ -463,6 +497,26 @@ export const Planilla90: React.FC<Planilla90Props> = ({
     notify(`${s.name}: premio entregado.`);
   };
 
+  /** Botón $0 del TOTAL: pagó lo que debía y se le entregó lo ganado (saldo en cero). */
+  const handleResetTotal = (id: string) => {
+    const s = summaries.find((x) => x.id === id);
+    if (!s) return;
+    const key = getPlayerKey(s.id, s.name);
+    update((prev) => ({
+      ...prev,
+      columns: prev.columns.map((col) => ({
+        ...col,
+        cells: col.cells.map((c) => ((c.playerId || c.playerName) && getPlayerKey(c.playerId, c.playerName) === key ? { ...c, isPaid: true } : c)),
+      })),
+    }));
+    setBalances((prev) => ({
+      won: { ...prev.won, [key]: 0 },
+      debt: { ...prev.debt, [key]: 0 },
+      offsets: { ...prev.offsets, [key]: (prev.offsets[key] || 0) + s.currentWon },
+    }));
+    notify(`${s.name}: saldo en $0.`);
+  };
+
   // ---------- Guardar ----------
   const handleSave = async () => {
     if (!onSaveCurrentGame || isSaving) return;
@@ -531,6 +585,14 @@ export const Planilla90: React.FC<Planilla90Props> = ({
         )}
         <button
           type="button"
+          onClick={() => setBarOpen((v) => !v)}
+          className={`${tb} ${barOpen ? 'bg-orange-500 text-white border-orange-600' : 'bg-white text-orange-950 border-orange-300'}`}
+          title="Mostrar u ocultar la barra de ganadores"
+        >
+          {barOpen ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />} Ganadores
+        </button>
+        <button
+          type="button"
           onClick={() => setPanelOpen((v) => !v)}
           className={`${tb} ${panelOpen ? 'bg-orange-500 text-white border-orange-600' : 'bg-white text-orange-950 border-orange-300'}`}
           title="Mostrar u ocultar el panel"
@@ -572,18 +634,41 @@ export const Planilla90: React.FC<Planilla90Props> = ({
             />
           </div>
 
-          <div style={{ height: 'clamp(92px, 15vh, 190px)' }} className="flex-shrink-0 flex">
-            <Planilla90SummaryBar
-              summaries={summaries}
-              selectedPlayerId={activePlayerId}
-              onPlayerClick={(id) => {
-                setActivePlayerId((cur) => (cur === id ? null : id));
-                setPanelOpen(true);
-              }}
-            />
-          </div>
+          {barOpen ? (
+            <div style={{ height: 'clamp(92px, 15vh, 190px)' }} className="flex-shrink-0 flex">
+              <Planilla90SummaryBar
+                summaries={summaries}
+                selectedPlayerId={activePlayerId}
+                onPlayerClick={(id) => setActivePlayerId((cur) => (cur === id ? null : id))}
+                onClearWon={handleClearWon}
+                onMarkPaid={handleMarkPaid}
+                onResetTotal={handleResetTotal}
+                onHide={() => setBarOpen(false)}
+              />
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setBarOpen(true)}
+              className="no-print flex-shrink-0 w-full py-0.5 border-[3px] border-t-0 border-black bg-black text-yellow-300 text-[11px] font-black tracking-wide cursor-pointer hover:bg-zinc-800"
+              title="Mostrar la barra de ganadores"
+            >
+              ▲ GANADORES
+            </button>
+          )}
         </div>
 
+        {!panelOpen && (
+          <button
+            type="button"
+            onClick={() => setPanelOpen(true)}
+            className="no-print flex-shrink-0 w-5 rounded-l-lg border-2 border-black bg-orange-500 text-white font-black text-[11px] cursor-pointer hover:bg-orange-600 flex items-center justify-center"
+            style={{ writingMode: 'vertical-rl' }}
+            title="Mostrar el panel"
+          >
+            ◀ PANEL
+          </button>
+        )}
         {panelOpen && (
           <div className="w-[215px] max-w-[80vw] flex-shrink-0 min-h-0 max-[899px]:absolute max-[899px]:right-1 max-[899px]:top-1 max-[899px]:bottom-1 max-[899px]:z-20 max-[899px]:shadow-2xl">
             <Planilla90Panel
