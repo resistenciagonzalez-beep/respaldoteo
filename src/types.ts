@@ -150,6 +150,7 @@ export interface BingoSheetData {
   pfEnabled?: boolean; // Paga P.F (primera ficha)
   basePfPrize?: number; // Premio P.F por X1
   activeSeqSlot?: number; // Casilla de la secuencia que corresponde a la partida en curso
+  markedNumbers?: number[]; // Números subrayados en JUEGO, en el orden en que se marcaron
 }
 
 // Work Shift / Turno of an operator
