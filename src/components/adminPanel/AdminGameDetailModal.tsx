@@ -29,6 +29,8 @@ import {
   downloadGameDirectPdf,
 } from '../../utils/exportGameReport';
 import type { GameSequenceItem } from '../../types';
+import { isPlanilla90Snapshot } from '../../utils/planilla90Rules';
+import { Planilla90SnapshotView } from '../planilla90/Planilla90SnapshotView';
 
 export interface AdminGameDetailModalProps {
   selectedGameForDetail: GameSequenceItem;
@@ -214,8 +216,9 @@ export const AdminGameDetailModal: React.FC<AdminGameDetailModalProps> = ({
           {/* Complete Card Sheet / Planilla Section */}
           {(() => {
             const isBingo90 = selectedGameForDetail.mode === '90' || selectedGameForDetail.sheetType === 'traditional-90';
+            const isNew90 = isPlanilla90Snapshot(selectedGameForDetail.sheet75Snapshot);
             const sheet75 = selectedGameForDetail.sheet75Snapshot || (!isBingo90 ? createDefaultSheet75() : null);
-            const sheet90 = selectedGameForDetail.sheet90Snapshot || (isBingo90 ? createDefaultSheet90() : null);
+            const sheet90 = isNew90 ? null : selectedGameForDetail.sheet90Snapshot || (isBingo90 ? createDefaultSheet90() : null);
 
             return (
               <div className="p-4 rounded-2xl bg-white border-2 border-orange-300 shadow-xs space-y-3">
@@ -304,7 +307,9 @@ export const AdminGameDetailModal: React.FC<AdminGameDetailModalProps> = ({
                 </div>
 
                 {/* Preview Table of the Sheet */}
-                {isBingo90 && sheet90 ? (
+                {isNew90 && sheet75 ? (
+                  <Planilla90SnapshotView game={selectedGameForDetail} snapshot={sheet75} />
+                ) : isBingo90 && sheet90 ? (
                   <div className="space-y-2">
                     <div className="flex items-center justify-between text-xs font-bold text-orange-900/80">
                       <span>Mesas de Bingo 90 Guardadas:</span>
